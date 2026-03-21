@@ -212,9 +212,17 @@ def supertrend(
             direction.iloc[i] = direction.iloc[i - 1]
 
         if direction.iloc[i] == 1:
-            supertrend_line.iloc[i] = max(lower_band.iloc[i], supertrend_line.iloc[i - 1])
+            if direction.iloc[i - 1] == -1:
+                # Direction just flipped bullish — reset to current lower band
+                supertrend_line.iloc[i] = lower_band.iloc[i]
+            else:
+                supertrend_line.iloc[i] = max(lower_band.iloc[i], supertrend_line.iloc[i - 1])
         else:
-            supertrend_line.iloc[i] = min(upper_band.iloc[i], supertrend_line.iloc[i - 1])
+            if direction.iloc[i - 1] == 1:
+                # Direction just flipped bearish — reset to current upper band
+                supertrend_line.iloc[i] = upper_band.iloc[i]
+            else:
+                supertrend_line.iloc[i] = min(upper_band.iloc[i], supertrend_line.iloc[i - 1])
 
     data["supertrend"] = supertrend_line
     data["signal"] = direction

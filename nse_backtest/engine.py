@@ -25,7 +25,8 @@ class TradeConfig:
     take_profit_pct: Optional[float] = None  # e.g., 0.15 = 15% target
     slippage_pct: float = 0.001  # 0.1% slippage assumption
     # Zerodha-specific costs (equity delivery)
-    stt_sell_pct: float = 0.001  # STT on sell side only: 0.1%
+    stt_buy_pct: float = 0.001  # STT on buy side: 0.1% (equity delivery)
+    stt_sell_pct: float = 0.001  # STT on sell side: 0.1% (equity delivery)
     stamp_duty_pct: float = 0.00015  # Stamp duty: 0.015% on buy side
     gst_pct: float = 0.18  # GST: 18% on brokerage
     sebi_pct: float = 0.000001  # SEBI turnover fee
@@ -95,21 +96,31 @@ def run_backtest(
             entry_p = current_trade.entry_price
             sl_price = entry_p * (1 - config.stop_loss_pct) if config.stop_loss_pct else 0
             tp_price = entry_p * (1 + config.take_profit_pct) if config.take_profit_pct else float('inf')
+            day_open = df["Open"].iloc[i]
             day_low = df["Low"].iloc[i]
             day_high = df["High"].iloc[i]
 
-            # SL: triggers if Low touches SL level. Exit at SL price (or Low if gap-down)
             hit_sl = config.stop_loss_pct and day_low <= sl_price
-            # TP: triggers if High touches TP level. Exit at TP price (or High if gap-up)
             hit_tp = config.take_profit_pct and day_high >= tp_price
+
+            # When both trigger on the same bar, use Open to resolve priority
+            if hit_sl and hit_tp:
+                if day_open <= sl_price:
+                    hit_tp = False  # Gap-down past SL — SL wins
+                elif day_open >= tp_price:
+                    hit_sl = False  # Gap-up past TP — TP wins
+                else:
+                    hit_tp = False  # Both triggered intraday — SL first (conservative)
 
             if hit_sl or hit_tp:
                 if hit_sl:
-                    # Exit at SL price, or at day's open if gap-down past SL
-                    exit_p = max(sl_price, day_low) * (1 - config.slippage_pct)
+                    # Gap-down: fill at Open (worse than SL). Normal: fill at SL.
+                    fill = min(sl_price, day_open) if day_open < sl_price else sl_price
+                    exit_p = fill * (1 - config.slippage_pct)
                 else:
-                    # Exit at TP price, or at day's open if gap-up past TP
-                    exit_p = min(tp_price, day_high) * (1 - config.slippage_pct)
+                    # Gap-up: fill at Open (better than TP). Normal: fill at TP.
+                    fill = max(tp_price, day_open) if day_open > tp_price else tp_price
+                    exit_p = fill * (1 - config.slippage_pct)
 
                 sc = _sell_cost(exit_p, shares, config)
                 proceeds = shares * exit_p - sc
@@ -202,10 +213,11 @@ def run_backtest(
 
 
 def _buy_cost(price: float, shares: int, config: TradeConfig) -> float:
-    """Buy-side costs: stamp duty + GST on brokerage + SEBI fee. No STT on buy."""
+    """Buy-side costs: STT + stamp duty + GST on brokerage + SEBI fee."""
     turnover = price * shares
     brokerage = config.zerodha_brokerage
-    return (turnover * config.stamp_duty_pct
+    return (turnover * config.stt_buy_pct
+            + turnover * config.stamp_duty_pct
             + brokerage * config.gst_pct
             + turnover * config.sebi_pct)
 
