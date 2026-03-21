@@ -200,10 +200,12 @@ def supertrend(
     supertrend_line = pd.Series(index=data.index, dtype=float)
     direction = pd.Series(index=data.index, dtype=int)
 
-    # Initialize: skip warmup period where ATR is NaN
+    # Initialize: skip warmup period where ATR is NaN.
+    # direction=0 maps to signal=0 (hold/no action) in the engine,
+    # ensuring no trades are opened during the indicator warmup period.
     first_valid = period
     supertrend_line.iloc[:first_valid] = np.nan
-    direction.iloc[:first_valid] = 0  # No signal during warmup
+    direction.iloc[:first_valid] = 0
 
     supertrend_line.iloc[first_valid] = upper_band.iloc[first_valid]
     direction.iloc[first_valid] = -1
