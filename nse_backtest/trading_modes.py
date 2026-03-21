@@ -338,7 +338,13 @@ def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000) -> 
     
     # 7. Monthly higher lows (accumulation pattern)
     if n >= 120:
-        month_lows = [df["Low"].iloc[i:i+20].min() for i in range(-120, 0, 20)]
+        month_lows = []
+        for start in range(-120, 0, 20):
+            end = start + 20
+            if end >= 0:
+                month_lows.append(df["Low"].iloc[start:].min())
+            else:
+                month_lows.append(df["Low"].iloc[start:end].min())
         if all(month_lows[i] <= month_lows[i+1] for i in range(len(month_lows)-1)):
             score += 10
             reasons.append("Higher monthly lows — strong accumulation pattern")

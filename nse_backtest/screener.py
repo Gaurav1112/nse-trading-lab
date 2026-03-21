@@ -377,20 +377,34 @@ def scan_supertrend_flip(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
 
     direction = pd.Series(index=df.index, dtype=int)
     st_line = pd.Series(index=df.index, dtype=float)
+    final_upper = upper.copy()
+    final_lower = lower.copy()
     direction.iloc[0] = -1
     st_line.iloc[0] = upper.iloc[0]
 
     for i in range(1, n):
-        if close.iloc[i] > upper.iloc[i - 1]:
+        prev_close = close.iloc[i - 1]
+        # Clamp bands: upper can only decrease, lower can only increase
+        if not pd.isna(final_lower.iloc[i - 1]) and prev_close >= final_lower.iloc[i - 1]:
+            final_lower.iloc[i] = max(lower.iloc[i], final_lower.iloc[i - 1])
+        else:
+            final_lower.iloc[i] = lower.iloc[i]
+        if not pd.isna(final_upper.iloc[i - 1]) and prev_close <= final_upper.iloc[i - 1]:
+            final_upper.iloc[i] = min(upper.iloc[i], final_upper.iloc[i - 1])
+        else:
+            final_upper.iloc[i] = upper.iloc[i]
+
+        if close.iloc[i] > final_upper.iloc[i]:
             direction.iloc[i] = 1
-        elif close.iloc[i] < lower.iloc[i - 1]:
+        elif close.iloc[i] < final_lower.iloc[i]:
             direction.iloc[i] = -1
         else:
             direction.iloc[i] = direction.iloc[i - 1]
+
         if direction.iloc[i] == 1:
-            st_line.iloc[i] = max(lower.iloc[i], st_line.iloc[i - 1])
+            st_line.iloc[i] = final_lower.iloc[i]
         else:
-            st_line.iloc[i] = min(upper.iloc[i], st_line.iloc[i - 1])
+            st_line.iloc[i] = final_upper.iloc[i]
 
     flipped = False
     for i in range(-3, 0):

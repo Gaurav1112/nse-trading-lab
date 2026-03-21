@@ -35,8 +35,11 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
     cur = close.iloc[-1]
     ts = tenkan_sen.iloc[-1]
     ks = kijun_sen.iloc[-1]
-    sa = senkou_a.iloc[-1]
-    sb = senkou_b_line.iloc[-1]
+    # Cloud at current bar was projected 26 periods ago (standard Ichimoku)
+    sa = senkou_a.iloc[-kijun] if n >= kijun else senkou_a.iloc[-1]
+    sb = senkou_b_line.iloc[-kijun] if n >= kijun else senkou_b_line.iloc[-1]
+    # Chikou Span: current close compared to price 26 periods ago
+    chikou_bullish = cur > close.iloc[-kijun] if n >= kijun else False
 
     # Signals
     above_cloud = cur > max(sa, sb)
@@ -63,8 +66,13 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
         score += 10
         reasons.append("Cloud is green (bullish structure)")
 
+    if chikou_bullish:
+        score += 10
+        reasons.append("Chikou Span above past price (bullish confirmation)")
+
     return {"score": min(score, 100), "reasons": reasons,
             "above_cloud": above_cloud, "tk_cross": tk_cross_bull,
+            "chikou_bullish": chikou_bullish,
             "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb}
 
 
@@ -210,9 +218,9 @@ def detect_market_regime(df: pd.DataFrame) -> dict:
     atr_avg = atr.iloc[-60:].mean() / close.iloc[-60:].mean() * 100 if n >= 60 else atr_pct
 
     # Method 4: EMA alignment
-    ema20 = close.ewm(span=20).mean().iloc[-1]
-    ema50 = close.ewm(span=50).mean().iloc[-1]
-    ema200 = close.ewm(span=200).mean().iloc[-1] if n >= 200 else ema50
+    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1] if n >= 200 else ema50
 
     # Determine regime
     high_vol = atr_pct > atr_avg * 1.5
