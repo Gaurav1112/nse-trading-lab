@@ -22,7 +22,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from nse_backtest.data import fetch_nse, fetch_multiple, NIFTY50_SYMBOLS
+from nse_backtest.data import fetch_nse, fetch_multiple, NIFTY50_SYMBOLS, NIFTY100_SYMBOLS
 from nse_backtest.strategies import STRATEGIES
 from nse_backtest.engine import run_backtest, TradeConfig
 from nse_backtest.analytics import compute_metrics, print_report, plot_results, compare_strategies
@@ -149,7 +149,7 @@ def cmd_screen(args):
     elif args.universe == "nifty50":
         symbols = NIFTY50_SYMBOLS
     elif args.universe == "nifty100":
-        symbols = NIFTY50_SYMBOLS  # Extend with Nifty Next 50 later
+        symbols = NIFTY100_SYMBOLS
     else:
         symbols = NIFTY50_SYMBOLS
 

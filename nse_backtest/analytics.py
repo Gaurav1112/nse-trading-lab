@@ -58,9 +58,10 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     std = daily_returns.std()
     sharpe = np.sqrt(252) * excess_daily.mean() / std if std > 1e-10 else 0.0
 
-    # Sortino Ratio
-    downside = daily_returns[daily_returns < 0]
-    down_std = downside.std() if len(downside) > 1 else 0
+    # Sortino Ratio (proper downside deviation: sqrt(mean(min(R - MAR, 0)^2)))
+    mar = risk_free_rate / 252
+    downside_diff = np.minimum(daily_returns - mar, 0)
+    down_std = np.sqrt(np.mean(downside_diff ** 2))
     sortino = np.sqrt(252) * excess_daily.mean() / down_std if down_std > 1e-10 else 0.0
 
     # Max Drawdown
@@ -76,7 +77,7 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
 
     # Trade metrics
     winning = [t for t in trades if t.pnl > 0]
-    losing = [t for t in trades if t.pnl <= 0]
+    losing = [t for t in trades if t.pnl < 0]
     n_trades = len(trades)
     win_rate = len(winning) / n_trades if n_trades > 0 else 0
 
@@ -113,7 +114,7 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
         "max_dd_duration_days": dd_duration,
         "total_trades": n_trades,
         "winning_trades": len(winning),
-        "losing_trades": n_trades - len(winning),
+        "losing_trades": len(losing),
         "win_rate_pct": win_rate * 100,
         "avg_win_pct": avg_win * 100,
         "avg_loss_pct": avg_loss * 100,

@@ -200,10 +200,15 @@ def supertrend(
     supertrend_line = pd.Series(index=data.index, dtype=float)
     direction = pd.Series(index=data.index, dtype=int)
 
-    supertrend_line.iloc[0] = upper_band.iloc[0]
-    direction.iloc[0] = -1
+    # Initialize: skip warmup period where ATR is NaN
+    first_valid = period
+    supertrend_line.iloc[:first_valid] = np.nan
+    direction.iloc[:first_valid] = 0  # No signal during warmup
 
-    for i in range(1, len(data)):
+    supertrend_line.iloc[first_valid] = upper_band.iloc[first_valid]
+    direction.iloc[first_valid] = -1
+
+    for i in range(first_valid + 1, len(data)):
         if data["Close"].iloc[i] > upper_band.iloc[i - 1]:
             direction.iloc[i] = 1
         elif data["Close"].iloc[i] < lower_band.iloc[i - 1]:

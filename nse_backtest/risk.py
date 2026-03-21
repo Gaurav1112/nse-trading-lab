@@ -134,10 +134,10 @@ def annualized_volatility(returns: pd.Series, trading_days: int = 252) -> float:
 
 
 def calmar_ratio(cagr_pct: float, max_drawdown_pct: float) -> float:
-    """Calmar ratio = CAGR / Max Drawdown."""
+    """Calmar ratio = CAGR / |Max Drawdown|. Preserves CAGR sign."""
     if max_drawdown_pct == 0:
         return 0
-    return abs(cagr_pct / max_drawdown_pct)
+    return cagr_pct / abs(max_drawdown_pct)
 
 
 def compute_var_cvar(equity_curve: pd.Series) -> dict:
@@ -163,7 +163,9 @@ def monthly_returns_table(equity_curve: pd.Series) -> pd.DataFrame:
     df["year"] = df.index.year
     df["month"] = df.index.month
     pivot = df.pivot_table(values="return", index="year", columns="month", aggfunc="first")
-    pivot.columns = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][:len(pivot.columns)]
+    month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+                   7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    pivot.columns = [month_names.get(c, str(c)) for c in pivot.columns]
     return pivot
 
 
