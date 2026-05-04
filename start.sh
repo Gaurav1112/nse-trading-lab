@@ -29,4 +29,25 @@ echo "  Opening http://127.0.0.1:8501 in browser..."
 echo "  Press Ctrl+C to stop"
 echo ""
 
-exec streamlit run ui.py
+# Free the port if a stale streamlit is hogging it (common cause of
+# "site can't be reached" — the new instance never binds).
+if command -v lsof >/dev/null 2>&1; then
+    PIDS=$(lsof -nP -iTCP:8501 -sTCP:LISTEN -t 2>/dev/null || true)
+    if [ -n "$PIDS" ]; then
+        echo "  Port 8501 is busy (pid=$PIDS) — releasing it..."
+        kill $PIDS 2>/dev/null || true
+        sleep 1
+    fi
+fi
+
+# Skip the first-run email prompt that blocks the server from starting.
+mkdir -p "$HOME/.streamlit"
+if [ ! -f "$HOME/.streamlit/credentials.toml" ]; then
+    printf '[general]\nemail = ""\n' > "$HOME/.streamlit/credentials.toml"
+fi
+
+exec streamlit run ui.py \
+    --server.headless=true \
+    --server.address=127.0.0.1 \
+    --server.port=8501 \
+    --browser.gatherUsageStats=false
