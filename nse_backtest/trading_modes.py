@@ -23,6 +23,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 from ta import trend, momentum, volatility, volume as ta_vol
 
+from ._logging import get_logger
+
+log = get_logger(__name__)
+
 
 # ════════════════════════════════════════════════════════════════
 #  DATA CLASSES
@@ -329,7 +333,10 @@ def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000) -> 
     
     # 6. Low volatility (stable for long-term)
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, 14).average_true_range().iloc[-1]
-    atr_pct = atr / cur * 100
+    if pd.isna(atr) or atr <= 0 or cur <= 0:
+        atr_pct = 0.0
+    else:
+        atr_pct = atr / cur * 100
     if atr_pct < 2.5:
         score += 10
         reasons.append(f"Low daily volatility ({atr_pct:.1f}%) — stable")
@@ -402,16 +409,19 @@ def analyze_intraday(df: pd.DataFrame, symbol: str, capital: float = 100000,
     
     # 2. Opening Range Breakout potential (estimate from ATR)
     atr = volatility.AverageTrueRange(high, low, close, 14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(cur * 0.02, 0.01)
     orb_range = atr * 0.4  # ORB ≈ 40% of daily ATR in first 30 min
     orb_high = cur + orb_range / 2
     orb_low = cur - orb_range / 2
-    
-    if atr / cur * 100 > 1.5:
+
+    atr_pct = (atr / cur * 100) if cur > 0 else 0.0
+    if atr_pct > 1.5:
         score += 15
-        reasons.append(f"Good intraday range (ATR {atr:.0f} = {atr/cur*100:.1f}%)")
+        reasons.append(f"Good intraday range (ATR {atr:.0f} = {atr_pct:.1f}%)")
     else:
         score += 5
-        reasons.append(f"Narrow range (ATR {atr:.0f} = {atr/cur*100:.1f}%)")
+        reasons.append(f"Narrow range (ATR {atr:.0f} = {atr_pct:.1f}%)")
     
     # 3. Volume profile (is today likely to be active?)
     if n >= 20:
@@ -449,11 +459,15 @@ def analyze_intraday(df: pd.DataFrame, symbol: str, capital: float = 100000,
     try:
         st_ind = trend.STCIndicator(close, 10, 26, 0.5)
         # Fallback: use simple supertrend logic
-    except:
-        pass
-    
+    except Exception as e:
+        log.debug("STCIndicator unavailable: %s", e)
+
     # 7. RSI for overbought/oversold timing
-    rsi = momentum.RSIIndicator(close, 14).rsi().iloc[-1]
+    rsi_series = momentum.RSIIndicator(close, 14).rsi()
+    if len(rsi_series) == 0 or pd.isna(rsi_series.iloc[-1]):
+        rsi = 50.0
+    else:
+        rsi = rsi_series.iloc[-1]
     if 40 < rsi < 65:
         score += 10
         reasons.append(f"RSI {rsi:.0f} — room to run intraday")

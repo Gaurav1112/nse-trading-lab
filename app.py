@@ -76,12 +76,14 @@ def cmd_analyze(args):
         for name, strat_func in STRATEGIES.items():
             try:
                 sd = strat_func(df)
+                if len(sd) == 0:
+                    continue
                 res = run_backtest(sd, config)
                 met = compute_metrics(res)
                 label = sd["strategy_name"].iloc[-1]
                 results.append((label, res, met))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [warn] strategy '{name}' failed: {e}")
 
         if results:
             ranked = sorted(results, key=lambda x: x[2]["sharpe_ratio"], reverse=True)

@@ -17,11 +17,20 @@ build/
 *.swo
 
 # Output files
+output/
 output/*.png
 output/*.csv
 output/*.json
 *.png
 !README_assets/*.png
+
+# Test caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
 
 # OS
 .DS_Store

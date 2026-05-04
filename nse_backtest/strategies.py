@@ -29,8 +29,10 @@ def sma_crossover(df: pd.DataFrame, fast: int = 20, slow: int = 50) -> pd.DataFr
     data["sma_slow"] = data["Close"].rolling(slow).mean()
 
     data["signal"] = 0
-    data.loc[data["sma_fast"] > data["sma_slow"], "signal"] = 1
-    data.loc[data["sma_fast"] <= data["sma_slow"], "signal"] = -1
+    fast_above = (data["sma_fast"] > data["sma_slow"]).fillna(False)
+    fast_below_eq = (data["sma_fast"] <= data["sma_slow"]).fillna(False)
+    data.loc[fast_above, "signal"] = 1
+    data.loc[fast_below_eq & ~fast_above, "signal"] = -1
 
     data["strategy_name"] = f"SMA({fast}/{slow})"
     return data
@@ -52,12 +54,11 @@ def ema_crossover_filtered(
     data["ema_trend"] = data["Close"].ewm(span=trend_period, adjust=False).mean()
 
     data["signal"] = 0
-    # Only go long when in uptrend AND fast > slow
-    long_cond = (data["ema_fast"] > data["ema_slow"]) & (
-        data["Close"] > data["ema_trend"]
-    )
+    long_cond = (
+        (data["ema_fast"] > data["ema_slow"]) & (data["Close"] > data["ema_trend"])
+    ).fillna(False)
     data.loc[long_cond, "signal"] = 1
-    data.loc[~long_cond, "signal"] = -1
+    data.loc[~long_cond & data["ema_trend"].notna(), "signal"] = -1
 
     data["strategy_name"] = f"EMA({fast}/{slow}) + Trend({trend_period})"
     return data
@@ -200,8 +201,15 @@ def supertrend(
     supertrend_line = pd.Series(index=data.index, dtype=float)
     direction = pd.Series(index=data.index, dtype=int)
 
-    supertrend_line.iloc[0] = upper_band.iloc[0]
-    direction.iloc[0] = -1
+    # Seed the line based on the very first close vs. the first hl2 band.
+    if len(data) > 0:
+        first_close = data["Close"].iloc[0]
+        if pd.notna(first_close) and first_close > hl2.iloc[0]:
+            direction.iloc[0] = 1
+            supertrend_line.iloc[0] = lower_band.iloc[0]
+        else:
+            direction.iloc[0] = -1
+            supertrend_line.iloc[0] = upper_band.iloc[0]
 
     for i in range(1, len(data)):
         if data["Close"].iloc[i] > upper_band.iloc[i - 1]:

@@ -71,7 +71,8 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
     vol_avg = vol.rolling(20).mean()
-    high_20 = df["High"].rolling(20).max()
+    # Use prior 20 bars (excluding current) so "new high" is genuinely new.
+    high_20_prior = df["High"].shift(1).rolling(20).max()
 
     score = 0
     notes = []
@@ -82,8 +83,10 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
             crossed_20ema = True
             break
 
-    broke_high = current >= high_20.iloc[-2]
-    vol_confirm = vol.iloc[-1] > 1.3 * vol_avg.iloc[-1]
+    prior_high = high_20_prior.iloc[-1]
+    broke_high = pd.notna(prior_high) and current >= prior_high
+    last_vol_avg = vol_avg.iloc[-1]
+    vol_confirm = pd.notna(last_vol_avg) and last_vol_avg > 0 and vol.iloc[-1] > 1.3 * last_vol_avg
     uptrend = ema20.iloc[-1] > ema50.iloc[-1]
 
     if not (crossed_20ema or broke_high):
@@ -97,14 +100,14 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
         notes.append("New 20-day high breakout")
     if vol_confirm:
         score += 20
-        notes.append(f"Volume {vol.iloc[-1] / vol_avg.iloc[-1]:.1f}x avg (confirmed)")
+        notes.append(f"Volume {vol.iloc[-1] / last_vol_avg:.1f}x avg (confirmed)")
     if uptrend:
         score += 15
         notes.append("Uptrend (20 EMA > 50 EMA)")
 
     adx_ind = trend.ADXIndicator(df["High"], df["Low"], close, window=14)
     adx_val = adx_ind.adx().iloc[-1]
-    if adx_val > 20:
+    if pd.notna(adx_val) and adx_val > 20:
         score += 10
         notes.append(f"ADX trend strength: {adx_val:.0f}")
 
@@ -112,11 +115,10 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
         return None
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
-    # ENTRY: Pullback to previous resistance (now support)
-    # For breakout: entry at the 20-day high level (breakout level)
-    # or at 20 EMA (pullback entry)
-    breakout_level = high_20.iloc[-2]
+    breakout_level = prior_high if pd.notna(prior_high) else current
     ema20_val = ema20.iloc[-1]
 
     if current > breakout_level * 1.02:
@@ -199,6 +201,8 @@ def scan_reversal(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
         return None
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
     # ENTRY: Near support level — 50 EMA or recent swing low
     swing_low = df["Low"].iloc[-10:].min()
@@ -268,6 +272,8 @@ def scan_squeeze(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
         return None
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
     # ENTRY: At upper Bollinger Band (buy the breakout)
     entry = bb_upper.iloc[-1]
@@ -299,7 +305,10 @@ def scan_volume_surge(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
 
     current = close.iloc[-1]
     vol_avg = vol.rolling(20).mean()
-    vol_ratio = vol.iloc[-1] / vol_avg.iloc[-1] if vol_avg.iloc[-1] > 0 else 1
+    last_vol_avg = vol_avg.iloc[-1]
+    if pd.isna(last_vol_avg) or last_vol_avg <= 0:
+        return None
+    vol_ratio = vol.iloc[-1] / last_vol_avg
 
     score = 0
     notes = []
@@ -323,7 +332,7 @@ def scan_volume_surge(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
             score += 15
             notes.append("Strong close near day high")
 
-    spike_count = sum(1 for i in range(-10, 0) if vol_avg.iloc[i] > 0 and vol.iloc[i] > 1.5 * vol_avg.iloc[i])
+    spike_count = sum(1 for i in range(-10, 0) if pd.notna(vol_avg.iloc[i]) and vol_avg.iloc[i] > 0 and vol.iloc[i] > 1.5 * vol_avg.iloc[i])
     if spike_count >= 3:
         score += 15
         notes.append(f"{spike_count} volume spikes in 10 days — accumulation")
@@ -337,6 +346,8 @@ def scan_volume_surge(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
         return None
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
     # ENTRY: At average of day's range (VWAP proxy) or pullback to open
     day_avg = (df["High"].iloc[-1] + df["Low"].iloc[-1] + current) / 3
@@ -405,7 +416,7 @@ def scan_supertrend_flip(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     notes = ["Supertrend flipped BULLISH"]
 
     vol_avg = df["Volume"].rolling(20).mean().iloc[-1]
-    if vol_avg > 0 and df["Volume"].iloc[-1] > 1.3 * vol_avg:
+    if pd.notna(vol_avg) and vol_avg > 0 and df["Volume"].iloc[-1] > 1.3 * vol_avg:
         score += 15
         notes.append("Volume confirming the flip")
 
@@ -517,6 +528,8 @@ def scan_trend_continuation(df: pd.DataFrame, symbol: str):
         return None
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
     # Entry at 20 EMA (pullback level)
     entry = ema20.iloc[-1]
@@ -551,6 +564,8 @@ def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[S
     """Run all scanners on all stocks. Enriches with analyzer score. Returns ranked list."""
     from .scorer import analyze_stock  # Import here to avoid circular
 
+    from ._logging import get_logger
+    _log = get_logger(__name__)
     all_setups = []
     for symbol, df in stock_data.items():
         if len(df) < 60:
@@ -560,8 +575,10 @@ def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[S
                 setup = scanner(df, symbol)
                 if setup is not None and setup.risk_reward >= 1.5:
                     all_setups.append(setup)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("scanner %s failed for %s: %s",
+                             getattr(scanner, "__name__", "?"), symbol, e)
+                continue
 
     # Enrich each setup with analyzer score (the real 6-dimension score)
     for setup in all_setups:
@@ -571,8 +588,9 @@ def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[S
                 setup.analyzer_score = s.final_score
                 setup.verdict = s.verdict
                 setup.confidence = s.confidence
-        except Exception:
-            setup.analyzer_score = setup.score  # Fallback
+        except Exception as e:
+            _log.warning("analyze_stock failed for %s: %s", setup.symbol, e)
+            setup.analyzer_score = setup.score
 
     # Sort by analyzer score (the consistent 6-dimension score), not scan score
     all_setups.sort(key=lambda s: s.analyzer_score, reverse=True)

@@ -128,6 +128,18 @@ section[data-testid="stSidebar"] { background: var(--surface); border-right: 1px
 """, unsafe_allow_html=True)
 
 
+import re
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
+
+def _validate_sym_ui(sym: str) -> str:
+    """Normalize and validate a user-entered symbol; raises ValueError if bad."""
+    s = (sym or "").upper().strip()
+    if not SYMBOL_RE.match(s):
+        raise ValueError(f"Invalid symbol: {sym!r}")
+    return s
+
 # ── Helper Functions ──
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_cached(sym, start):
@@ -136,9 +148,17 @@ def _fetch_cached(sym, start):
 
 def load_data(sym, start="2020-01-01"):
     try:
+        sym = _validate_sym_ui(sym)
         df = _fetch_cached(sym, start)
+        if df is None or len(df) < 50:
+            st.warning(f"{sym}: only {0 if df is None else len(df)} bars available — falling back to demo data.")
+            return trending_stock(), True
         return df, False
-    except Exception:
+    except ValueError as e:
+        st.error(str(e))
+        return trending_stock(), True
+    except Exception as e:
+        st.warning(f"Live data unavailable ({e.__class__.__name__}); using demo data.")
         return trending_stock(), True
 
 def score_bar(label, val, tip=""):
@@ -157,6 +177,57 @@ def pos_calc(price, sl, cap, risk):
     if d <= 0: return 0, 0, 0
     sh = int((cap * risk / 100) / d)
     return sh, sh * price, sh * d
+
+def make_plotly_chart(df, score=None, title="", period=250):
+    """Modern interactive Plotly candlestick + RSI + Volume."""
+    df_plot = df.iloc[-period:] if len(df) > period else df
+    close = df_plot["Close"]
+    e20 = close.ewm(span=20, adjust=False).mean()
+    e50 = close.ewm(span=50, adjust=False).mean()
+    rsi = momentum.RSIIndicator(close, window=14).rsi()
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+        row_heights=[0.6, 0.2, 0.2],
+        subplot_titles=("Price (Candles + EMA20/50)", "RSI(14)", "Volume"),
+    )
+    fig.add_trace(go.Candlestick(
+        x=df_plot.index, open=df_plot["Open"], high=df_plot["High"],
+        low=df_plot["Low"], close=close, name="Price",
+        increasing_line_color="#10b981", decreasing_line_color="#ef4444",
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=e20, line=dict(color="#f59e0b", width=1), name="EMA20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=e50, line=dict(color="#8b5cf6", width=1), name="EMA50"), row=1, col=1)
+    if score is not None:
+        fig.add_hline(y=score.stop_loss, line=dict(color="#ef4444", width=1, dash="dash"),
+                      annotation_text=f"SL ₹{score.stop_loss:.0f}", row=1, col=1)
+        fig.add_hline(y=score.target_1, line=dict(color="#10b981", width=1, dash="dash"),
+                      annotation_text=f"T1 ₹{score.target_1:.0f}", row=1, col=1)
+        fig.add_hline(y=score.target_2, line=dict(color="#10b981", width=1, dash="dot"),
+                      annotation_text=f"T2 ₹{score.target_2:.0f}", row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=rsi, line=dict(color="#f59e0b", width=1), name="RSI", showlegend=False), row=2, col=1)
+    fig.add_hline(y=70, line=dict(color="#ef4444", width=0.5, dash="dot"), row=2, col=1)
+    fig.add_hline(y=30, line=dict(color="#10b981", width=0.5, dash="dot"), row=2, col=1)
+    vol_colors = ["#10b981" if c >= o else "#ef4444"
+                  for c, o in zip(df_plot["Close"], df_plot["Open"])]
+    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot["Volume"], marker_color=vol_colors,
+                         name="Volume", showlegend=False), row=3, col=1)
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
+        title=dict(text=title, font=dict(color="#e2e8f0", size=14)),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=720,
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(gridcolor="#1e2a42", zerolinecolor="#1e2a42")
+    fig.update_xaxes(gridcolor="#1e2a42", zerolinecolor="#1e2a42",
+                     rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
 
 def make_chart(df, score=None, title="", period=250):
     """Professional 4-panel chart: Price+BB+EMA, RSI, MACD, Volume."""
@@ -440,9 +511,14 @@ elif page == "🔍 Analyze":
         # ── Chart ──
         st.markdown("---")
         st.markdown("### Technical Charts")
-        chart_period = st.select_slider("Period", [60, 120, 250, 500, 1000], value=250, format_func=lambda x: f"{x}d")
-        fig = make_chart(df, score, sym, period=chart_period)
-        st.pyplot(fig); plt.close()
+        chart_period = st.select_slider("Period", [60, 120, 250, 500, 1000], value=250, format_func=lambda x: f"{x}d", key=f"chart_period_{sym}")
+        try:
+            pfig = make_plotly_chart(df, score, sym, period=chart_period)
+            st.plotly_chart(pfig, use_container_width=True, theme=None)
+        except Exception as _e:
+            st.warning(f"Interactive chart failed ({_e}); falling back to static.")
+            fig = make_chart(df, score, sym, period=chart_period)
+            st.pyplot(fig); plt.close()
 
         # ── Key Technicals ──
         close = df["Close"]
@@ -475,7 +551,8 @@ elif page == "🔍 Analyze":
                     rows.append({"Strategy": sd["strategy_name"].iloc[-1], "Return": f"{m['total_return_pct']:.1f}%",
                                  "Sharpe": round(m['sharpe_ratio'], 2), "Max DD": f"{m['max_drawdown_pct']:.1f}%",
                                  "Win Rate": f"{m['win_rate_pct']:.0f}%", "Trades": m['total_trades']})
-                except: pass
+                except Exception as _e:
+                    st.warning(f"Strategy {n} failed: {_e}")
             if rows: st.dataframe(pd.DataFrame(rows).sort_values("Sharpe", ascending=False), use_container_width=True, hide_index=True)
 
 
@@ -684,8 +761,8 @@ elif page == "📊 Screener":
                             setup = analyze_swing(sdf, sym, st.session_state.capital)
 
                         results.append((sym, sdf, setup))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        st.warning(f"Skipping {sym}: {e.__class__.__name__}: {e}")
                     progress.progress(40 + int(55 * (idx + 1) / total), f"Analyzed {idx+1}/{total}...")
 
                 # Sort by score (highest first), filter to BUY signals
@@ -778,7 +855,8 @@ elif page == "🧪 Backtest":
                 try:
                     sd = f(df); r = run_backtest(sd, cfg); m = compute_metrics(r)
                     res.append((sd["strategy_name"].iloc[-1], r, m))
-                except: pass
+                except Exception as _e:
+                    st.warning(f"Strategy {n} failed: {_e}")
 
         if res:
             ranked = sorted(res, key=lambda x: x[2]["sharpe_ratio"], reverse=True)
@@ -1032,8 +1110,10 @@ elif page == "📋 Journal":
                 st.session_state.journal = []
                 try:
                     os.remove(JOURNAL_FILE)
-                except Exception:
+                except FileNotFoundError:
                     pass
+                except OSError as e:
+                    st.warning(f"Could not delete journal file: {e}")
                 st.session_state.journal_loaded = False
                 st.rerun()
 

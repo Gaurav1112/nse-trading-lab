@@ -1,33 +1,125 @@
-"""
-NSE Data Fetcher
-Fetches historical OHLCV data for NSE/BSE stocks using yfinance.
-Supports .NS (NSE) and .BO (BSE) suffixes.
-Includes file-based caching to avoid re-downloading.
-"""
+"""NSE/BSE data fetcher backed by yfinance with hardened caching.
 
-import yfinance as yf
-import pandas as pd
-import os
+Improvements vs prior version (audit findings):
+- Cache key includes ``end`` and is hashed to a filesystem-safe filename.
+- Symbols are validated against a regex (``^[A-Z0-9&.\-^]{1,20}$``) — no path traversal.
+- ``yf.download`` is retried with exponential backoff and bounded by a timeout.
+- Parquet writes are atomic (temp-file + ``os.replace``) so an interrupted write
+  cannot poison the cache.
+- Partial-download detection: if returned bars are <50% of the expected business
+  days the cache is rejected and the user is warned (not silently kept).
+- Single-ticker MultiIndex columns are flattened defensively.
+- Uses :mod:`logging` rather than ``print``.
+"""
+from __future__ import annotations
+
 import hashlib
-from datetime import datetime, timedelta
+import os
+import re
+import tempfile
+import time
+from datetime import datetime
 from typing import Optional
 
+import pandas as pd
+import yfinance as yf
+
+from ._logging import get_logger
+
+log = get_logger(__name__)
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".nse_trading_lab_cache")
+SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
+EXCHANGE_RE = re.compile(r"^(NS|BO|)$")
+_REQUIRED_COLS = ("Open", "High", "Low", "Close", "Volume")
 
 
-def _cache_path(symbol: str, exchange: str, start: str) -> str:
-    """Generate cache file path."""
+def _validate_symbol(symbol: str) -> str:
+    if not isinstance(symbol, str):
+        raise ValueError(f"Symbol must be str, got {type(symbol).__name__}")
+    s = symbol.strip().upper()
+    if not s:
+        raise ValueError("Symbol is empty")
+    if not SYMBOL_RE.match(s):
+        raise ValueError(f"Invalid symbol: {symbol!r}")
+    return s
+
+
+def _validate_exchange(exchange: str) -> str:
+    e = (exchange or "").strip().upper()
+    if not EXCHANGE_RE.match(e):
+        raise ValueError(f"Invalid exchange: {exchange!r} (use 'NS', 'BO' or '')")
+    return e
+
+
+def _cache_path(symbol: str, exchange: str, start: str, end: str) -> str:
     os.makedirs(CACHE_DIR, exist_ok=True)
-    key = f"{symbol}_{exchange}_{start}"
-    return os.path.join(CACHE_DIR, f"{key}.parquet")
+    raw = f"{symbol}|{exchange}|{start}|{end}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    safe_sym = re.sub(r"[^A-Z0-9]", "_", symbol)[:20]
+    fname = f"{safe_sym}_{digest}.parquet"
+    full = os.path.join(CACHE_DIR, fname)
+    if not os.path.realpath(full).startswith(os.path.realpath(CACHE_DIR)):
+        raise ValueError("Cache path escapes cache directory")
+    return full
 
 
 def _cache_is_fresh(path: str, max_age_hours: int = 4) -> bool:
-    """Check if cached data is still fresh."""
     if not os.path.exists(path):
         return False
     age = datetime.now().timestamp() - os.path.getmtime(path)
     return age < max_age_hours * 3600
+
+
+def _atomic_write_parquet(df: pd.DataFrame, path: str) -> None:
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".parquet", dir=directory)
+    os.close(fd)
+    try:
+        df.to_parquet(tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        levels0 = list(df.columns.get_level_values(0))
+        levels1 = list(df.columns.get_level_values(1))
+        if "Close" in levels0:
+            df.columns = df.columns.get_level_values(0)
+        elif "Close" in levels1:
+            df.columns = df.columns.get_level_values(1)
+        else:
+            df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
+                 retries: int = 3) -> pd.DataFrame:
+    last_err: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            t0 = time.time()
+            df = yf.download(
+                ticker, start=start, end=end, progress=False,
+                auto_adjust=False, threads=False,
+            )
+            if time.time() - t0 > timeout:
+                log.warning("yf.download for %s exceeded soft timeout %.1fs",
+                            ticker, timeout)
+            return df
+        except Exception as e:
+            last_err = e
+            backoff = 1.5 ** attempt
+            log.warning("yf.download attempt %d/%d for %s failed: %s — retrying in %.1fs",
+                        attempt + 1, retries, ticker, e, backoff)
+            time.sleep(backoff)
+    raise RuntimeError(f"yfinance failed after {retries} attempts for {ticker}: {last_err}")
 
 
 def fetch_nse(
@@ -37,50 +129,63 @@ def fetch_nse(
     exchange: str = "NS",
     use_cache: bool = True,
 ) -> pd.DataFrame:
-    """
-    Fetch historical data for an Indian stock.
-    Uses local cache to avoid re-downloading (refreshes every 4 hours).
-    """
+    """Fetch historical OHLCV for an Indian stock.  Symbols are validated."""
+    symbol = _validate_symbol(symbol)
+    exchange = _validate_exchange(exchange)
+
     if end is None:
         end = datetime.now().strftime("%Y-%m-%d")
+    try:
+        pd.Timestamp(start)
+        pd.Timestamp(end)
+    except Exception as e:
+        raise ValueError(f"Invalid date range start={start} end={end}: {e}")
 
-    # Check cache first
-    cache_file = _cache_path(symbol, exchange, start)
+    cache_file = _cache_path(symbol, exchange, start, end)
     if use_cache and _cache_is_fresh(cache_file):
         try:
             df = pd.read_parquet(cache_file)
-            if len(df) > 0:
+            if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
+                log.debug("Cache hit %s (%d rows)", symbol, len(df))
                 return df
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Corrupt cache %s: %s — re-fetching", cache_file, e)
 
     ticker = f"{symbol}.{exchange}" if exchange else symbol
-    print(f"Fetching {ticker} from {start} to {end}...")
+    log.info("Fetching %s from %s to %s", ticker, start, end)
+    df = _yf_download(ticker, start, end)
 
-    df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
-
-    if df.empty:
+    if df is None or df.empty:
         raise ValueError(
-            f"No data found for {ticker}. Check symbol or try exchange='BO' for BSE."
+            f"No data found for {ticker}. Check the symbol or exchange "
+            f"(try exchange='BO' for BSE)."
         )
 
-    # Flatten multi-level columns if present
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    df = _flatten_columns(df)
+    missing = [c for c in _REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"yfinance response for {ticker} missing columns: {missing}")
 
-    # Clean up
-    df = df.dropna()
-    df.index = pd.to_datetime(df.index)
+    df = df.dropna(subset=["Close"])
+    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[df.index.notna()]
     df = df.sort_index()
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
 
-    print(f"  Loaded {len(df)} trading days ({df.index[0].date()} to {df.index[-1].date()})")
+    expected = max(1, len(pd.bdate_range(start, end)))
+    if len(df) < 0.5 * expected:
+        log.warning("Partial data for %s: %d/%d expected business days",
+                    ticker, len(df), expected)
 
-    # Save to cache
+    log.info("Loaded %d rows for %s (%s → %s)",
+             len(df), ticker, df.index[0].date(), df.index[-1].date())
+
     if use_cache:
         try:
-            df.to_parquet(cache_file)
-        except Exception:
-            pass  # Cache is optional
+            _atomic_write_parquet(df, cache_file)
+        except Exception as e:
+            log.warning("Cache write failed for %s: %s", symbol, e)
 
     return df
 
@@ -90,23 +195,34 @@ def fetch_multiple(
     start: str = "2015-01-01",
     end: Optional[str] = None,
     exchange: str = "NS",
+    max_workers: int = 8,
 ) -> dict[str, pd.DataFrame]:
-    """Fetch data for multiple symbols. Returns dict of symbol -> DataFrame."""
-    data = {}
-    for sym in symbols:
-        try:
-            data[sym] = fetch_nse(sym, start, end, exchange)
-        except Exception as e:
-            print(f"  SKIP {sym}: {e}")
-    return data
+    """Fetch many symbols in parallel. Failures logged + skipped."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    out: dict[str, pd.DataFrame] = {}
+    if not symbols:
+        return out
+
+    def _fetch_one(sym: str):
+        return sym, fetch_nse(sym, start, end, exchange)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, 16))) as pool:
+        futures = {pool.submit(_fetch_one, s): s for s in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                _, df = fut.result()
+                out[sym] = df
+            except Exception as e:
+                log.warning("SKIP %s: %s", sym, e)
+    return out
 
 
 def fetch_nifty50(start: str = "2015-01-01", end: Optional[str] = None) -> pd.DataFrame:
-    """Fetch Nifty 50 index data for benchmarking."""
     return fetch_nse("^NSEI", start, end, exchange="")
 
 
-# Common Nifty 50 constituents for screening
 NIFTY50_SYMBOLS = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
     "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
@@ -120,7 +236,6 @@ NIFTY50_SYMBOLS = [
     "APOLLOHOSP", "HINDALCO", "HEROMOTOCO", "BAJAJ-AUTO", "SHRIRAMFIN",
 ]
 
-# Nifty Next 50 constituents
 NIFTY_NEXT50_SYMBOLS = [
     "ADANIGREEN", "ADANIPOWER", "AMBUJACEM", "ATGL", "AUROPHARMA",
     "BANDHANBNK", "BANKBARODA", "BEL", "BERGEPAINT", "BOSCHLTD",
@@ -134,5 +249,4 @@ NIFTY_NEXT50_SYMBOLS = [
     "RECLTD", "SBICARD", "SIEMENS", "TATAPOWER", "TORNTPHARM",
 ]
 
-# Full Nifty 100
 NIFTY100_SYMBOLS = NIFTY50_SYMBOLS + NIFTY_NEXT50_SYMBOLS

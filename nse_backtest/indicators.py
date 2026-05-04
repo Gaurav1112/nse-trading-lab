@@ -29,21 +29,36 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
 
     tenkan_sen = (high.rolling(tenkan).max() + low.rolling(tenkan).min()) / 2
     kijun_sen = (high.rolling(kijun).max() + low.rolling(kijun).min()) / 2
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    senkou_b_line = ((high.rolling(senkou_b).max() + low.rolling(senkou_b).min()) / 2)
+    # Senkou A & B are projected `kijun` bars FORWARD on the chart.
+    # To compare today's price to today's plotted cloud, use values calculated `kijun` bars ago.
+    senkou_a_raw = (tenkan_sen + kijun_sen) / 2
+    senkou_b_raw = (high.rolling(senkou_b).max() + low.rolling(senkou_b).min()) / 2
+    senkou_a = senkou_a_raw.shift(kijun)
+    senkou_b_line = senkou_b_raw.shift(kijun)
+    # Chikou span: today's close plotted `kijun` bars in the past — for momentum confirmation.
+    chikou_span = close.shift(-kijun)
 
     cur = close.iloc[-1]
     ts = tenkan_sen.iloc[-1]
     ks = kijun_sen.iloc[-1]
     sa = senkou_a.iloc[-1]
     sb = senkou_b_line.iloc[-1]
+    # Chikou: compare close from kijun bars ago to its position vs today's price
+    chikou = chikou_span.iloc[-kijun - 1] if len(chikou_span) > kijun else np.nan
 
-    # Signals
+    # Guard against NaNs in early-bar Ichimoku values.
+    if any(pd.isna(v) for v in (ts, ks, sa, sb)):
+        return {"score": 0, "reasons": ["Ichimoku unavailable (insufficient data)"],
+                "above_cloud": False, "tk_cross": False,
+                "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb,
+                "chikou": chikou}
+
     above_cloud = cur > max(sa, sb)
     below_cloud = cur < min(sa, sb)
     in_cloud = not above_cloud and not below_cloud
-    tk_cross_bull = ts > ks  # Tenkan above Kijun
-    cloud_green = sa > sb    # Senkou A above B = bullish cloud
+    tk_cross_bull = ts > ks
+    cloud_green = sa > sb
+    chikou_bull = pd.notna(chikou) and not np.isnan(chikou) and cur > chikou
 
     score = 0
     reasons = []
@@ -62,10 +77,14 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
     if cloud_green:
         score += 10
         reasons.append("Cloud is green (bullish structure)")
+    if chikou_bull:
+        score += 5
+        reasons.append("Chikou confirms (price > price 26 bars ago)")
 
     return {"score": min(score, 100), "reasons": reasons,
             "above_cloud": above_cloud, "tk_cross": tk_cross_bull,
-            "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb}
+            "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb,
+            "chikou": chikou}
 
 
 def keltner_channels(df: pd.DataFrame, window=20, atr_mult=2.0) -> dict:
@@ -82,9 +101,17 @@ def keltner_channels(df: pd.DataFrame, window=20, atr_mult=2.0) -> dict:
     lower = ema - atr_mult * atr
     cur = close.iloc[-1]
 
-    above = cur > upper.iloc[-1]
-    below = cur < lower.iloc[-1]
-    width = (upper.iloc[-1] - lower.iloc[-1]) / ema.iloc[-1] * 100
+    upper_v = upper.iloc[-1]
+    lower_v = lower.iloc[-1]
+    mid = ema.iloc[-1]
+    if any(pd.isna(v) for v in (upper_v, lower_v, mid)):
+        return {"score": 0, "reasons": ["Keltner unavailable (insufficient data)"],
+                "upper": upper_v, "lower": lower_v, "mid": mid,
+                "width_pct": 0.0, "above": False}
+
+    above = cur > upper_v
+    below = cur < lower_v
+    width = ((upper_v - lower_v) / mid * 100) if mid > 0 else 0.0
 
     score = 0
     reasons = []
@@ -98,8 +125,8 @@ def keltner_channels(df: pd.DataFrame, window=20, atr_mult=2.0) -> dict:
         reasons.append("Price within Keltner channels")
 
     return {"score": min(score, 100), "reasons": reasons,
-            "upper": upper.iloc[-1], "lower": lower.iloc[-1],
-            "mid": ema.iloc[-1], "width_pct": width, "above": above}
+            "upper": upper_v, "lower": lower_v,
+            "mid": mid, "width_pct": width, "above": above}
 
 
 def parabolic_sar(df: pd.DataFrame) -> dict:
@@ -111,8 +138,11 @@ def parabolic_sar(df: pd.DataFrame) -> dict:
     sar_val = sar.psar().iloc[-1]
     cur = df["Close"].iloc[-1]
 
+    if pd.isna(sar_val) or cur <= 0:
+        return {"score": 0, "reasons": ["SAR unavailable"], "sar": sar_val,
+                "bullish": False, "distance_pct": 0.0}
     bullish = cur > sar_val
-    distance = abs(cur - sar_val) / cur * 100 if cur > 0 else 0
+    distance = abs(cur - sar_val) / cur * 100
 
     score = 0
     reasons = []
@@ -162,9 +192,13 @@ def donchian_channels(df: pd.DataFrame, window=20) -> dict:
     low_ch = df["Low"].rolling(window).min()
     cur = df["Close"].iloc[-1]
 
-    at_high = cur >= high_ch.iloc[-1] * 0.99  # Within 1% of channel high
-    at_low = cur <= low_ch.iloc[-1] * 1.01
-    width = (high_ch.iloc[-1] - low_ch.iloc[-1]) / cur * 100
+    hi, lo = high_ch.iloc[-1], low_ch.iloc[-1]
+    if pd.isna(hi) or pd.isna(lo) or cur <= 0:
+        return {"score": 0, "reasons": ["Donchian unavailable"],
+                "upper": hi, "lower": lo, "width_pct": 0.0}
+    at_high = cur >= hi * 0.99
+    at_low = cur <= lo * 1.01
+    width = (hi - lo) / cur * 100
 
     score = 0
     reasons = []
@@ -206,8 +240,13 @@ def detect_market_regime(df: pd.DataFrame) -> dict:
 
     # Method 3: Volatility regime (ATR vs historical)
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, 14).average_true_range()
-    atr_pct = atr.iloc[-1] / close.iloc[-1] * 100
-    atr_avg = atr.iloc[-60:].mean() / close.iloc[-60:].mean() * 100 if n >= 60 else atr_pct
+    last_close = close.iloc[-1]
+    atr_pct = (atr.iloc[-1] / last_close * 100) if (pd.notna(atr.iloc[-1]) and last_close > 0) else 0.0
+    if n >= 60:
+        recent_close_mean = close.iloc[-60:].mean()
+        atr_avg = (atr.iloc[-60:].mean() / recent_close_mean * 100) if recent_close_mean > 0 else atr_pct
+    else:
+        atr_avg = atr_pct
 
     # Method 4: EMA alignment
     ema20 = close.ewm(span=20).mean().iloc[-1]
@@ -269,14 +308,14 @@ def estimate_probability(score_breakdown: dict, df: pd.DataFrame) -> dict:
     # Scale to 15-85% range (never 0% or 100% — epistemic humility)
     base_prob = 15 + raw_prob * 70
     
-    # Regime adjustment (±10%)
+    # Regime is already reflected in trend_score / volatility_score upstream (scorer.py),
+    # which feeds final_score → base_prob via the logistic. To avoid double-counting, we
+    # do NOT subtract a second regime penalty here. Keep a small confirmation bump only.
     regime_adj = 0
     if regime["regime"] == "TRENDING_UP":
-        regime_adj = +8
-    elif regime["regime"] == "TRENDING_DOWN":
-        regime_adj = -12
+        regime_adj = +3
     elif regime["regime"] == "VOLATILE":
-        regime_adj = -5
+        regime_adj = -3
     
     # Volume confirmation (±5%)
     vol_adj = 0

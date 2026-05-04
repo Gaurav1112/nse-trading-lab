@@ -35,9 +35,24 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     config = result["config"]
     bh = result["buy_hold_curve"]
 
+    # Empty backtest guard.
+    if equity is None or len(equity) == 0:
+        return {
+            "total_return_pct": 0.0, "buy_hold_return_pct": 0.0,
+            "cagr_pct": 0.0, "buy_hold_cagr_pct": 0.0,
+            "sharpe_ratio": 0.0, "sortino_ratio": 0.0,
+            "max_drawdown_pct": 0.0, "max_drawdown_duration_days": 0,
+            "calmar_ratio": 0.0, "total_trades": 0, "winning_trades": 0,
+            "losing_trades": 0, "breakeven_trades": 0, "win_rate_pct": 0.0,
+            "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "profit_factor": 0.0,
+            "expectancy_inr": 0.0, "total_costs_inr": 0.0,
+            "avg_holding_days": 0, "annualized_volatility_pct": 0.0,
+            "n_trading_days": 0,
+        }
+
     # Basic returns
     total_return = (equity.iloc[-1] / config.initial_capital) - 1
-    bh_return = (bh.iloc[-1] / config.initial_capital) - 1
+    bh_return = (bh.iloc[-1] / config.initial_capital) - 1 if len(bh) else 0.0
 
     # Trading days
     n_days = len(equity)
@@ -46,26 +61,28 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     # CAGR (guard against negative/zero equity)
     final_eq = max(equity.iloc[-1], 0.01)
     cagr = (final_eq / config.initial_capital) ** (1 / n_years) - 1 if n_years > 0 else 0
-    bh_final = max(bh.iloc[-1], 0.01)
+    bh_final = max(bh.iloc[-1], 0.01) if len(bh) else config.initial_capital
     bh_cagr = (bh_final / config.initial_capital) ** (1 / n_years) - 1 if n_years > 0 else 0
 
     # Daily returns (guard against division by zero)
     daily_returns = equity.pct_change().dropna()
     daily_returns = daily_returns.replace([np.inf, -np.inf], 0).fillna(0)
 
-    # Sharpe Ratio (annualized)
-    excess_daily = daily_returns - risk_free_rate / 252
+    # Sharpe Ratio (annualized) — mean-of-excess, then scale by sqrt(252).
+    rf_daily = risk_free_rate / 252
+    mean_excess = daily_returns.mean() - rf_daily
     std = daily_returns.std()
-    sharpe = np.sqrt(252) * excess_daily.mean() / std if std > 1e-10 else 0.0
+    sharpe = np.sqrt(252) * mean_excess / std if std > 1e-10 else 0.0
 
     # Sortino Ratio
     downside = daily_returns[daily_returns < 0]
     down_std = downside.std() if len(downside) > 1 else 0
-    sortino = np.sqrt(252) * excess_daily.mean() / down_std if down_std > 1e-10 else 0.0
+    sortino = np.sqrt(252) * mean_excess / down_std if down_std > 1e-10 else 0.0
 
     # Max Drawdown
     rolling_max = equity.cummax()
-    drawdown = (equity - rolling_max) / rolling_max
+    drawdown = (equity - rolling_max) / rolling_max.replace(0, np.nan)
+    drawdown = drawdown.fillna(0)
     max_dd = drawdown.min()
 
     # Max Drawdown Duration
@@ -74,9 +91,10 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     # Calmar Ratio
     calmar = cagr / abs(max_dd) if max_dd != 0 else 0
 
-    # Trade metrics
+    # Trade metrics — separate winners, losers, and breakeven trades.
     winning = [t for t in trades if t.pnl > 0]
-    losing = [t for t in trades if t.pnl <= 0]
+    losing = [t for t in trades if t.pnl < 0]
+    breakeven = [t for t in trades if t.pnl == 0]
     n_trades = len(trades)
     win_rate = len(winning) / n_trades if n_trades > 0 else 0
 
@@ -111,9 +129,11 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
         "calmar_ratio": calmar,
         "max_drawdown_pct": max_dd * 100,
         "max_dd_duration_days": dd_duration,
+        "max_drawdown_duration_days": dd_duration,
         "total_trades": n_trades,
         "winning_trades": len(winning),
-        "losing_trades": n_trades - len(winning),
+        "losing_trades": len(losing),
+        "breakeven_trades": len(breakeven),
         "win_rate_pct": win_rate * 100,
         "avg_win_pct": avg_win * 100,
         "avg_loss_pct": avg_loss * 100,
@@ -121,6 +141,8 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
         "expectancy_inr": expectancy,
         "total_costs_inr": total_costs,
         "avg_holding_days": avg_hold,
+        "annualized_volatility_pct": float(daily_returns.std() * np.sqrt(252) * 100),
+        "n_trading_days": n_days,
         "final_equity": equity.iloc[-1],
         "n_years": n_years,
     }
@@ -327,7 +349,7 @@ def compare_strategies(results_list: list[tuple[str, dict, dict]], save_path: Op
             try:
                 v = float(row[col_idx])
                 vals.append(v if not np.isinf(v) else 0)
-            except:
+            except (ValueError, TypeError):
                 vals.append(0)
 
         if len(set(vals)) <= 1:

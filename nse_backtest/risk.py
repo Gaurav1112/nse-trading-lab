@@ -42,8 +42,12 @@ def kelly_criterion(win_rate: float, avg_win: float, avg_loss: float) -> float:
     """
     Kelly Criterion — optimal fraction of capital to risk.
     f* = (p*b - q) / b where p=win prob, q=1-p, b=payoff ratio
+    Defensive: refuses to compute if signs are wrong (avg_win<=0 or avg_loss>=0).
     """
-    if avg_loss == 0 or win_rate <= 0 or win_rate >= 1:
+    if avg_loss == 0 or avg_win == 0 or win_rate <= 0 or win_rate >= 1:
+        return 0.0
+    if avg_win <= 0 or avg_loss >= 0:
+        # Bad inputs (a "win" should be positive PnL, a "loss" should be negative)
         return 0.0
     b = abs(avg_win / avg_loss)
     p, q = win_rate, 1 - win_rate
@@ -99,9 +103,13 @@ def check_drawdown_limit(equity_curve: pd.Series, max_dd: float = 0.15) -> dict:
     max_dd_seen = dd.min()
 
     is_halted = current_dd <= -max_dd
-    if current_dd <= -max_dd * 0.67:
+    # Deeper drawdown → smaller size. Thresholds expressed as fractions of max_dd.
+    abs_dd = abs(current_dd)
+    if abs_dd >= max_dd:
+        multiplier = 0.25
+    elif abs_dd >= max_dd * 0.67:
         multiplier = 0.5
-    elif current_dd <= -max_dd * 0.33:
+    elif abs_dd >= max_dd * 0.33:
         multiplier = 0.75
     else:
         multiplier = 1.0
@@ -117,13 +125,29 @@ def check_drawdown_limit(equity_curve: pd.Series, max_dd: float = 0.15) -> dict:
 
 def position_size_risk_based(capital: float, entry: float, stop_loss: float,
                               risk_pct: float = 0.02) -> int:
-    """Fixed fractional: Shares = (Capital × Risk%) / (Entry - SL)"""
+    """Fixed fractional: Shares = (Capital × Risk%) / (Entry - SL).
+
+    Returns the smaller of risk-based and 25%-notional sizing.  Returns 0 only
+    when SL is invalid or capital is insufficient even for a single share.
+    """
+    if entry <= 0 or capital <= 0:
+        return 0
     sl_dist = entry - stop_loss
     if sl_dist <= 0:
         return 0
-    shares = int((capital * risk_pct) / sl_dist)
-    max_shares = int(capital * 0.25 / entry)
-    return min(shares, max_shares)
+    risk_shares = int((capital * risk_pct) / sl_dist)
+    notional_shares = int(capital * 0.25 / entry)
+    shares = min(risk_shares, notional_shares)
+    if shares < 1 and capital >= entry:
+        # Capital can afford ≥1 share but sizing rounds down — return 1 with a
+        # warning rather than a silent zero.
+        from ._logging import get_logger
+        get_logger(__name__).warning(
+            "position_size_risk_based: rounding up to 1 share "
+            "(capital=%.2f entry=%.2f sl_dist=%.2f)", capital, entry, sl_dist,
+        )
+        shares = 1
+    return max(0, shares)
 
 
 def annualized_volatility(returns: pd.Series, trading_days: int = 252) -> float:
@@ -206,7 +230,8 @@ def walk_forward_validate(df: pd.DataFrame, strategy_func, config,
                 "win_rate": m["win_rate_pct"],
                 "max_dd": m["max_drawdown_pct"],
             })
-        except Exception:
-            pass
+        except Exception as e:
+            from ._logging import get_logger
+            get_logger(__name__).warning("walk_forward split %d failed: %s", i + 1, e)
 
     return results

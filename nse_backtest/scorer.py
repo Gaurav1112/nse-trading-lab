@@ -89,6 +89,8 @@ def score_trend(df: pd.DataFrame) -> tuple[float, list[str]]:
     adx_val = adx_ind.adx().iloc[-1]
     di_plus = adx_ind.adx_pos().iloc[-1]
     di_minus = adx_ind.adx_neg().iloc[-1]
+    if pd.isna(adx_val) or pd.isna(di_plus) or pd.isna(di_minus):
+        adx_val, di_plus, di_minus = 0.0, 0.0, 0.0
     bullish_direction = di_plus > di_minus
 
     if adx_val > 25 and bullish_direction:
@@ -103,7 +105,7 @@ def score_trend(df: pd.DataFrame) -> tuple[float, list[str]]:
     else:
         reasons.append(f"Weak/no trend (ADX={adx_val:.0f})")
 
-    if n >= 20:
+    if n >= 20 and current > 0:
         x = np.arange(20)
         y = close.iloc[-20:].values
         slope = np.polyfit(x, y, 1)[0]
@@ -130,22 +132,30 @@ def score_trend(df: pd.DataFrame) -> tuple[float, list[str]]:
 
 
 def score_momentum(df: pd.DataFrame) -> tuple[float, list[str]]:
-    """Score momentum signals (0-100)."""
+    """Score momentum signals (0-100) — monotonic in RSI: higher RSI <= 70 scores higher."""
     score = 0
     reasons = []
     close = df["Close"]
 
     rsi = momentum.RSIIndicator(close, window=14).rsi()
     rsi_val = rsi.iloc[-1]
+    if pd.isna(rsi_val):
+        rsi_val = 50.0
     if 50 < rsi_val < 70:
         score += 20
         reasons.append(f"RSI in bullish zone ({rsi_val:.0f})")
     elif 40 < rsi_val <= 50:
         score += 10
         reasons.append(f"RSI neutral ({rsi_val:.0f})")
-    elif rsi_val >= 70:
+    elif 70 <= rsi_val < 80:
+        score += 12
+        reasons.append(f"RSI strong but extended ({rsi_val:.0f})")
+    elif rsi_val >= 80:
         score += 5
         reasons.append(f"RSI overbought ({rsi_val:.0f}) — caution")
+    elif 30 < rsi_val <= 40:
+        score += 8
+        reasons.append(f"RSI weak ({rsi_val:.0f})")
     elif rsi_val <= 30:
         score += 12
         reasons.append(f"RSI oversold ({rsi_val:.0f}) — potential bounce")
@@ -201,7 +211,11 @@ def score_volatility(df: pd.DataFrame) -> tuple[float, list[str]]:
 
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14)
     atr_val = atr.average_true_range().iloc[-1]
-    atr_pct = (atr_val / close.iloc[-1]) * 100
+    last_close = close.iloc[-1]
+    if pd.isna(atr_val) or last_close <= 0:
+        atr_pct = 0.0
+    else:
+        atr_pct = (atr_val / last_close) * 100
 
     if 1.5 < atr_pct < 4.0:
         score += 30
@@ -220,14 +234,26 @@ def score_volatility(df: pd.DataFrame) -> tuple[float, list[str]]:
     bb_upper = bb.bollinger_hband()
     bb_lower = bb.bollinger_lband()
     bb_mid = bb.bollinger_mavg()
-    bb_width = ((bb_upper.iloc[-1] - bb_lower.iloc[-1]) / bb_mid.iloc[-1]) * 100
-    bb_width_series = ((bb_upper - bb_lower) / bb_mid) * 100
-    avg_width = bb_width_series.iloc[-60:].mean() if len(bb_width_series) >= 60 else bb_width_series.mean()
+    last_mid = bb_mid.iloc[-1]
+    if pd.notna(last_mid) and last_mid > 0:
+        bb_width = ((bb_upper.iloc[-1] - bb_lower.iloc[-1]) / last_mid) * 100
+        # Element-wise width with NaN safety.
+        bb_width_series = ((bb_upper - bb_lower) / bb_mid.where(bb_mid > 0, np.nan)) * 100
+        bb_width_series = bb_width_series.dropna()
+        if len(bb_width_series) >= 60:
+            avg_width = bb_width_series.iloc[-60:].mean()
+        elif len(bb_width_series) > 0:
+            avg_width = bb_width_series.mean()
+        else:
+            avg_width = bb_width
+    else:
+        bb_width = 0.0
+        avg_width = 0.0
 
-    if bb_width < avg_width * 0.7:
+    if avg_width > 0 and bb_width < avg_width * 0.7:
         score += 30
         reasons.append(f"BB Squeeze detected (width={bb_width:.1f}% vs avg={avg_width:.1f}%)")
-    elif bb_width < avg_width:
+    elif avg_width > 0 and bb_width < avg_width:
         score += 15
         reasons.append(f"BB narrowing ({bb_width:.1f}% vs avg={avg_width:.1f}%)")
     else:
@@ -256,7 +282,12 @@ def score_volume(df: pd.DataFrame) -> tuple[float, list[str]]:
     vol = df["Volume"]
 
     vol_avg_20 = vol.rolling(20).mean()
-    vol_ratio = vol.iloc[-1] / vol_avg_20.iloc[-1] if vol_avg_20.iloc[-1] > 0 else 1
+    last_avg = vol_avg_20.iloc[-1]
+    if pd.notna(last_avg) and last_avg > 0:
+        vol_ratio = vol.iloc[-1] / last_avg
+    else:
+        vol_ratio = 0.0
+        reasons.append("Volume reference unavailable (insufficient data)")
 
     if vol_ratio > 2.0:
         score += 20
@@ -270,24 +301,26 @@ def score_volume(df: pd.DataFrame) -> tuple[float, list[str]]:
     else:
         reasons.append(f"Volume below average ({vol_ratio:.1f}x) — low interest")
 
-    # OBV trend — MOST IMPORTANT for swing trading
-    # Rising OBV = institutions accumulating even if daily volume isn't spiking
+    # OBV trend — accumulation/distribution detector.
     obv = volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
     if len(obv) >= 20:
-        obv_slope = np.polyfit(np.arange(20), obv.iloc[-20:].values, 1)[0]
-        obv_norm = abs(obv_slope) / (vol_avg_20.iloc[-1] + 1)  # Normalize by avg volume
-        if obv_slope > 0 and obv_norm > 0.01:
-            score += 25
-            reasons.append("OBV strongly rising — institutional accumulation")
-        elif obv_slope > 0:
-            score += 18
-            reasons.append("OBV trending up — accumulation detected")
-        elif obv_slope < 0 and obv_norm > 0.01:
-            score += 0
-            reasons.append("OBV strongly falling — distribution (selling)")
-        else:
-            score += 5
-            reasons.append("OBV flat — no clear accumulation")
+        obv_window = obv.iloc[-20:].dropna()
+        if len(obv_window) >= 2:
+            obv_slope = np.polyfit(np.arange(len(obv_window)), obv_window.values, 1)[0]
+            avg_v = vol_avg_20.iloc[-1] if pd.notna(vol_avg_20.iloc[-1]) and vol_avg_20.iloc[-1] > 0 else 0
+            obv_norm = abs(obv_slope) / avg_v if avg_v > 0 else 0
+            if obv_slope > 0 and obv_norm > 0.01:
+                score += 25
+                reasons.append("OBV strongly rising — institutional accumulation")
+            elif obv_slope > 0:
+                score += 18
+                reasons.append("OBV trending up — accumulation detected")
+            elif obv_slope < 0 and obv_norm > 0.01:
+                score += 0
+                reasons.append("OBV strongly falling — distribution (selling)")
+            else:
+                score += 5
+                reasons.append("OBV flat — no clear accumulation")
 
     # Price rising + volume trend (not just single day spike)
     if len(close) >= 10:
@@ -340,7 +373,6 @@ def score_backtest(df: pd.DataFrame) -> tuple[float, list[str]]:
             result = run_backtest(strat_data, config)
             metrics = compute_metrics(result)
 
-            # Only count strategies with enough trades to be meaningful
             if metrics["total_trades"] < 3:
                 continue
 
@@ -353,10 +385,14 @@ def score_backtest(df: pd.DataFrame) -> tuple[float, list[str]]:
                 profitable_count += 1
             if metrics["sharpe_ratio"] > 0.3:
                 positive_sharpe_count += 1
-        except Exception:
-            pass
+        except Exception as e:
+            from ._logging import get_logger
+            get_logger(__name__).debug("strategy %s failed during scoring: %s", name, e)
+            continue
 
-    total = valid_strategies if valid_strategies > 0 else 1
+    total = max(valid_strategies, 1)
+    if valid_strategies == 0:
+        return 0.0, ["No valid backtest strategies executed (insufficient trades)."]
     ratio = profitable_count / total
     sharpe_ratio = positive_sharpe_count / total
 
@@ -448,8 +484,13 @@ def score_risk(df: pd.DataFrame) -> tuple[float, list[str], dict]:
     ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
     ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1] if len(close) >= 200 else ema50
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, window=14).average_true_range().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        atr = max(current * 0.02, 0.01)
 
-    dist_to_ema50 = ((current - ema50) / ema50) * 100
+    if pd.notna(ema50) and ema50 > 0:
+        dist_to_ema50 = ((current - ema50) / ema50) * 100
+    else:
+        dist_to_ema50 = 0.0
     if 0 < dist_to_ema50 < 3:
         score += 20
         reasons.append(f"Near 50 EMA support ({dist_to_ema50:.1f}% above)")
@@ -480,12 +521,15 @@ def score_risk(df: pd.DataFrame) -> tuple[float, list[str], dict]:
     if current - stop_loss < 0.5 * atr:
         stop_loss = current - 1.5 * atr
 
-    target_1 = current + max(2.5 * atr, 2 * (current - stop_loss))  # At least 2:1 R:R
-    target_2 = current + max(4 * atr, 3 * (current - stop_loss))   # At least 3:1 R:R
+    target_1 = current + max(2.5 * atr, 2 * (current - stop_loss))
+    target_2 = current + max(4 * atr, 3 * (current - stop_loss))
 
-    sl_pct = ((current - stop_loss) / current) * 100
-    t1_pct = ((target_1 - current) / current) * 100
-    risk_reward = t1_pct / sl_pct if sl_pct > 0.1 else 0  # Guard against near-zero denominator
+    if current > 0:
+        sl_pct = ((current - stop_loss) / current) * 100
+        t1_pct = ((target_1 - current) / current) * 100
+    else:
+        sl_pct, t1_pct = 0.1, 0.0
+    risk_reward = (t1_pct / sl_pct) if sl_pct > 0.1 else 0.1
 
     if risk_reward >= 3.0:
         score += 25
@@ -551,6 +595,8 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         bt_r = ["Backtest skipped"]
 
     # Phase 2: Advanced indicators (adjust core scores ±5-10 pts)
+    from ._logging import get_logger
+    _log = get_logger(__name__)
     adv_reasons = []
     try:
         ichi = ichimoku(df)
@@ -563,8 +609,9 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
             result.trend_score = max(result.trend_score - 5, 0)
             result.ichimoku_signal = "BEARISH"
         adv_reasons.extend(ichi["reasons"])
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("ichimoku failed for %s: %s", symbol, e)
+        result.warnings.append("Ichimoku unavailable")
 
     try:
         sar = parabolic_sar(df)
@@ -575,8 +622,8 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
             result.trend_score = max(result.trend_score - 3, 0)
             result.sar_signal = f"BEARISH (SAR ₹{sar['sar']:.0f})"
         adv_reasons.extend(sar["reasons"])
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("parabolic_sar failed for %s: %s", symbol, e)
 
     try:
         cci = cci_indicator(df)
@@ -585,28 +632,28 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         elif cci["cci"] < -100:
             result.momentum_score = max(result.momentum_score - 5, 0)
         adv_reasons.extend(cci["reasons"])
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("cci failed for %s: %s", symbol, e)
 
     try:
         kelt = keltner_channels(df)
         if kelt["above"]:
             result.momentum_score = min(result.momentum_score + 5, 100)
         adv_reasons.extend(kelt["reasons"])
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("keltner failed for %s: %s", symbol, e)
 
     try:
         donch = donchian_channels(df)
         adv_reasons.extend(donch["reasons"])
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("donchian failed for %s: %s", symbol, e)
 
     # Phase 3: Market regime
     try:
         regime = detect_market_regime(df)
         result.regime = regime["regime"]
-        # Regime penalty for TRENDING_DOWN or VOLATILE
+        # Regime adjustment — applied ONCE here (estimate_probability does not double-penalize)
         if regime["regime"] == "TRENDING_DOWN":
             result.trend_score = max(result.trend_score - 10, 0)
             adv_reasons.append("⚠️ Market regime: TRENDING DOWN")
@@ -614,8 +661,10 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
             result.volatility_score = max(result.volatility_score - 10, 0)
             adv_reasons.append("⚠️ Market regime: HIGH VOLATILITY")
         elif regime["regime"] == "TRENDING_UP":
+            result.trend_score = min(result.trend_score + 5, 100)
             adv_reasons.append("✅ Market regime: TRENDING UP")
-    except Exception:
+    except Exception as e:
+        _log.warning("market regime detection failed for %s: %s", symbol, e)
         result.regime = "UNKNOWN"
 
     # Phase 4: Weighted final score
@@ -623,6 +672,7 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         "trend": 0.25, "momentum": 0.20, "volume": 0.15,
         "volatility": 0.10, "backtest": 0.15, "risk": 0.15,
     }
+    assert abs(sum(weights.values()) - 1.0) < 1e-9, f"scorer weights must sum to 1.0, got {sum(weights.values())}"
     result.final_score = (
         result.trend_score * weights["trend"]
         + result.momentum_score * weights["momentum"]
@@ -660,7 +710,13 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         result.expected_gain_pct = prob["expected_gain_pct"]
         result.expected_loss_pct = prob["expected_loss_pct"]
         result.expected_value_pct = prob["expected_value_pct"]
-    except Exception:
+        # If expected value is negative, override verdict to AVOID — never trade negative-EV setups.
+        if result.expected_value_pct is not None and result.expected_value_pct < 0 and result.verdict == "GO":
+            result.verdict = "AVOID"
+            result.confidence = "MEDIUM"
+            adv_reasons.append("⛔ Negative expected value — verdict downgraded to AVOID")
+    except Exception as e:
+        _log.warning("probability estimation failed for %s: %s", symbol, e)
         result.win_probability = 50.0
 
     # Warnings
