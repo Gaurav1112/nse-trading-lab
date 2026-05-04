@@ -211,3 +211,20 @@ def test_screener_scanners_idempotent_on_reload():
         f"SCANNERS grew on reload ({before} -> {after}); "
         "scan_trend_continuation registration is not idempotent."
     )
+
+
+def test_flatten_columns_dedupes_duplicates():
+    """Regression: concurrent yfinance calls or poisoned caches can yield
+    duplicated columns (['Close','Close',...]), which makes df["Close"] return
+    a DataFrame and raises 'truth value of a Series is ambiguous' downstream.
+    _flatten_columns must defensively drop duplicates."""
+    import pandas as pd
+    from nse_backtest.data import _flatten_columns
+    df = pd.DataFrame({
+        "a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9],
+        "d": [10, 11, 12], "e": [13, 14, 15], "f": [16, 17, 18],
+    })
+    df.columns = ["Close", "Close", "High", "Low", "Open", "Volume"]
+    out = _flatten_columns(df)
+    assert not out.columns.duplicated().any()
+    assert isinstance(out["Close"], pd.Series)

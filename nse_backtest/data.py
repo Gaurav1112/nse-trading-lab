@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -32,6 +33,12 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".nse_trading_lab_cache")
 SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
 EXCHANGE_RE = re.compile(r"^(NS|BO|)$")
 _REQUIRED_COLS = ("Open", "High", "Low", "Close", "Volume")
+
+# yfinance's internal session/cache is not thread-safe: concurrent yf.download
+# calls can produce DataFrames with accumulated/duplicated columns (e.g. multiple
+# 'Close' columns), which then makes df["Close"] a DataFrame instead of a Series
+# and breaks every downstream scalar comparison. Serialize the network call.
+_YF_LOCK = threading.Lock()
 
 
 def _validate_symbol(symbol: str) -> str:
@@ -105,6 +112,12 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
             df.columns = df.columns.get_level_values(1)
         else:
             df.columns = df.columns.get_level_values(0)
+    # Defensively drop duplicate column names. Concurrent yfinance calls (or a
+    # poisoned cache file) can yield e.g. ['Close','Close','High','High',...]
+    # which makes df["Close"] return a DataFrame and breaks scalar comparisons
+    # everywhere downstream ("truth value of a Series is ambiguous").
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 
@@ -114,10 +127,11 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
     for attempt in range(retries):
         try:
             t0 = time.time()
-            df = yf.download(
-                ticker, start=start, end=end, progress=False,
-                auto_adjust=False, threads=False,
-            )
+            with _YF_LOCK:
+                df = yf.download(
+                    ticker, start=start, end=end, progress=False,
+                    auto_adjust=False, threads=False,
+                )
             if time.time() - t0 > timeout:
                 log.warning("yf.download for %s exceeded soft timeout %.1fs",
                             ticker, timeout)
