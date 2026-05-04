@@ -217,9 +217,11 @@ def analyze_positional(df: pd.DataFrame, symbol: str, capital: float = 100000,
             score += 10
             reasons.append(f"200 EMA rising ({ema200_slope:.1f}%/20d)")
     
-    # 7. Weekly RSI
+    # 7. Weekly RSI — resample to the last *trading-week* close instead of
+    # ``iloc[::5]``, which silently drifts whenever a week has <5 sessions
+    # (NSE holidays, Muhurat, mid-week starts) and produces misaligned bars.
     if n >= 70:
-        weekly_close = close.iloc[::5]  # Approximate weekly
+        weekly_close = close.resample("W-FRI").last().dropna()
         if len(weekly_close) >= 14:
             weekly_rsi = momentum.RSIIndicator(weekly_close, window=14).rsi().iloc[-1]
             if 40 < weekly_rsi < 70:
@@ -345,10 +347,15 @@ def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000) -> 
     elif atr_pct > 4:
         reasons.append(f"High volatility ({atr_pct:.1f}%) — risky for long-term")
     
-    # 7. Monthly higher lows (accumulation pattern)
+    # 7. Monthly higher lows (accumulation pattern) — slice the LAST 120 bars
+    # into 6 non-overlapping 20-bar windows. The earlier ``range(-120, 0, 20)``
+    # comprehension produced an empty final slice (``df.iloc[-20:0]``) because
+    # the negative-to-zero stop wraps and yields no rows, so the test silently
+    # never fired. Use explicit 20-bar buckets indexed off the tail.
     if n >= 120:
-        month_lows = [df["Low"].iloc[i:i+20].min() for i in range(-120, 0, 20)]
-        if all(month_lows[i] <= month_lows[i+1] for i in range(len(month_lows)-1)):
+        month_lows = [df["Low"].iloc[-(120 - k * 20):-(100 - k * 20) if k < 5 else None].min()
+                      for k in range(6)]
+        if all(month_lows[i] <= month_lows[i + 1] for i in range(len(month_lows) - 1)):
             score += 10
             reasons.append("Higher monthly lows — strong accumulation pattern")
     
@@ -548,9 +555,14 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
             if hv_max > hv_min:
                 setup.iv_rank = round((hv_30 - hv_min) / (hv_max - hv_min) * 100, 1)
             
-            # IV Percentile (% of days where HV was lower than current)
-            lower_count = (rolling_hv.iloc[-252:] < hv_30).sum()
-            setup.iv_percentile = round(lower_count / 252 * 100, 1)
+            # IV Percentile (% of days where HV was lower than current).
+            # Divide by the count of *valid* (non-NaN) rolling-HV observations,
+            # not by 252, otherwise the first ~30 NaN warm-up bars bias the
+            # percentile downward by ~7 points and miscategorise IV regime.
+            valid_hv = rolling_hv.iloc[-252:].dropna()
+            if len(valid_hv) > 0:
+                lower_count = int((valid_hv < hv_30).sum())
+                setup.iv_percentile = round(lower_count / len(valid_hv) * 100, 1)
     
     # 2. Max Pain estimate (nearest round number with most activity)
     # Without real OI data, estimate from price levels

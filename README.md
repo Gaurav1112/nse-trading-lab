@@ -60,11 +60,11 @@ nse-trading-lab/
 ├── nse_backtest/              # Core framework
 │   ├── __init__.py
 │   ├── data.py                # NSE/BSE data fetching (yfinance)
-│   ├── strategies.py          # 8 built-in strategies
+│   ├── strategies.py          # 11 built-in strategies
 │   ├── engine.py              # Backtesting engine with Zerodha costs
 │   ├── analytics.py           # Metrics, reports, charts
 │   ├── scorer.py              # GO/NO-GO scoring engine (6 dimensions)
-│   ├── screener.py            # Daily swing screener (5 scan types)
+│   ├── screener.py            # Daily swing screener (6 scan types)
 │   └── sample_data.py         # Synthetic data for testing
 ├── custom_strategies/         # Your own strategies go here
 │   └── example_strategy.py
@@ -114,6 +114,7 @@ The analyzer scores each stock on 6 dimensions (0-100 each):
 | Squeeze | Bollinger Band squeeze about to expand |
 | Volume Surge | Unusual volume spike with bullish candle |
 | Supertrend Flip | Supertrend indicator turning bullish |
+| Trend Continuation | Strong established uptrend with pullback entry |
 
 ## Built-in Strategies
 
@@ -170,7 +171,7 @@ intraday rates automatically when ``TradeConfig.trading_mode = "INTRADAY"``:
 
 **MTF mode** (Margin Trade Facility): set ``trading_mode="MTF"`` — adds an
 interest accrual on the borrowed portion (default 18% p.a.) per holding day,
-and applies a leverage factor configurable via ``mtf_leverage``. The MTF
+and applies a leverage factor configurable via ``mtf_margin_pct``. The MTF
 position tracker page in the UI projects breakeven drift and exit scenarios.
 
 You can customize in `TradeConfig`:
@@ -205,7 +206,7 @@ config = TradeConfig(
 - [x] 11 built-in strategies
 - [x] Strategy comparison and ranking
 - [x] Equity curves, drawdown charts, metrics
-- [x] Daily stock screener (6 scan types: momentum, mean-reversion, squeeze, volume, supertrend, continuation)
+- [x] Daily stock screener (6 scan types: breakout, reversal, squeeze, volume surge, supertrend flip, trend continuation)
 - [x] MTF position risk dashboard (with leverage + interest accrual)
 - [x] Multi-stock portfolio backtesting
 - [x] 3-round 16-expert adversarial security/correctness audit (61 regression tests)

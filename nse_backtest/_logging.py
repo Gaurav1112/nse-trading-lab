@@ -48,16 +48,20 @@ def _init() -> None:
             ch.setFormatter(fmt)
             root.addHandler(ch)
 
-        # Rotating file handler (opt-in)
+        # Rotating file handler (opt-in) — guard against duplicate handlers
+        # on Streamlit reruns / repeated module imports, which would otherwise
+        # accumulate one RotatingFileHandler per rerun and (a) duplicate every
+        # log line N× and (b) leak file descriptors until quota exceeded.
         if os.environ.get("NSE_LOG_FILE", "0") == "1":
             log_dir = Path.home() / ".nse_trading_lab_cache"
             try:
                 log_dir.mkdir(parents=True, exist_ok=True)
-                fh = logging.handlers.RotatingFileHandler(
-                    log_dir / "nse.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"
-                )
-                fh.setFormatter(fmt)
-                root.addHandler(fh)
+                if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+                    fh = logging.handlers.RotatingFileHandler(
+                        log_dir / "nse.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+                    )
+                    fh.setFormatter(fmt)
+                    root.addHandler(fh)
             except Exception:  # pragma: no cover - non-fatal
                 pass
 

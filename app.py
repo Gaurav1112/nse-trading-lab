@@ -405,7 +405,10 @@ Examples:
     if not args.command:
         parser.print_help()
         print("\n  Quick start: python app.py demo")
-        return
+        # Exit with status 2 (POSIX "command line usage error") so wrappers
+        # and CI scripts can detect "no subcommand provided" without parsing
+        # output. Previously returned 0 which falsely signalled success.
+        sys.exit(2)
 
     args.func(args)
 

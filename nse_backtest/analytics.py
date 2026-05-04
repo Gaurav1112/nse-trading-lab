@@ -42,12 +42,15 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
             "cagr_pct": 0.0, "buy_hold_cagr_pct": 0.0,
             "sharpe_ratio": 0.0, "sortino_ratio": 0.0,
             "max_drawdown_pct": 0.0, "max_drawdown_duration_days": 0,
+            "max_dd_duration_days": 0,
             "calmar_ratio": 0.0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "breakeven_trades": 0, "win_rate_pct": 0.0,
             "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "profit_factor": 0.0,
             "expectancy_inr": 0.0, "total_costs_inr": 0.0,
             "avg_holding_days": 0, "annualized_volatility_pct": 0.0,
             "n_trading_days": 0,
+            "final_equity": float(config.initial_capital),
+            "n_years": 0.0,
         }
 
     # Basic returns
@@ -74,14 +77,16 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     std = daily_returns.std()
     sharpe = np.sqrt(252) * mean_excess / std if std > 1e-10 else 0.0
 
-    # Sortino Ratio: when there is no (or only one) downside observation, the
-    # strategy has no realised downside risk in the sample. Return +inf for a
-    # positive excess return (perfect risk-adjusted profile) and 0 otherwise so
-    # downstream comparisons don't silently treat a flawless run as mediocre.
-    downside = daily_returns[daily_returns < 0]
-    down_std = downside.std() if len(downside) > 1 else 0
-    if down_std > 1e-10:
-        sortino = np.sqrt(252) * mean_excess / down_std
+    # Sortino Ratio — use **target downside deviation** over the full sample
+    # (zeroes for non-negative returns), which is the canonical Sortino. The
+    # naive ``daily_returns[daily_returns<0].std()`` understates downside risk
+    # because (a) it divides by the loss-day count rather than n_total and
+    # (b) std subtracts the *mean of losses* (already negative), inflating the
+    # ratio by ~20-30% on typical NSE backtests.
+    neg = np.minimum(daily_returns - rf_daily, 0.0)
+    target_dd = float(np.sqrt(np.mean(neg ** 2)))
+    if target_dd > 1e-10:
+        sortino = np.sqrt(252) * mean_excess / target_dd
     else:
         sortino = float("inf") if mean_excess > 0 else 0.0
 
@@ -271,7 +276,8 @@ def plot_results(
     # --- Drawdown ---
     ax2 = axes[1]
     rolling_max = equity.cummax()
-    drawdown = (equity - rolling_max) / rolling_max * 100
+    drawdown = (equity - rolling_max) / rolling_max.replace(0, np.nan) * 100
+    drawdown = drawdown.fillna(0)
     ax2.fill_between(equity.index, drawdown.values, 0, color="#F44336", alpha=0.3)
     ax2.plot(equity.index, drawdown.values, color="#F44336", linewidth=0.8)
     ax2.set_ylabel("Drawdown (%)")

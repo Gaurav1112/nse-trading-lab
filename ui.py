@@ -79,6 +79,8 @@ def _atomic_write_text(path: str, text: str) -> None:
         raise
 
 
+import copy
+
 # ── Session defaults ──
 DEFAULTS = {"capital": 100000.0, "risk_pct": 2.0, "sl_pct": 7.0,
             "analyze_sym": "", "auto_analyze": False, "nav_page": 0,
@@ -86,7 +88,12 @@ DEFAULTS = {"capital": 100000.0, "risk_pct": 2.0, "sl_pct": 7.0,
             "journal": []}
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
-        st.session_state[k] = v
+        # Deep-copy mutable defaults so each user's session_state holds its
+        # own list/dict instance. Without this, the module-level list is
+        # shared by reference across all Streamlit Cloud sessions running on
+        # the same pod, and one user's ``watchlist.append(...)`` leaks into
+        # every other session's "default" watchlist.
+        st.session_state[k] = copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v
 
 # ── Professional CSS ──
 st.markdown("""<style>
@@ -1078,10 +1085,18 @@ elif page == "📋 Journal":
                         st.session_state.journal = loaded
                         st.session_state.journal_loaded = True
                     else:
+                        # Corrupted/legacy journal file (not a list). Fall
+                        # back to an empty journal so downstream UI code that
+                        # reads st.session_state.journal doesn't KeyError.
+                        st.session_state.journal = []
                         st.session_state.journal_loaded = True
+                        st.warning("Journal file format unrecognised — starting with an empty journal.")
             else:
                 st.session_state.journal_loaded = True
         except Exception as e:
+            # Ensure journal is set even when load fails partway.
+            if "journal" not in st.session_state:
+                st.session_state.journal = []
             st.session_state.journal_loaded = True
             st.warning(f"Could not load journal: {e}")
 
@@ -1111,7 +1126,18 @@ elif page == "📋 Journal":
         j_lesson = st.text_area("Lesson learned (fill after exit)", "", key="j_l", height=60)
 
         if st.button("💾  Save Trade", type="primary", use_container_width=True):
-            if not j_sym:
+            # Validate the symbol with the same regex the analyse page uses
+            # to keep journal entries clean and prevent stored-XSS / lookup
+            # mismatches when the symbol is later passed to fetch_nse().
+            try:
+                j_sym_clean = _validate_sym_ui(j_sym) if j_sym else ""
+            except ValueError as ve:
+                j_sym_clean = ""
+                st.error(f"Invalid symbol: {ve}")
+                j_sym_clean = None  # sentinel: skip remaining checks
+            if j_sym_clean is None:
+                pass
+            elif not j_sym_clean:
                 st.error("Enter a stock symbol")
             elif j_entry <= 0:
                 st.error("Enter a valid entry price")
@@ -1120,7 +1146,7 @@ elif page == "📋 Journal":
             else:
                 pnl = (j_exit - j_entry) * j_qty * (1 if j_dir == "LONG" else -1) if j_exit > 0 else 0
                 trade = {
-                    "date": str(j_date), "symbol": j_sym.strip().upper(), "dir": j_dir,
+                    "date": str(j_date), "symbol": j_sym_clean, "dir": j_dir,
                     "mode": j_mode, "entry": j_entry, "exit": j_exit, "qty": j_qty,
                     "pnl": round(pnl, 2), "reason": j_reason, "lesson": j_lesson,
                     "status": "CLOSED" if j_exit > 0 else "OPEN"
@@ -1128,7 +1154,7 @@ elif page == "📋 Journal":
                 st.session_state.journal.append(trade)
                 saved, err = _save_journal()
                 if saved:
-                    st.success(f"✅ Saved {j_sym.upper()} — written to {JOURNAL_FILE}")
+                    st.success(f"✅ Saved {j_sym_clean} — written to {JOURNAL_FILE}")
                 else:
                     st.warning(f"Saved in session but file write failed: {err}")
                 st.rerun()
