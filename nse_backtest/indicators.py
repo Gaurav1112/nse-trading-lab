@@ -43,8 +43,8 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
     ks = kijun_sen.iloc[-1]
     sa = senkou_a.iloc[-1]
     sb = senkou_b_line.iloc[-1]
-    # Chikou: compare close from kijun bars ago to its position vs today's price
-    chikou = chikou_span.iloc[-kijun - 1] if len(chikou_span) > kijun else np.nan
+    # Chikou bull: today's close > close `kijun` bars ago (canonical confirmation).
+    chikou = close.iloc[-1 - kijun] if len(close) > kijun else np.nan
 
     # Guard against NaNs in early-bar Ichimoku values.
     if any(pd.isna(v) for v in (ts, ks, sa, sb)):

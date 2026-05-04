@@ -8,8 +8,8 @@ Built to help you **make data-driven trading decisions instead of gut-feel bets*
 
 - **Web Dashboard** — Full UI with stock analyzer, screener, backtester, position tracker
 - **GO/WAIT/AVOID Verdicts** — 6-dimensional scoring engine rates every stock
-- **Swing Screener** — 5 scan types: breakout, reversal, squeeze, volume surge, supertrend flip
-- **8 Built-in Strategies** — All backtested with look-ahead bias protection
+- **Swing Screener** — 6 scan types: breakout, reversal, squeeze, volume surge, supertrend flip, trend continuation
+- **11 Built-in Strategies** — All backtested with look-ahead bias protection (Zerodha cost model + STT/IPFT)
 - **Zerodha Cost Model** — Exact STT, stamp duty, GST, slippage
 - **MTF Position Tracker** — Interest burn projection, breakeven drift, exit scenarios
 - **Position Sizing** — 2% risk rule with exact share counts
@@ -83,7 +83,7 @@ nse-trading-lab/
 | Command | What it does |
 |---------|-------------|
 | `python app.py analyze SYMBOL` | Full technical analysis + GO/NO-GO verdict |
-| `python app.py analyze SYMBOL --full` | Above + backtests all 8 strategies |
+| `python app.py analyze SYMBOL --full` | Above + backtests all 11 strategies |
 | `python app.py screen` | Scan Nifty 50 for swing setups |
 | `python app.py screen --symbols X,Y,Z` | Scan custom watchlist |
 | `python app.py backtest SYMBOL` | Backtest all strategies with charts |
@@ -187,15 +187,16 @@ config = TradeConfig(
 
 ## Roadmap
 
-- [x] Core backtesting engine with Zerodha costs
-- [x] 8 built-in strategies
+- [x] Core backtesting engine with Zerodha costs (incl. STT, IPFT, GST, stamp duty)
+- [x] 11 built-in strategies
 - [x] Strategy comparison and ranking
 - [x] Equity curves, drawdown charts, metrics
-- [ ] Daily stock screener (momentum/mean-reversion)
-- [ ] MTF position risk dashboard
-- [ ] Kite Connect integration for alerts
+- [x] Daily stock screener (6 scan types: momentum, mean-reversion, squeeze, volume, supertrend, continuation)
+- [x] MTF position risk dashboard (with leverage + interest accrual)
+- [x] Multi-stock portfolio backtesting
+- [x] 3-round 16-expert adversarial security/correctness audit (61 regression tests)
+- [ ] Kite Connect integration for live alerts
 - [ ] Walk-forward optimization
-- [ ] Multi-stock portfolio backtesting
 - [ ] Sector rotation strategy
 
 ## Important Disclaimer

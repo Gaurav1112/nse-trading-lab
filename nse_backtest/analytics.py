@@ -74,10 +74,16 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     std = daily_returns.std()
     sharpe = np.sqrt(252) * mean_excess / std if std > 1e-10 else 0.0
 
-    # Sortino Ratio
+    # Sortino Ratio: when there is no (or only one) downside observation, the
+    # strategy has no realised downside risk in the sample. Return +inf for a
+    # positive excess return (perfect risk-adjusted profile) and 0 otherwise so
+    # downstream comparisons don't silently treat a flawless run as mediocre.
     downside = daily_returns[daily_returns < 0]
     down_std = downside.std() if len(downside) > 1 else 0
-    sortino = np.sqrt(252) * mean_excess / down_std if down_std > 1e-10 else 0.0
+    if down_std > 1e-10:
+        sortino = np.sqrt(252) * mean_excess / down_std
+    else:
+        sortino = float("inf") if mean_excess > 0 else 0.0
 
     # Max Drawdown
     rolling_max = equity.cummax()
@@ -101,10 +107,15 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     avg_win = np.mean([t.pnl_pct for t in winning]) if winning else 0
     avg_loss = np.mean([t.pnl_pct for t in losing]) if losing else 0
 
-    # Profit Factor
+    # Profit Factor — float('inf') when there are wins and zero losses (signals
+    # "all winners" cleanly to downstream callers / UI rather than the legacy
+    # 99.99 sentinel which conflates with merely-very-good strategies).
     gross_profit = sum(t.pnl for t in winning)
     gross_loss = abs(sum(t.pnl for t in losing))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (99.99 if gross_profit > 0 else 0.0)
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    else:
+        profit_factor = float("inf") if gross_profit > 0 else 0.0
 
     # Expectancy per trade
     expectancy = sum(t.pnl for t in trades) / n_trades if n_trades > 0 else 0

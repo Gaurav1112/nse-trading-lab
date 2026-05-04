@@ -46,6 +46,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate --output-dir to defend against path traversal (e.g. "../../etc").
+    # Allow the bare default, or any path resolved under the CWD.
+    cwd_real = os.path.realpath(os.getcwd())
+    out_real = os.path.realpath(args.output_dir)
+    if not (out_real == cwd_real or out_real.startswith(cwd_real + os.sep)):
+        print(f"Error: --output-dir {args.output_dir!r} resolves outside the working directory.")
+        sys.exit(2)
+    os.makedirs(out_real, exist_ok=True)
+    args.output_dir = out_real
+
     # Fetch data
     print(f"\n{'='*65}")
     print(f"  NSE BACKTESTER — {args.symbol}")

@@ -158,10 +158,10 @@ def annualized_volatility(returns: pd.Series, trading_days: int = 252) -> float:
 
 
 def calmar_ratio(cagr_pct: float, max_drawdown_pct: float) -> float:
-    """Calmar ratio = CAGR / Max Drawdown."""
+    """Calmar ratio = CAGR / |Max Drawdown|. Signed: negative CAGR -> negative Calmar."""
     if max_drawdown_pct == 0:
-        return 0
-    return abs(cagr_pct / max_drawdown_pct)
+        return 0.0
+    return cagr_pct / abs(max_drawdown_pct)
 
 
 def compute_var_cvar(equity_curve: pd.Series) -> dict:

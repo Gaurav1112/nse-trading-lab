@@ -128,6 +128,7 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     else:
         # Near breakout — entry at 20 EMA or current
         entry = max(ema20_val, current - 0.5 * atr)
+        entry = min(entry, current)  # Don't set entry above current price
         entry_note = f"Buy near Rs.{entry:.0f} (20 EMA support)"
 
     # Support = 20 EMA or recent swing low
@@ -277,6 +278,7 @@ def scan_squeeze(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
 
     # ENTRY: At upper Bollinger Band (buy the breakout)
     entry = bb_upper.iloc[-1]
+    entry = max(entry, current)  # Squeeze breakout: enter at trigger level (BB upper or current, whichever is higher)
     entry_note = f"Buy on breakout above Rs.{entry:.0f} (upper BB)"
     notes.append(entry_note)
 

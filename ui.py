@@ -32,6 +32,53 @@ from nse_backtest.trading_modes import (analyze_swing, analyze_positional, analy
 
 st.set_page_config(page_title="Trading Lab", page_icon="◆", layout="wide")
 
+
+# ── Security helpers ──
+_CSV_INJECT_RE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Defang CSV/Excel formula-injection. Prefix dangerous leading chars with '."""
+    if value is None:
+        return ""
+    s = str(value)
+    if s and s[0] in _CSV_INJECT_RE:
+        return "'" + s
+    return s
+
+
+def _safe_csv(df: pd.DataFrame) -> str:
+    """Return a CSV string with every cell sanitised against formula injection."""
+    if df is None or df.empty:
+        return df.to_csv(index=False) if df is not None else ""
+    safe = df.applymap(_csv_safe) if hasattr(df, "applymap") else df.map(_csv_safe)
+    return safe.to_csv(index=False)
+
+
+def _safe_filename(name: str, fallback: str = "export") -> str:
+    """Restrict filenames to a safe alnum/_/- charset."""
+    import re as _re
+    s = _re.sub(r"[^A-Za-z0-9_\-]", "_", str(name or ""))[:40]
+    return s or fallback
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """Write text atomically (tempfile in same dir + os.replace)."""
+    import tempfile as _tf
+    d = os.path.dirname(path) or "."
+    fd, tmp = _tf.mkstemp(prefix=".tmp_", suffix=".json", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ── Session defaults ──
 DEFAULTS = {"capital": 100000.0, "risk_pct": 2.0, "sl_pct": 7.0,
             "analyze_sym": "", "auto_analyze": False, "nav_page": 0,
@@ -793,8 +840,8 @@ elif page == "📊 Screener":
                                      "SL": f"₹{s.stop_loss:,.0f}", "T1": f"₹{s.target_1:,.0f}",
                                      "R:R": f"{s.risk_reward:.1f}", "Qty": s.suggested_qty}
                                     for sym, _, s in all_results]
-                    st.download_button("📥 CSV", pd.DataFrame(csv_rows).to_csv(index=False),
-                                       f"scan_{scan_mode.split()[0]}_{datetime.now():%Y%m%d}.csv", "text/csv")
+                    st.download_button("📥 CSV", _safe_csv(pd.DataFrame(csv_rows)),
+                                       f"scan_{_safe_filename(scan_mode.split()[0])}_{datetime.now():%Y%m%d}.csv", "text/csv")
 
                     for i, (sym, sdf, s) in enumerate(all_results):
                         sig = getattr(s, 'signal', '?')
@@ -935,7 +982,7 @@ elif page == "💼 Positions":
                        "Net": f"₹{(ep - pa) * psh - ti:,.0f}", "": "✅" if (ep - pa) * psh - ti > 0 else "❌"}
                      for ep in range(lo, hi + step, step)]
             st.dataframe(pd.DataFrame(exits), use_container_width=True, hide_index=True)
-            st.download_button("📥 Export", pd.DataFrame(exits).to_csv(index=False), f"{ps}_exit.csv", "text/csv")
+            st.download_button("📥 Export", _safe_csv(pd.DataFrame(exits)), f"{_safe_filename(ps)}_exit.csv", "text/csv")
     except Exception as e: st.error(f"Error: {e}")
 
 
@@ -1000,6 +1047,9 @@ elif page == "📋 Journal":
     if "journal_loaded" not in st.session_state:
         try:
             if os.path.exists(JOURNAL_FILE):
+                # Defend against runaway journal files (DoS).
+                if os.path.getsize(JOURNAL_FILE) > 5 * 1024 * 1024:
+                    raise ValueError("Journal file >5MB — refusing to load")
                 with open(JOURNAL_FILE, "r") as f:
                     loaded = json.loads(f.read())
                     if isinstance(loaded, list):
@@ -1014,10 +1064,12 @@ elif page == "📋 Journal":
             st.warning(f"Could not load journal: {e}")
 
     def _save_journal():
-        """Write journal to disk."""
+        """Write journal to disk atomically (tempfile + os.replace)."""
         try:
-            with open(JOURNAL_FILE, "w") as f:
-                f.write(json.dumps(st.session_state.journal, indent=2, default=str))
+            _atomic_write_text(
+                JOURNAL_FILE,
+                json.dumps(st.session_state.journal, indent=2, default=str),
+            )
             return True, ""
         except Exception as e:
             return False, str(e)
@@ -1104,7 +1156,7 @@ elif page == "📋 Journal":
         # Export and clear
         ec1, ec2 = st.columns(2)
         with ec1:
-            st.download_button("📥 Export CSV", jdf.to_csv(index=False), "trade_journal.csv", "text/csv")
+            st.download_button("📥 Export CSV", _safe_csv(jdf), "trade_journal.csv", "text/csv")
         with ec2:
             if st.button("🗑️ Clear All Trades"):
                 st.session_state.journal = []

@@ -710,8 +710,14 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         result.expected_gain_pct = prob["expected_gain_pct"]
         result.expected_loss_pct = prob["expected_loss_pct"]
         result.expected_value_pct = prob["expected_value_pct"]
-        # If expected value is negative, override verdict to AVOID — never trade negative-EV setups.
-        if result.expected_value_pct is not None and result.expected_value_pct < 0 and result.verdict == "GO":
+        # If expected value is negative, downgrade verdict — never trade negative-EV setups.
+        # Cover both GO (downgrade to AVOID) and WAIT (downgrade to AVOID) — only an
+        # explicit AVOID verdict already reflects the risk and is left unchanged.
+        if (
+            result.expected_value_pct is not None
+            and result.expected_value_pct < 0
+            and result.verdict in ("GO", "WAIT")
+        ):
             result.verdict = "AVOID"
             result.confidence = "MEDIUM"
             adv_reasons.append("⛔ Negative expected value — verdict downgraded to AVOID")

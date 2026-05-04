@@ -40,6 +40,13 @@ def _validate_symbol(symbol: str) -> str:
     s = symbol.strip().upper()
     if not s:
         raise ValueError("Symbol is empty")
+    # Strip exchange suffix if user accidentally included it (e.g. "INFY.NS" or "TCS.BO")
+    for suffix in (".NS", ".BO", ".BSE", ".NSE"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    if not s:
+        raise ValueError(f"Invalid symbol: {symbol!r} (only suffix)")
     if not SYMBOL_RE.match(s):
         raise ValueError(f"Invalid symbol: {symbol!r}")
     return s
@@ -64,7 +71,7 @@ def _cache_path(symbol: str, exchange: str, start: str, end: str) -> str:
     return full
 
 
-def _cache_is_fresh(path: str, max_age_hours: int = 4) -> bool:
+def _cache_is_fresh(path: str, max_age_hours: float = 4) -> bool:
     if not os.path.exists(path):
         return False
     age = datetime.now().timestamp() - os.path.getmtime(path)
@@ -112,6 +119,17 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
             if time.time() - t0 > timeout:
                 log.warning("yf.download for %s exceeded soft timeout %.1fs",
                             ticker, timeout)
+            # yfinance returns empty DataFrame on rate-limit / bad symbol rather
+            # than raising. Treat empty as retriable so transient rate-limits
+            # don't poison the result.
+            if df is None or df.empty:
+                if attempt < retries - 1:
+                    backoff = 1.5 ** attempt
+                    log.warning("yf.download attempt %d/%d for %s returned empty — retrying in %.1fs",
+                                attempt + 1, retries, ticker, backoff)
+                    time.sleep(backoff)
+                    continue
+                return df  # final attempt: return empty for caller to handle
             return df
         except Exception as e:
             last_err = e
@@ -142,7 +160,11 @@ def fetch_nse(
         raise ValueError(f"Invalid date range start={start} end={end}: {e}")
 
     cache_file = _cache_path(symbol, exchange, start, end)
-    if use_cache and _cache_is_fresh(cache_file):
+    # If end is today (intraday data still updating), shorten cache freshness so
+    # we re-fetch hourly rather than serve a 4h-old snapshot during market hours.
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    cache_max_age = 1.0 if end >= today_str else 4.0
+    if use_cache and _cache_is_fresh(cache_file, max_age_hours=cache_max_age):
         try:
             df = pd.read_parquet(cache_file)
             if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
@@ -166,7 +188,7 @@ def fetch_nse(
     if missing:
         raise ValueError(f"yfinance response for {ticker} missing columns: {missing}")
 
-    df = df.dropna(subset=["Close"])
+    df = df.dropna(subset=list(_REQUIRED_COLS))
     df.index = pd.to_datetime(df.index, errors="coerce")
     df = df[df.index.notna()]
     df = df.sort_index()
