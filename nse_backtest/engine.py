@@ -31,7 +31,10 @@ class TradeConfig:
     stt_buy_pct: float = 0.001
     stt_sell_pct: float = 0.001
     stt_intraday_sell_pct: float = 0.00025
-    stamp_duty_pct: float = 0.00015
+    # Stamp duty (FY 2024-25): 0.015% on delivery buy, 0.003% on intraday buy.
+    # Applied on BUY only (not on sell). Set both for explicit per-mode lookup.
+    stamp_duty_pct: float = 0.00015            # delivery rate
+    stamp_duty_intraday_pct: float = 0.00003   # intraday rate
     nse_txn_pct: float = 0.0000297
     bse_txn_pct: float = 0.0000375
     sebi_pct: float = 0.000001
@@ -106,7 +109,12 @@ def _buy_cost(price: float, shares: int, config: TradeConfig) -> float:
     sebi = turnover * config.sebi_pct
     ipft = turnover * config.ipft_pct
     gst = (brokerage + txn + sebi + ipft) * config.gst_pct
-    stamp = turnover * config.stamp_duty_pct
+    # Stamp duty differs by mode: 0.003% intraday vs 0.015% delivery (MTF treated as
+    # delivery-style settlement for stamp purposes per current SEBI rules).
+    if config.trading_mode == "INTRADAY":
+        stamp = turnover * config.stamp_duty_intraday_pct
+    else:
+        stamp = turnover * config.stamp_duty_pct
     stt = turnover * config.stt_buy_pct if config.trading_mode == "DELIVERY" else 0.0
     return brokerage + txn + sebi + ipft + gst + stamp + stt
 
@@ -288,14 +296,19 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
     df["equity"] = equity
 
     first_close = float(df["Close"].iloc[0])
-    bh_entry = first_close * (1 + config.slippage_pct)
-    bh_shares = int(config.initial_capital // bh_entry)
-    if bh_shares > 0:
-        bh_buy_cost = _buy_cost(bh_entry, bh_shares, config)
-        bh_remainder = config.initial_capital - bh_shares * bh_entry - bh_buy_cost
-        df["buy_hold_equity"] = bh_shares * df["Close"] + bh_remainder
-    else:
+    if not np.isfinite(first_close) or first_close <= 0:
+        # Defensive: NaN/zero in the first close row would crash int() conversion or
+        # produce a degenerate benchmark. Fall back to flat-cash buy-and-hold.
         df["buy_hold_equity"] = float(config.initial_capital)
+    else:
+        bh_entry = first_close * (1 + config.slippage_pct)
+        bh_shares = int(config.initial_capital // bh_entry)
+        if bh_shares > 0:
+            bh_buy_cost = _buy_cost(bh_entry, bh_shares, config)
+            bh_remainder = config.initial_capital - bh_shares * bh_entry - bh_buy_cost
+            df["buy_hold_equity"] = bh_shares * df["Close"] + bh_remainder
+        else:
+            df["buy_hold_equity"] = float(config.initial_capital)
 
     return {
         "equity_curve": pd.Series(equity, index=df.index),

@@ -121,7 +121,9 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
     # Position sizing
     risk_per_share = setup.entry_price - setup.stop_loss
     if risk_per_share > 0:
-        setup.suggested_qty = int((capital * risk_pct / 100) / risk_per_share)
+        # Floor at 1 share — a "zero-share trade" is meaningless; the user wants
+        # to know if the setup is actionable, not a pure-math optimum.
+        setup.suggested_qty = max(1, int((capital * risk_pct / 100) / risk_per_share))
         setup.position_value = setup.suggested_qty * setup.entry_price
         setup.max_loss = setup.suggested_qty * risk_per_share
     
@@ -248,7 +250,7 @@ def analyze_positional(df: pd.DataFrame, symbol: str, capital: float = 100000,
     )
     
     if risk > 0:
-        setup.suggested_qty = int((capital * risk_pct / 100) / risk)
+        setup.suggested_qty = max(1, int((capital * risk_pct / 100) / risk))
         setup.position_value = setup.suggested_qty * cur
         setup.max_loss = setup.suggested_qty * risk
     
@@ -494,7 +496,7 @@ def analyze_intraday(df: pd.DataFrame, symbol: str, capital: float = 100000,
     )
     
     if risk > 0:
-        setup.suggested_qty = int((capital * risk_pct / 100) / risk)
+        setup.suggested_qty = max(1, int((capital * risk_pct / 100) / risk))
         setup.position_value = setup.suggested_qty * cur
         setup.max_loss = setup.suggested_qty * risk
     
@@ -506,6 +508,17 @@ def analyze_intraday(df: pd.DataFrame, symbol: str, capital: float = 100000,
 # ════════════════════════════════════════════════════════════════
 #  OPTIONS ANALYSIS
 # ════════════════════════════════════════════════════════════════
+
+
+def _strike(price: float) -> int:
+    """Snap a continuous strike candidate to a positive integer.
+
+    Defends against ``_strike(cur - 2*atr) <= 0`` for low-priced stocks (e.g.,
+    cur=Rs 12 with atr=Rs 8 would otherwise produce a negative or zero
+    strike that has no meaningful contract).
+    """
+    return max(1, int(round(price)))
+
 
 def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
     """
@@ -570,7 +583,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
         if bullish:
             setup.strategies.append({
                 "name": "Bull Put Spread (Credit)",
-                "legs": f"Sell {int(cur-atr)}PE, Buy {int(cur-2*atr)}PE",
+                "legs": f"Sell {_strike(cur - atr)}PE, Buy {_strike(cur - 2*atr)}PE",
                 "thesis": "High IV + bullish → collect premium below support",
                 "max_profit": "Net credit received",
                 "max_loss": "Spread width - credit",
@@ -578,7 +591,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
             })
             setup.strategies.append({
                 "name": "Short Strangle",
-                "legs": f"Sell {int(cur+2*atr)}CE, Sell {int(cur-2*atr)}PE",
+                "legs": f"Sell {_strike(cur + 2*atr)}CE, Sell {_strike(cur - 2*atr)}PE",
                 "thesis": "High IV will contract → both premiums decay",
                 "max_profit": "Total credit",
                 "max_loss": "Unlimited (use with hedge)",
@@ -587,7 +600,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
         else:
             setup.strategies.append({
                 "name": "Bear Call Spread (Credit)",
-                "legs": f"Sell {int(cur+atr)}CE, Buy {int(cur+2*atr)}CE",
+                "legs": f"Sell {_strike(cur + atr)}CE, Buy {_strike(cur + 2*atr)}CE",
                 "thesis": "High IV + bearish → collect premium above resistance",
                 "max_profit": "Net credit received",
                 "max_loss": "Spread width - credit",
@@ -595,7 +608,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
             })
             setup.strategies.append({
                 "name": "Iron Condor",
-                "legs": f"Sell {int(cur-atr)}PE/{int(cur+atr)}CE, Buy {int(cur-2*atr)}PE/{int(cur+2*atr)}CE",
+                "legs": f"Sell {_strike(cur - atr)}PE/{_strike(cur + atr)}CE, Buy {_strike(cur - 2*atr)}PE/{_strike(cur + 2*atr)}CE",
                 "thesis": "Range-bound + high IV → collect premium both sides",
                 "max_profit": "Total credit",
                 "max_loss": "Spread width - credit",
@@ -607,7 +620,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
         if bullish:
             setup.strategies.append({
                 "name": "Long Call (ATM)",
-                "legs": f"Buy {int(cur)}CE",
+                "legs": f"Buy {_strike(cur)}CE",
                 "thesis": "Low IV + bullish → cheap premium, directional bet",
                 "max_profit": "Unlimited",
                 "max_loss": "Premium paid",
@@ -615,7 +628,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
             })
             setup.strategies.append({
                 "name": "Bull Call Spread (Debit)",
-                "legs": f"Buy {int(cur)}CE, Sell {int(cur+2*atr)}CE",
+                "legs": f"Buy {_strike(cur)}CE, Sell {_strike(cur + 2*atr)}CE",
                 "thesis": "Defined risk bullish with reduced cost",
                 "max_profit": "Spread width - debit",
                 "max_loss": "Net debit paid",
@@ -624,7 +637,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
         elif bearish:
             setup.strategies.append({
                 "name": "Long Put (ATM)",
-                "legs": f"Buy {int(cur)}PE",
+                "legs": f"Buy {_strike(cur)}PE",
                 "thesis": "Low IV + bearish → cheap hedge/directional",
                 "max_profit": "Strike - premium (to zero)",
                 "max_loss": "Premium paid",
@@ -633,7 +646,7 @@ def analyze_options(df: pd.DataFrame, symbol: str) -> OptionsSetup:
         else:
             setup.strategies.append({
                 "name": "Long Straddle",
-                "legs": f"Buy {int(cur)}CE + Buy {int(cur)}PE",
+                "legs": f"Buy {_strike(cur)}CE + Buy {_strike(cur)}PE",
                 "thesis": "Low IV → expect big move in either direction",
                 "max_profit": "Unlimited",
                 "max_loss": "Total premium paid",

@@ -52,7 +52,7 @@ def cmd_analyze(args):
     except Exception as e:
         print(f"  ERROR: Could not fetch data for {symbol}: {e}")
         print(f"  TIP: Try exchange='BO' for BSE, or check the symbol spelling")
-        return
+        sys.exit(1)
 
     print(f"\n  Running analysis...")
     start_time = time.time()
@@ -209,7 +209,7 @@ def cmd_backtest(args):
         df = fetch_nse(symbol, start=args.start)
     except Exception as e:
         print(f"  ERROR: {e}")
-        return
+        sys.exit(1)
 
     config = TradeConfig(
         initial_capital=args.capital,
@@ -373,10 +373,11 @@ Examples:
     p_analyze.add_argument("--full", action="store_true", help="Run backtests too (slower)")
     p_analyze.set_defaults(func=cmd_analyze)
 
-    # screen
+    # screen — --symbols and --universe are mutually exclusive
     p_screen = subparsers.add_parser("screen", help="Daily swing screener")
-    p_screen.add_argument("--symbols", help="Comma-separated symbols (overrides universe)")
-    p_screen.add_argument("--universe", default="nifty50", choices=["nifty50", "nifty100"])
+    screen_src = p_screen.add_mutually_exclusive_group()
+    screen_src.add_argument("--symbols", help="Comma-separated symbols (overrides universe)")
+    screen_src.add_argument("--universe", default="nifty50", choices=["nifty50", "nifty100"])
     p_screen.add_argument("--top", type=int, default=15, help="Max results")
     p_screen.add_argument("--auto-analyze", action="store_true", help="Auto-analyze top picks")
     p_screen.set_defaults(func=cmd_screen)

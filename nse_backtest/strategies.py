@@ -452,12 +452,20 @@ STRATEGIES = {
     "supertrend": supertrend,
     "momentum": momentum_strategy,
     "volume_breakout": volume_breakout,
-    "vwap_reversion": vwap_reversion,
+    # Simple variants — kept under explicit `_simple` keys so the more
+    # advanced institutional implementations don't silently shadow them
+    # when ALL_STRATEGIES merges the two namespaces below.
+    "vwap_reversion_simple": vwap_reversion,
     "regime_adaptive": regime_adaptive,
-    "volatility_expansion": volatility_expansion,
+    "volatility_expansion_simple": volatility_expansion,
 }
 
-# Import institutional strategies and merge
+# Import institutional strategies and merge.
+# NOTE: institutional.py provides upgraded ``vwap_reversion`` and
+# ``volatility_expansion`` implementations; those names land in
+# ALL_STRATEGIES via the merge below. The simple variants above remain
+# available under the ``*_simple`` keys for backwards compatibility and
+# for users who prefer the lighter logic.
 try:
     from .institutional import INSTITUTIONAL_STRATEGIES
     ALL_STRATEGIES = {**STRATEGIES, **INSTITUTIONAL_STRATEGIES}

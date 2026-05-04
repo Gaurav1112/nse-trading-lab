@@ -18,6 +18,7 @@ Full strategy list:
 import sys
 import os
 import argparse
+import pandas as pd
 
 # Add parent to path so imports work
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,17 @@ def main():
     parser.add_argument("--output-dir", default="output", help="Output directory for charts")
 
     args = parser.parse_args()
+
+    # Validate --start <= --end early so users see a clear error rather than a
+    # silent empty fetch (yfinance returns empty when start > end).
+    if args.end is not None:
+        try:
+            if pd.Timestamp(args.start) > pd.Timestamp(args.end):
+                print(f"Error: --start ({args.start}) is after --end ({args.end}).")
+                sys.exit(2)
+        except Exception as e:
+            print(f"Error: invalid --start/--end ({e}).")
+            sys.exit(2)
 
     # Validate --output-dir to defend against path traversal (e.g. "../../etc").
     # Allow the bare default, or any path resolved under the CWD.

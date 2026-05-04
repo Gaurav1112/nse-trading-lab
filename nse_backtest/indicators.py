@@ -329,7 +329,11 @@ def estimate_probability(score_breakdown: dict, df: pd.DataFrame) -> dict:
     # Expected return from ATR (what's realistically achievable)
     close = df["Close"]
     atr = volatility.AverageTrueRange(df["High"], df["Low"], close, 14).average_true_range().iloc[-1]
-    atr_pct = atr / close.iloc[-1] * 100
+    last_close = close.iloc[-1]
+    if pd.notna(last_close) and last_close > 0 and pd.notna(atr):
+        atr_pct = atr / last_close * 100
+    else:
+        atr_pct = 0.0
     
     # Expected 2-week return: ~2-3 ATR if signal is correct
     expected_gain = atr_pct * 2.5  # ~2.5 ATR gain target

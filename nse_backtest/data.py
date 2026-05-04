@@ -72,9 +72,11 @@ def _cache_path(symbol: str, exchange: str, start: str, end: str) -> str:
 
 
 def _cache_is_fresh(path: str, max_age_hours: float = 4) -> bool:
-    if not os.path.exists(path):
+    """Check cache age. Race-safe against concurrent deletion (TOCTOU)."""
+    try:
+        age = datetime.now().timestamp() - os.path.getmtime(path)
+    except (FileNotFoundError, OSError):
         return False
-    age = datetime.now().timestamp() - os.path.getmtime(path)
     return age < max_age_hours * 3600
 
 
@@ -166,10 +168,21 @@ def fetch_nse(
     cache_max_age = 1.0 if end >= today_str else 4.0
     if use_cache and _cache_is_fresh(cache_file, max_age_hours=cache_max_age):
         try:
-            df = pd.read_parquet(cache_file)
-            if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
-                log.debug("Cache hit %s (%d rows)", symbol, len(df))
-                return df
+            # Cap the cache read at 100MB to defend against a poisoned/oversized cache
+            # file (DoS by exhausting memory). A daily-bar 30-year history of one
+            # symbol is well under 1MB; 100MB is generous headroom.
+            try:
+                fsize = os.path.getsize(cache_file)
+            except OSError:
+                fsize = 0
+            if fsize > 100 * 1024 * 1024:
+                log.warning("Cache %s is %d bytes (>100MB) — refusing to load, re-fetching",
+                            cache_file, fsize)
+            else:
+                df = pd.read_parquet(cache_file)
+                if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
+                    log.debug("Cache hit %s (%d rows)", symbol, len(df))
+                    return df
         except Exception as e:
             log.warning("Corrupt cache %s: %s — re-fetching", cache_file, e)
 

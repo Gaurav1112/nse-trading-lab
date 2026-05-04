@@ -21,7 +21,7 @@ from nse_backtest.strategies import STRATEGIES
 from nse_backtest.engine import run_backtest, TradeConfig
 from nse_backtest.analytics import compute_metrics
 from nse_backtest.scorer import analyze_stock, ScoreBreakdown
-from nse_backtest.screener import run_screener
+from nse_backtest.screener import run_screener  # noqa: F401  (kept for backwards-compat re-export; some user notebooks import it from ui)
 from nse_backtest.sample_data import trending_stock, volatile_midcap, sideways_stock
 from nse_backtest.risk import (kelly_criterion, fractional_kelly, volatility_target_size,
                                 check_drawdown_limit, position_size_risk_based,
@@ -354,7 +354,10 @@ def explain_trade(score):
     else: how.append("Limited historical strategy success on this stock")
     if score.risk_reward >= 2: how.append(f"Risk/Reward {score.risk_reward:.1f}:1 — risking ₹1 to make ₹{score.risk_reward:.1f}")
     else: how.append(f"R:R is {score.risk_reward:.1f}:1 — ideally want ≥ 2:1")
-    risk.append(f"SL at ₹{score.stop_loss:.0f} = {(score.current_price - score.stop_loss) / score.current_price * 100:.1f}% downside risk")
+    risk.append(
+        f"SL at ₹{score.stop_loss:.0f} = "
+        f"{((score.current_price - score.stop_loss) / score.current_price * 100) if score.current_price > 0 else 0:.1f}% downside risk"
+    )
     if score.trend_score < 40: risk.append("No strong trend — breakout could fail and reverse")
     if score.momentum_score < 30: risk.append("Weak momentum — stock could drift sideways")
     if score.volume_score < 30: risk.append("Low volume — institutions not backing this move")
@@ -375,7 +378,13 @@ PAGES = ["◆ Dashboard", "🔍 Analyze", "📈 Trading Modes", "📊 Screener",
 
 with st.sidebar:
     st.markdown('<div style="padding:8px 0;font-size:20px;font-weight:700;letter-spacing:-0.02em">◆ Trading Lab</div>', unsafe_allow_html=True)
-    page = st.radio("", PAGES, index=st.session_state.nav_page, label_visibility="collapsed", key="nav")
+    page = st.radio(
+        "",
+        PAGES,
+        index=max(0, min(int(st.session_state.nav_page or 0), len(PAGES) - 1)),
+        label_visibility="collapsed",
+        key="nav",
+    )
     st.session_state.nav_page = PAGES.index(page)
     st.markdown("---")
     # Quick watchlist
@@ -455,7 +464,15 @@ elif page == "🔍 Analyze":
 
     st.markdown("# 🔍 Stock Analysis")
     ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
-    with ac1: sym = st.text_input("Symbol", value=st.session_state.get("analyze_sym", "") or "COALINDIA").upper().strip()
+    with ac1:
+        _raw_sym = st.text_input("Symbol", value=st.session_state.get("analyze_sym", "") or "COALINDIA")
+        # Strict validation — defends against XSS via the symbol field (rendered into
+        # HTML at line ~539 via st.markdown(unsafe_allow_html=True)).
+        try:
+            sym = _validate_sym_ui(_raw_sym)
+        except ValueError:
+            st.error(f"Invalid symbol — only A-Z, 0-9 and . & - ^ allowed (max 20 chars).")
+            sym = ""
     with ac2: rbt = st.checkbox("Backtest", True)
     with ac3: demo = st.checkbox("Demo", False)
     with ac4:
@@ -521,8 +538,13 @@ elif page == "🔍 Analyze":
         # ── Trade Plan ──
         st.markdown("---")
         st.markdown("### Trade Plan")
-        sl_p = (score.current_price - score.stop_loss) / score.current_price * 100
-        t1_p = (score.target_1 - score.current_price) / score.current_price * 100
+        # Defensive: avoid divide-by-zero if upstream data delivered current_price=0.
+        if score.current_price > 0:
+            sl_p = (score.current_price - score.stop_loss) / score.current_price * 100
+            t1_p = (score.target_1 - score.current_price) / score.current_price * 100
+        else:
+            sl_p = 0.0
+            t1_p = 0.0
         shares, pos, loss = pos_calc(score.current_price, score.stop_loss, st.session_state.capital, st.session_state.risk_pct)
 
         tc = st.columns(7)
@@ -889,7 +911,7 @@ elif page == "📊 Screener":
 elif page == "🧪 Backtest":
     st.markdown("# 🧪 Strategy Backtester")
     bc = st.columns([2, 1, 1])
-    with bc[0]: bt_s = st.text_input("Symbol", "RELIANCE").upper()
+    with bc[0]: bt_s = st.text_input("Symbol", "RELIANCE").upper().strip()
     with bc[1]: bt_st = st.date_input("From", datetime(2018, 1, 1))
     with bc[2]: bt_d = st.checkbox("Demo", False, key="btd")
 
@@ -1098,7 +1120,7 @@ elif page == "📋 Journal":
             else:
                 pnl = (j_exit - j_entry) * j_qty * (1 if j_dir == "LONG" else -1) if j_exit > 0 else 0
                 trade = {
-                    "date": str(j_date), "symbol": j_sym.upper(), "dir": j_dir,
+                    "date": str(j_date), "symbol": j_sym.strip().upper(), "dir": j_dir,
                     "mode": j_mode, "entry": j_entry, "exit": j_exit, "qty": j_qty,
                     "pnl": round(pnl, 2), "reason": j_reason, "lesson": j_lesson,
                     "status": "CLOSED" if j_exit > 0 else "OPEN"

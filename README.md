@@ -158,12 +158,20 @@ STRATEGIES["my_strategy"] = my_strategy
 
 ## Transaction Cost Model
 
-The engine uses **Zerodha delivery trading costs** by default:
-- Brokerage: ₹0 (equity delivery)
-- STT: 0.1% on sell side
-- GST: 18% on brokerage
+The engine uses **Zerodha delivery trading costs** by default and switches to
+intraday rates automatically when ``TradeConfig.trading_mode = "INTRADAY"``:
+
+- Brokerage: ₹0 (delivery) / min(₹20, 0.03% turnover) per order (intraday)
+- STT: 0.1% sell (delivery), 0.025% sell (intraday)
+- Stamp duty: 0.015% buy (delivery), 0.003% buy (intraday)
+- GST: 18% on brokerage + transaction charges
 - Slippage: 0.1% assumed
-- Commission: 0.1% round-trip buffer
+- DP charge: ₹15.93 per delivery sell
+
+**MTF mode** (Margin Trade Facility): set ``trading_mode="MTF"`` — adds an
+interest accrual on the borrowed portion (default 18% p.a.) per holding day,
+and applies a leverage factor configurable via ``mtf_leverage``. The MTF
+position tracker page in the UI projects breakeven drift and exit scenarios.
 
 You can customize in `TradeConfig`:
 ```python
@@ -171,11 +179,17 @@ from nse_backtest.engine import TradeConfig
 
 config = TradeConfig(
     initial_capital=200_000,
+    trading_mode="INTRADAY",  # or "DELIVERY" / "MTF"
     stop_loss_pct=0.07,       # 7% stop loss
     take_profit_pct=0.15,     # 15% target
     position_pct=0.5,         # Use 50% of capital per trade
 )
 ```
+
+### Environment Variables
+
+- ``NSE_LOG_LEVEL`` — logging level for ``nse_backtest`` (DEBUG / INFO / WARNING / ERROR). Default: INFO.
+- ``NSE_LOG_FILE`` — optional path; if set, logs are also written to this file.
 
 ## Key Metrics Explained
 

@@ -139,8 +139,10 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
         "sortino_ratio": sortino,
         "calmar_ratio": calmar,
         "max_drawdown_pct": max_dd * 100,
-        "max_dd_duration_days": dd_duration,
         "max_drawdown_duration_days": dd_duration,
+        # Backwards-compatible alias for the canonical key above; consumers should
+        # prefer max_drawdown_duration_days.
+        "max_dd_duration_days": dd_duration,
         "total_trades": n_trades,
         "winning_trades": len(winning),
         "losing_trades": len(losing),

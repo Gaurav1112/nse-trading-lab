@@ -450,7 +450,15 @@ def scan_supertrend_flip(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     )
 
 
-SCANNERS = [scan_breakout, scan_reversal, scan_squeeze, scan_volume_surge, scan_supertrend_flip]
+SCANNERS = [
+    scan_breakout,
+    scan_reversal,
+    scan_squeeze,
+    scan_volume_surge,
+    scan_supertrend_flip,
+]
+# scan_trend_continuation is appended at the end of the file once defined; see
+# `_register_trend_continuation()` below.
 
 
 def scan_trend_continuation(df: pd.DataFrame, symbol: str):
@@ -558,8 +566,10 @@ def scan_trend_continuation(df: pd.DataFrame, symbol: str):
     )
 
 
-# Add to scanner list
-SCANNERS.append(scan_trend_continuation)
+# Idempotent registration — guards against double-append on module reload
+# (e.g., importlib.reload in notebooks, parallel pytest workers).
+if scan_trend_continuation not in SCANNERS:
+    SCANNERS.append(scan_trend_continuation)
 
 
 def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[SwingSetup]:
