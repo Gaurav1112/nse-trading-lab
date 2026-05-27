@@ -373,7 +373,7 @@ def score_backtest(df: pd.DataFrame) -> tuple[float, list[str]]:
             result = run_backtest(strat_data, config)
             metrics = compute_metrics(result)
 
-            if metrics["total_trades"] < 3:
+            if metrics["total_trades"] < 30:
                 continue
 
             valid_strategies += 1

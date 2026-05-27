@@ -135,6 +135,16 @@ def _sell_cost(price: float, shares: int, config: TradeConfig) -> float:
     return brokerage + txn + sebi + ipft + gst + stt + dp
 
 
+def _equity_invested(notional: float, buy_cost: float, interest: float,
+                      config: TradeConfig) -> float:
+    """Return the equity (own capital) invested in a trade — denominator for pnl_pct.
+    MTF: only the margin portion (25%) is own capital, rest is borrowed.
+    DELIVERY/INTRADAY: full notional is own capital."""
+    if config.trading_mode == "MTF":
+        return notional * config.mtf_margin_pct + buy_cost + interest
+    return notional + buy_cost + interest
+
+
 def _mtf_interest(entry_price: float, shares: int, days: int, config: TradeConfig) -> float:
     if config.trading_mode != "MTF" or days <= 0:
         return 0.0
@@ -207,13 +217,15 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
                 if config.trading_mode == "MTF":
                     cash -= entry_p * shares * (1.0 - config.mtf_margin_pct)
 
-                invested = entry_p * shares + buy_cost + interest
+                notional = entry_p * shares
+                invested = notional + buy_cost + interest
+                eq_inv = _equity_invested(notional, buy_cost, interest, config)
                 current_trade.exit_date = date
                 current_trade.exit_price = exit_p
                 current_trade.costs = buy_cost + sc
                 current_trade.interest = interest
                 current_trade.pnl = proceeds - invested
-                current_trade.pnl_pct = current_trade.pnl / invested if invested > 0 else 0
+                current_trade.pnl_pct = current_trade.pnl / eq_inv if eq_inv > 0 else 0
                 current_trade.exit_reason = reason
                 trades.append(current_trade)
 
@@ -252,13 +264,15 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
                 cash -= interest
                 if config.trading_mode == "MTF":
                     cash -= current_trade.entry_price * shares * (1.0 - config.mtf_margin_pct)
-                invested = current_trade.entry_price * shares + buy_cost + interest
+                notional = current_trade.entry_price * shares
+                invested = notional + buy_cost + interest
+                eq_inv = _equity_invested(notional, buy_cost, interest, config)
                 current_trade.exit_date = date
                 current_trade.exit_price = sell_price
                 current_trade.costs = buy_cost + sc
                 current_trade.interest = interest
                 current_trade.pnl = proceeds - invested
-                current_trade.pnl_pct = current_trade.pnl / invested if invested > 0 else 0
+                current_trade.pnl_pct = current_trade.pnl / eq_inv if eq_inv > 0 else 0
                 current_trade.exit_reason = "signal"
                 trades.append(current_trade)
             shares = 0
@@ -282,13 +296,15 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
         cash += proceeds - interest
         if config.trading_mode == "MTF":
             cash -= current_trade.entry_price * shares * (1.0 - config.mtf_margin_pct)
-        invested = current_trade.entry_price * shares + buy_cost + interest
+        notional = current_trade.entry_price * shares
+        invested = notional + buy_cost + interest
+        eq_inv = _equity_invested(notional, buy_cost, interest, config)
         current_trade.exit_date = df.index[-1]
         current_trade.exit_price = fp
         current_trade.costs = buy_cost + sc
         current_trade.interest = interest
         current_trade.pnl = proceeds - invested
-        current_trade.pnl_pct = current_trade.pnl / invested if invested > 0 else 0
+        current_trade.pnl_pct = current_trade.pnl / eq_inv if eq_inv > 0 else 0
         current_trade.exit_reason = "end_of_data"
         trades.append(current_trade)
         shares = 0

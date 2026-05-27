@@ -128,11 +128,14 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     # Total costs
     total_costs = sum(t.costs for t in trades)
 
-    # Average holding period
+    # Average holding period in business days (excludes weekends / market holidays)
     hold_periods = []
     for t in trades:
         if t.exit_date and t.entry_date:
-            hold_periods.append((t.exit_date - t.entry_date).days)
+            bdays = np.busday_count(
+                t.entry_date.date(), t.exit_date.date()
+            )
+            hold_periods.append(max(int(bdays), 1))
     avg_hold = np.mean(hold_periods) if hold_periods else 0
 
     return {

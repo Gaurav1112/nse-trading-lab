@@ -140,7 +140,9 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
             # don't poison the result.
             if df is None or df.empty:
                 if attempt < retries - 1:
-                    backoff = 1.5 ** attempt
+                    # yfinance 429 rate-limit bans last 60-300s; use at least 60s
+                    # backoff after the first retry so re-attempts aren't wasted.
+                    backoff = 60 if attempt >= 1 else 1.5
                     log.warning("yf.download attempt %d/%d for %s returned empty — retrying in %.1fs",
                                 attempt + 1, retries, ticker, backoff)
                     time.sleep(backoff)
@@ -149,7 +151,7 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
             return df
         except Exception as e:
             last_err = e
-            backoff = 1.5 ** attempt
+            backoff = 60 if attempt >= 1 else 1.5
             log.warning("yf.download attempt %d/%d for %s failed: %s — retrying in %.1fs",
                         attempt + 1, retries, ticker, e, backoff)
             time.sleep(backoff)
