@@ -96,3 +96,30 @@ def test_metric_card_renders():
     from components.cards import metric_card
     html = metric_card("Capital", "₹1,00,000", delta="+5%")
     assert "Capital" in html and "+5%" in html
+
+
+# ── charts tests ──
+import pandas as pd, numpy as np
+
+
+def _ohlcv(n=300):
+    np.random.seed(42)
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+    c = 1000 + np.cumsum(np.random.randn(n) * 10)
+    return pd.DataFrame({"Open":c-2,"High":c+5,"Low":c-5,"Close":c,
+                          "Volume":np.random.randint(500_000,5_000_000,n).astype(float)}, index=dates)
+
+
+def test_candlestick_returns_figure():
+    from components.charts import make_candlestick
+    import plotly.graph_objects as go
+    fig = make_candlestick(_ohlcv())
+    assert isinstance(fig, go.Figure)
+    assert any(type(t).__name__ == "Candlestick" for t in fig.data)
+
+
+def test_sector_heat_returns_figure():
+    from components.charts import make_sector_heat
+    import plotly.graph_objects as go
+    fig = make_sector_heat({"IT": 1.5, "Bank": -0.8, "FMCG": None})
+    assert isinstance(fig, go.Figure)
