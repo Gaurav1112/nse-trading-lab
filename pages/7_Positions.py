@@ -1,29 +1,12 @@
-import re
 import streamlit as st
 import pandas as pd
 from components import theme, state
+from components.security import _safe_csv, _safe_filename
 
 st.set_page_config(page_title="Positions | Trading Lab", page_icon="💼", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
 state.init_session()
 st.markdown("# 💼 MTF Position Tracker")
-
-
-def _safe_csv(df) -> str:
-    def _csv_safe(v):
-        s = str(v)
-        if s and s[0] in ('=', '+', '-', '@', '|', '%'):
-            return "'" + s
-        return s
-    if df is None or df.empty:
-        return df.to_csv(index=False) if df is not None else ""
-    safe = df.map(_csv_safe) if hasattr(df, "map") else df.applymap(_csv_safe)
-    return safe.to_csv(index=False)
-
-
-def _safe_filename(name: str, fallback: str = "export") -> str:
-    s = re.sub(r"[^A-Za-z0-9_\-]", "_", str(name or ""))[:40]
-    return s or fallback
 
 
 try:

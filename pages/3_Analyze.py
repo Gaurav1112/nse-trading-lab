@@ -1,12 +1,10 @@
-import re
 import streamlit as st
 from components import theme, state, cards, charts
+from components.security import SYMBOL_RE
 from nse_backtest.data import fetch_nse
 from nse_backtest.scorer import analyze_stock
 from nse_backtest.sample_data import trending_stock
 from nse_backtest.risk import kelly_criterion, position_size_risk_based
-
-SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
 
 st.set_page_config(page_title="Analyze | Trading Lab", page_icon="🔍", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
@@ -35,6 +33,7 @@ def _fetch(sym: str) -> tuple:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_fundamentals(sym: str) -> dict:
+    sym = _validate(sym)
     import yfinance as yf
     result: dict = {}
     try:

@@ -1,5 +1,6 @@
 import streamlit as st
 from components import theme, state
+from components.security import SYMBOL_RE
 from nse_backtest.strategies import STRATEGIES
 from nse_backtest.data import NIFTY100_SYMBOLS
 
@@ -20,7 +21,7 @@ st.markdown("---")
 st.markdown("**Watchlist**")
 wl_str = st.text_input("Symbols (comma-separated)", value=", ".join(state.get_watchlist()))
 if st.button("Update Watchlist"):
-    new_wl = [s.strip().upper() for s in wl_str.split(",") if s.strip()]
+    new_wl = [s.strip().upper() for s in wl_str.split(",") if s.strip() and SYMBOL_RE.match(s.strip().upper())]
     state.set_watchlist(new_wl)
     st.success(f"Updated: {new_wl}")
 st.markdown("---")

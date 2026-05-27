@@ -1,29 +1,15 @@
-import re
 import os
 import streamlit as st
 import pandas as pd
 from datetime import date
 from components import theme, state
-
-SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
+from components.security import SYMBOL_RE, _safe_csv
 
 st.set_page_config(page_title="Journal | Trading Lab", page_icon="📋", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
 state.init_session()
 st.markdown("# 📋 Trade Journal")
 st.markdown("_Record every trade. Journal saves automatically._")
-
-
-def _safe_csv(df) -> str:
-    def _csv_safe(v):
-        s = str(v)
-        if s and s[0] in ('=', '+', '-', '@', '|', '%'):
-            return "'" + s
-        return s
-    if df is None or df.empty:
-        return df.to_csv(index=False) if df is not None else ""
-    safe = df.map(_csv_safe) if hasattr(df, "map") else df.applymap(_csv_safe)
-    return safe.to_csv(index=False)
 
 
 with st.expander("➕ Add New Trade", expanded=not bool(state.get_journal())):

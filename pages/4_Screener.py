@@ -1,14 +1,12 @@
-import re
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, ColumnsAutoSizeMode
 from components import theme, state
+from components.security import SYMBOL_RE, _safe_csv
 from nse_backtest.data import fetch_multiple, NIFTY50_SYMBOLS, NIFTY100_SYMBOLS
 from nse_backtest.trading_modes import analyze_swing, analyze_positional, analyze_longterm, analyze_intraday
 from nse_backtest.sample_data import trending_stock, volatile_midcap, sideways_stock
-
-SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-^]{1,20}$")
 _ANALYZE_FNS = {"Swing (2-15d)": analyze_swing, "Positional (15-90d)": analyze_positional,
                 "Long-Term (90d+)": analyze_longterm, "Intraday": analyze_intraday}
 
@@ -97,6 +95,6 @@ else:
         st.session_state["auto_analyze"] = True
         st.switch_page("pages/3_Analyze.py")
 
-    st.download_button("📥 Download CSV", data=df_results.to_csv(index=False),
+    st.download_button("📥 Download CSV", data=_safe_csv(df_results),
                         file_name=f"scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                         mime="text/csv")
