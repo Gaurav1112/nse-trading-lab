@@ -67,3 +67,32 @@ def test_watchlist_is_independent_copy():
         s.init_session()
         w = s.get_watchlist(); w.append("ZOMATO")
         assert "ZOMATO" not in s.get_watchlist()
+
+
+# ── cards tests ──
+def test_score_bar_green_for_high():
+    from components.cards import score_bar
+    html = score_bar("Trend", 80)
+    assert "#10b981" in html and "80" in html
+
+
+def test_score_bar_red_for_low():
+    from components.cards import score_bar
+    assert "#ef4444" in score_bar("Trend", 30)
+
+
+def test_verdict_card_go():
+    from components.cards import verdict_card
+    html = verdict_card("GO", 72, ["Strong uptrend"])
+    assert "verdict-go" in html and "72" in html and "Strong uptrend" in html
+
+
+def test_verdict_card_avoid():
+    from components.cards import verdict_card
+    assert "verdict-avoid" in verdict_card("AVOID", 35, [])
+
+
+def test_metric_card_renders():
+    from components.cards import metric_card
+    html = metric_card("Capital", "₹1,00,000", delta="+5%")
+    assert "Capital" in html and "+5%" in html
