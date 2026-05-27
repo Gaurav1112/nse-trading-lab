@@ -57,9 +57,9 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     total_return = (equity.iloc[-1] / config.initial_capital) - 1
     bh_return = (bh.iloc[-1] / config.initial_capital) - 1 if len(bh) else 0.0
 
-    # Trading days
     n_days = len(equity)
-    n_years = n_days / 252
+    # Years from actual calendar span, not row count (avoids holiday/gap distortion).
+    n_years = (equity.index[-1] - equity.index[0]).days / 365.25
 
     # CAGR (guard against negative/zero equity)
     final_eq = max(equity.iloc[-1], 0.01)

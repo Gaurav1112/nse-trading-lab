@@ -130,7 +130,7 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
             with _YF_LOCK:
                 df = yf.download(
                     ticker, start=start, end=end, progress=False,
-                    auto_adjust=False, threads=False,
+                    auto_adjust=True, threads=False,
                 )
             if time.time() - t0 > timeout:
                 log.warning("yf.download for %s exceeded soft timeout %.1fs",
@@ -174,6 +174,8 @@ def fetch_nse(
         pd.Timestamp(end)
     except Exception as e:
         raise ValueError(f"Invalid date range start={start} end={end}: {e}")
+    if pd.Timestamp(start) >= pd.Timestamp(end):
+        raise ValueError(f"start ({start}) must be before end ({end})")
 
     cache_file = _cache_path(symbol, exchange, start, end)
     # If end is today (intraday data still updating), shorten cache freshness so
@@ -216,6 +218,8 @@ def fetch_nse(
         raise ValueError(f"yfinance response for {ticker} missing columns: {missing}")
 
     df = df.dropna(subset=list(_REQUIRED_COLS))
+    # Drop malformed OHLC bars (High < Low or non-positive Open/Close).
+    df = df[(df["High"] >= df["Low"]) & (df["Open"] > 0) & (df["Close"] > 0)]
     df.index = pd.to_datetime(df.index, errors="coerce")
     df = df[df.index.notna()]
     df = df.sort_index()
@@ -277,9 +281,9 @@ NIFTY50_SYMBOLS = [
     "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
     "LT", "HCLTECH", "AXISBANK", "ASIANPAINT", "MARUTI",
     "SUNPHARMA", "TITAN", "BAJFINANCE", "DMART", "NTPC",
-    "TATAMOTORS", "WIPRO", "POWERGRID", "M&M", "ULTRACEMCO",
+    "TATAMOTORS", "TRENT", "POWERGRID", "M&M", "ULTRACEMCO",
     "ONGC", "JSWSTEEL", "TATASTEEL", "ADANIENT", "ADANIPORTS",
-    "COALINDIA", "TECHM", "BAJAJFINSV", "NESTLEIND", "HDFCLIFE",
+    "COALINDIA", "TECHM", "BAJAJFINSV", "JIOFINSOLUTIONS", "HDFCLIFE",
     "GRASIM", "DIVISLAB", "CIPLA", "BPCL", "DRREDDY",
     "SBILIFE", "BRITANNIA", "EICHERMOT", "INDUSINDBK", "TATACONSUM",
     "APOLLOHOSP", "HINDALCO", "HEROMOTOCO", "BAJAJ-AUTO", "SHRIRAMFIN",

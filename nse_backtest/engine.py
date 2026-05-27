@@ -42,7 +42,7 @@ class TradeConfig:
     zerodha_brokerage: float = 0.0
     intraday_brokerage_per_order: float = 20.0
     dp_charge_per_sell: float = 15.93
-    ipft_pct: float = 0.000001  # NSE/BSE Investor Protection Fund Trust (FY 2024-25)
+    ipft_pct: float = 0.0000001  # NSE IPFT = ₹1/crore = 0.0000001 (FY 2024-25)
 
     mtf_interest_annual: float = 0.18
     mtf_margin_pct: float = 0.25
@@ -115,7 +115,7 @@ def _buy_cost(price: float, shares: int, config: TradeConfig) -> float:
         stamp = turnover * config.stamp_duty_intraday_pct
     else:
         stamp = turnover * config.stamp_duty_pct
-    stt = turnover * config.stt_buy_pct if config.trading_mode == "DELIVERY" else 0.0
+    stt = turnover * config.stt_buy_pct if config.trading_mode in ("DELIVERY", "MTF") else 0.0
     return brokerage + txn + sebi + ipft + gst + stamp + stt
 
 
@@ -139,7 +139,7 @@ def _mtf_interest(entry_price: float, shares: int, days: int, config: TradeConfi
     if config.trading_mode != "MTF" or days <= 0:
         return 0.0
     borrowed = entry_price * shares * (1.0 - config.mtf_margin_pct)
-    return borrowed * config.mtf_interest_annual * days / 365.0
+    return borrowed * ((1 + config.mtf_interest_annual / 365) ** days - 1)
 
 
 def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> dict:
@@ -158,8 +158,8 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
     df["signal"] = df["signal"].shift(1).fillna(0).astype(int)
 
     n = len(df)
-    if n == 0 or (df["Close"] <= 0).any():
-        raise ValueError("Backtest frame contains non-positive Close prices")
+    if n == 0 or df["Close"].isna().any() or (df["Close"] <= 0).any():
+        raise ValueError("Backtest frame contains NaN or non-positive Close prices")
 
     equity = np.zeros(n)
     cash = float(config.initial_capital)
@@ -188,7 +188,9 @@ def run_backtest(data: pd.DataFrame, config: Optional[TradeConfig] = None) -> di
 
             if hit_sl or hit_tp:
                 if hit_sl:
-                    raw = min(sl_price, day_low)
+                    day_open = float(df["Open"].iloc[i])
+                    # Gap-down: market opens below the SL level — fill at open.
+                    raw = day_open if day_open < sl_price else sl_price
                     exit_p = raw * (1 - config.slippage_pct)
                     reason = "stop_loss"
                 else:

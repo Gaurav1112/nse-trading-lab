@@ -162,7 +162,7 @@ def score_momentum(df: pd.DataFrame) -> tuple[float, list[str]]:
     else:
         reasons.append(f"RSI bearish ({rsi_val:.0f})")
 
-    macd_ind = trend.MACD(close, 12, 26, 9)
+    macd_ind = trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
     macd_hist = macd_ind.macd_diff().iloc[-1]
     macd_hist_prev = macd_ind.macd_diff().iloc[-2]
     if macd_hist > 0:
