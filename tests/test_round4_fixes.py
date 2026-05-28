@@ -54,18 +54,15 @@ def test_stamp_duty_intraday_lower_than_delivery():
     ],
 )
 def test_validate_sym_ui_rejects_injection(bad: str):
-    # Import lazily so the test does not require a Streamlit display.
-    import importlib
-    ui = importlib.import_module("ui")
+    from components.security import _validate_sym_ui
     with pytest.raises(ValueError):
-        ui._validate_sym_ui(bad)
+        _validate_sym_ui(bad)
 
 
 def test_validate_sym_ui_accepts_real_symbols():
-    import importlib
-    ui = importlib.import_module("ui")
+    from components.security import _validate_sym_ui
     for ok in ["RELIANCE", "TCS", "M&M", "NIFTY", "BANKNIFTY", "L&T", "INFY.NS"]:
-        assert ui._validate_sym_ui(ok) == ok.upper()
+        assert _validate_sym_ui(ok) == ok.upper()
 
 
 # ────────────────────────────────────────────────────────────────────
