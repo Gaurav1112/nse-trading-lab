@@ -46,7 +46,7 @@ if [ ! -f "$HOME/.streamlit/credentials.toml" ]; then
     printf '[general]\nemail = ""\n' > "$HOME/.streamlit/credentials.toml"
 fi
 
-exec streamlit run ui.py \
+exec streamlit run Home.py \
     --server.headless=true \
     --server.address=127.0.0.1 \
     --server.port=8501 \
