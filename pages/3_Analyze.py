@@ -31,6 +31,18 @@ def _fetch(sym: str) -> tuple:
         st.warning(f"Live data unavailable ({e.__class__.__name__}); using demo."); return trending_stock(), True
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_live_price(sym: str) -> float | None:
+    """Fetch actual live market price via fast_info — not affected by download adjustment bugs."""
+    try:
+        import yfinance as yf
+        fi = yf.Ticker(f"{sym}.NS").fast_info
+        p = getattr(fi, "last_price", None) or getattr(fi, "previous_close", None)
+        return float(p) if p and float(p) > 0 else None
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_fundamentals(sym: str) -> dict:
     sym = _validate(sym)
@@ -95,19 +107,30 @@ if run and sym_input:
     with st.spinner(f"Analyzing {sym_input}…"):
         df, is_demo = (trending_stock(), True) if use_demo else _fetch(sym_input)
         if is_demo:
-            st.caption("⚠️ Using demo data")
+            st.error("⚠️ Could not fetch live data for this symbol. Showing demo data — do NOT trade based on this.")
         score = analyze_stock(df, sym_input, run_backtests=True)
 
         # ── Header strip ──
-        close = df["Close"].iloc[-1]
-        prev = df["Close"].iloc[-2] if len(df) > 1 else close
+        _df_close = float(df["Close"].iloc[-1])
+        _live = _fetch_live_price(sym_input)
+        # Correct yfinance download adjustment errors (e.g. LICI: download=415, live=830)
+        _ratio = (_live / _df_close) if (_live and _df_close > 0 and abs(_live / _df_close - 1.0) > 0.05) else 1.0
+        if _ratio != 1.0:
+            score.current_price = _live
+            score.stop_loss *= _ratio
+            score.target_1 *= _ratio
+            score.target_2 *= _ratio
+        close = _live if _live else _df_close
+        _df_prev = float(df["Close"].iloc[-2]) if len(df) > 1 else _df_close
+        prev = _df_prev * _ratio
         day_chg = (close - prev) / prev * 100
         h52 = df["High"].rolling(252).max().iloc[-1]
         l52 = df["Low"].rolling(252).min().iloc[-1]
         vol_ratio = df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1] if df["Volume"].rolling(20).mean().iloc[-1] > 0 else 1.0
         range_pct = (close - l52) / (h52 - l52) * 100 if h52 != l52 else 50.0
         h1, h2, h3, h4, h5 = st.columns(5)
-        h1.metric("Last Close", f"₹{close:,.0f}", f"{day_chg:+.2f}%")
+        _price_label = "Live Price ⚡" if _live else "Last Close"
+        h1.metric(_price_label, f"₹{close:,.0f}", f"{day_chg:+.2f}%")
         h2.metric("52W High", f"₹{h52:,.0f}")
         h3.metric("52W Low", f"₹{l52:,.0f}")
         h4.metric("In 52W Range", f"{range_pct:.0f}%")
@@ -123,7 +146,7 @@ if run and sym_input:
         with v_col:
             st.markdown(cards.verdict_card(score.verdict, score.final_score, score.reasons), unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            rr_c = "#10b981" if score.risk_reward >= 2 else "#f59e0b" if score.risk_reward >= 1.5 else "#ef4444"
+            rr_c = "#00FF87" if score.risk_reward >= 2 else "#FFB800" if score.risk_reward >= 1.5 else "#FF3355"
             st.markdown(cards.metric_card("R:R", f"{score.risk_reward:.1f} : 1", color=rr_c), unsafe_allow_html=True)
             st.markdown(cards.metric_card("Win Probability", f"{score.win_probability:.0f}%"), unsafe_allow_html=True)
             st.markdown(cards.metric_card("Regime", score.regime), unsafe_allow_html=True)
@@ -215,13 +238,13 @@ if run and sym_input:
             except Exception:
                 pass
             st.markdown("**Trade Scenarios:**")
-            for label, price, color in [("🔴 SL Hit", score.stop_loss, "#ef4444"),
-                                         ("🟡 Target 1", score.target_1, "#f59e0b"),
-                                         ("🟢 Target 2", score.target_2, "#10b981")]:
+            for label, price, color in [("🔴 SL Hit", score.stop_loss, "#FF3355"),
+                                         ("🟡 Target 1", score.target_1, "#FFB800"),
+                                         ("🟢 Target 2", score.target_2, "#00FF87")]:
                 pnl = (price - score.current_price) * shares
                 pct = pnl / cap * 100
                 st.markdown(
-                    f'<div style="background:#111827;padding:12px 16px;border-radius:8px;'
+                    f'<div style="background:#0D1526;padding:12px 16px;border-radius:8px;'
                     f'border-left:3px solid {color};margin:6px 0;display:flex;justify-content:space-between">'
                     f'<span>{label} @ ₹{price:,.0f}</span>'
                     f'<span style="font-family:JetBrains Mono,monospace;color:{color}">'

@@ -73,12 +73,12 @@ def test_watchlist_is_independent_copy():
 def test_score_bar_green_for_high():
     from components.cards import score_bar
     html = score_bar("Trend", 80)
-    assert "#10b981" in html and "80" in html
+    assert "#00FF87" in html and "80" in html
 
 
 def test_score_bar_red_for_low():
     from components.cards import score_bar
-    assert "#ef4444" in score_bar("Trend", 30)
+    assert "#FF3355" in score_bar("Trend", 30)
 
 
 def test_verdict_card_go():
