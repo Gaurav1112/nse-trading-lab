@@ -253,7 +253,7 @@ def momentum_strategy(
         if data["returns_lookback"].iloc[i] > 0:
             data.iloc[i:end_idx, data.columns.get_loc("signal")] = 1
         else:
-            data.iloc[i:end_idx, data.columns.get_loc("signal")] = -1
+            data.iloc[i:end_idx, data.columns.get_loc("signal")] = 0
 
     data["strategy_name"] = f"Momentum({lookback}d, hold={hold_days}d)"
     return data

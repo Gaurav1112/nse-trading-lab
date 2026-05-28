@@ -57,9 +57,9 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     total_return = (equity.iloc[-1] / config.initial_capital) - 1
     bh_return = (bh.iloc[-1] / config.initial_capital) - 1 if len(bh) else 0.0
 
-    # Trading days
     n_days = len(equity)
-    n_years = n_days / 252
+    # Years from actual calendar span, not row count (avoids holiday/gap distortion).
+    n_years = (equity.index[-1] - equity.index[0]).days / 365.25
 
     # CAGR (guard against negative/zero equity)
     final_eq = max(equity.iloc[-1], 0.01)
@@ -128,11 +128,14 @@ def compute_metrics(result: dict, risk_free_rate: float = 0.065) -> dict:
     # Total costs
     total_costs = sum(t.costs for t in trades)
 
-    # Average holding period
+    # Average holding period in business days (excludes weekends / market holidays)
     hold_periods = []
     for t in trades:
         if t.exit_date and t.entry_date:
-            hold_periods.append((t.exit_date - t.entry_date).days)
+            bdays = np.busday_count(
+                t.entry_date.date(), t.exit_date.date()
+            )
+            hold_periods.append(max(int(bdays), 1))
     avg_hold = np.mean(hold_periods) if hold_periods else 0
 
     return {

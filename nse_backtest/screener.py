@@ -86,7 +86,7 @@ def scan_breakout(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     prior_high = high_20_prior.iloc[-1]
     broke_high = pd.notna(prior_high) and current >= prior_high
     last_vol_avg = vol_avg.iloc[-1]
-    vol_confirm = pd.notna(last_vol_avg) and last_vol_avg > 0 and vol.iloc[-1] > 1.3 * last_vol_avg
+    vol_confirm = pd.notna(last_vol_avg) and last_vol_avg > 0 and vol.iloc[-1] > 1.5 * last_vol_avg
     uptrend = ema20.iloc[-1] > ema50.iloc[-1]
 
     if not (crossed_20ema or broke_high):
@@ -170,10 +170,10 @@ def scan_reversal(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     rsi_now = rsi.iloc[-1]
     rsi_prev = rsi.iloc[-3]
 
-    if rsi_now < 35:
+    if rsi_now < 30:
         score += 30
         notes.append(f"RSI oversold ({rsi_now:.0f}) in uptrending stock")
-    elif rsi_prev < 35 and rsi_now > rsi_prev:
+    elif rsi_prev < 30 and rsi_now > rsi_prev:
         score += 25
         notes.append(f"RSI bouncing ({rsi_prev:.0f} -> {rsi_now:.0f})")
     else:
@@ -418,7 +418,7 @@ def scan_supertrend_flip(df: pd.DataFrame, symbol: str) -> Optional[SwingSetup]:
     notes = ["Supertrend flipped BULLISH"]
 
     vol_avg = df["Volume"].rolling(20).mean().iloc[-1]
-    if pd.notna(vol_avg) and vol_avg > 0 and df["Volume"].iloc[-1] > 1.3 * vol_avg:
+    if pd.notna(vol_avg) and vol_avg > 0 and df["Volume"].iloc[-1] > 1.5 * vol_avg:
         score += 15
         notes.append("Volume confirming the flip")
 
@@ -572,6 +572,9 @@ if scan_trend_continuation not in SCANNERS:
     SCANNERS.append(scan_trend_continuation)
 
 
+_MIN_AVG_VOLUME = 100_000  # Minimum 20-day avg volume for liquidity
+
+
 def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[SwingSetup]:
     """Run all scanners on all stocks. Enriches with analyzer score. Returns ranked list."""
     from .scorer import analyze_stock  # Import here to avoid circular
@@ -581,6 +584,12 @@ def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[S
     all_setups = []
     for symbol, df in stock_data.items():
         if len(df) < 60:
+            continue
+        # Liquidity gate: skip stocks with < 100k avg daily volume (illiquid fills)
+        avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
+        if pd.isna(avg_vol) or avg_vol < _MIN_AVG_VOLUME:
+            _log.debug("SKIP %s: avg volume %.0f < %d (liquidity gate)",
+                       symbol, avg_vol if pd.notna(avg_vol) else 0, _MIN_AVG_VOLUME)
             continue
         for scanner in SCANNERS:
             try:
@@ -593,20 +602,36 @@ def run_screener(stock_data: dict[str, pd.DataFrame], top_n: int = 15) -> list[S
                 continue
 
     # Enrich each setup with analyzer score (the real 6-dimension score)
+    # Analyse each symbol once even if it matched multiple scanners.
+    analyzed: dict[str, object] = {}
     for setup in all_setups:
-        try:
-            if setup.symbol in stock_data:
-                s = analyze_stock(stock_data[setup.symbol], setup.symbol, run_backtests=False)
-                setup.analyzer_score = s.final_score
-                setup.verdict = s.verdict
-                setup.confidence = s.confidence
-        except Exception as e:
-            _log.warning("analyze_stock failed for %s: %s", setup.symbol, e)
+        sym = setup.symbol
+        if sym not in analyzed and sym in stock_data:
+            try:
+                analyzed[sym] = analyze_stock(stock_data[sym], sym, run_backtests=False)
+            except Exception as e:
+                _log.warning("analyze_stock failed for %s: %s", sym, e)
+                analyzed[sym] = None
+        result = analyzed.get(sym)
+        if result is not None:
+            setup.analyzer_score = result.final_score
+            setup.verdict = result.verdict
+            setup.confidence = result.confidence
+        else:
             setup.analyzer_score = setup.score
 
+    # Dedup: keep only the highest-scoring setup per symbol so one stock doesn't
+    # crowd out three slots by triggering three different scanners.
+    best_per_symbol: dict[str, SwingSetup] = {}
+    for setup in all_setups:
+        existing = best_per_symbol.get(setup.symbol)
+        if existing is None or setup.analyzer_score > existing.analyzer_score:
+            best_per_symbol[setup.symbol] = setup
+    deduped = list(best_per_symbol.values())
+
     # Sort by analyzer score (the consistent 6-dimension score), not scan score
-    all_setups.sort(key=lambda s: s.analyzer_score, reverse=True)
-    return all_setups[:top_n]
+    deduped.sort(key=lambda s: s.analyzer_score, reverse=True)
+    return deduped[:top_n]
 
 
 def print_screener_results(setups: list[SwingSetup]) -> str:

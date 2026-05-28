@@ -53,8 +53,8 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
                 "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb,
                 "chikou": chikou}
 
-    above_cloud = cur > max(sa, sb)
-    below_cloud = cur < min(sa, sb)
+    above_cloud = bool(cur > max(sa, sb))
+    below_cloud = bool(cur < min(sa, sb))
     in_cloud = not above_cloud and not below_cloud
     tk_cross_bull = ts > ks
     cloud_green = sa > sb
@@ -82,7 +82,7 @@ def ichimoku(df: pd.DataFrame, tenkan=9, kijun=26, senkou_b=52) -> dict:
         reasons.append("Chikou confirms (price > price 26 bars ago)")
 
     return {"score": min(score, 100), "reasons": reasons,
-            "above_cloud": above_cloud, "tk_cross": tk_cross_bull,
+            "above_cloud": above_cloud, "below_cloud": below_cloud, "tk_cross": tk_cross_bull,
             "tenkan": ts, "kijun": ks, "senkou_a": sa, "senkou_b": sb,
             "chikou": chikou}
 

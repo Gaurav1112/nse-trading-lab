@@ -85,7 +85,7 @@ import copy
 DEFAULTS = {"capital": 100000.0, "risk_pct": 2.0, "sl_pct": 7.0,
             "analyze_sym": "", "auto_analyze": False, "nav_page": 0,
             "watchlist": ["RELIANCE","TCS","COALINDIA","NTPC","SBIN"],
-            "journal": []}
+            "journal": [], "positions": []}
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         # Deep-copy mutable defaults so each user's session_state holds its
@@ -380,8 +380,8 @@ def zerodha_steps(sym, entry, sl, shares):
 
 
 # ── Navigation ──
-PAGES = ["◆ Dashboard", "🔍 Analyze", "📈 Trading Modes", "📊 Screener", "🧪 Backtest",
-         "💼 Positions", "🛡️ Risk Lab", "📋 Journal", "📚 Learn", "⚙️ Settings"]
+PAGES = ["🎯 Today's Picks", "◆ Dashboard", "🔍 Analyze", "📈 Trading Modes", "📊 Screener",
+         "🧪 Backtest", "💼 Positions", "🛡️ Risk Lab", "📋 Journal", "📚 Learn", "⚙️ Settings"]
 
 with st.sidebar:
     st.markdown('<div style="padding:8px 0;font-size:20px;font-weight:700;letter-spacing:-0.02em">◆ Trading Lab</div>', unsafe_allow_html=True)
@@ -406,9 +406,153 @@ with st.sidebar:
 
 
 # ════════════════════════════════════════════════════════════════
+# TODAY'S PICKS  — 3-4 actionable stocks + position tracker
+# ════════════════════════════════════════════════════════════════
+if page == "🎯 Today's Picks":
+    st.markdown("# 🎯 Today's Best Stocks")
+    st.markdown("_Top 3-4 NSE stocks scoring highest right now. One-tap position entry._")
+
+    # ── Scan controls ──
+    pc1, pc2, pc3 = st.columns([2, 2, 1])
+    with pc1:
+        scan_univ = st.selectbox("Universe", ["Nifty 100 (Live)", "Nifty 50 (Live)", "Demo (Instant)"],
+                                  key="picks_univ")
+    with pc2:
+        min_score = st.slider("Min Score", 40, 90, 65, key="picks_min_score")
+    with pc3:
+        max_picks = st.selectbox("Max picks", [3, 4, 5], key="picks_max")
+
+    if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_width=True,
+                 key="picks_scan_btn"):
+        with st.spinner("Scanning…"):
+            try:
+                from nse_backtest.trading_modes import analyze_swing
+
+                if "Demo" in scan_univ:
+                    from nse_backtest.sample_data import trending_stock, volatile_midcap, sideways_stock
+                    raw = {
+                        "DEMO_UP1": trending_stock(), "DEMO_UP2": trending_stock(),
+                        "DEMO_MID": volatile_midcap(), "DEMO_FLAT": sideways_stock(),
+                    }
+                elif "100" in scan_univ:
+                    raw = fetch_multiple(NIFTY100_SYMBOLS, start="2021-01-01")
+                else:
+                    raw = fetch_multiple(NIFTY50_SYMBOLS, start="2021-01-01")
+
+                picks = []
+                for sym, sdf in raw.items():
+                    if len(sdf) < 60:
+                        continue
+                    # Liquidity gate
+                    avg_vol = sdf["Volume"].rolling(20).mean().iloc[-1]
+                    if pd.notna(avg_vol) and avg_vol < 100_000:
+                        continue
+                    try:
+                        setup = analyze_swing(sdf, sym, st.session_state.capital,
+                                              st.session_state.risk_pct)
+                        if setup and setup.signal == "BUY" and setup.score >= min_score:
+                            picks.append((setup.score, sym, sdf, setup))
+                    except Exception:
+                        pass
+                picks.sort(reverse=True)
+                st.session_state["today_picks"] = picks[:max_picks]
+            except Exception as e:
+                st.error(f"Scan failed: {e}")
+
+    picks = st.session_state.get("today_picks", [])
+
+    if not picks:
+        st.info("Hit **Find Today's Best Stocks** to scan the market.")
+    else:
+        st.markdown(f"### ✅ {len(picks)} stocks cleared your {min_score}+ score filter")
+        for rank, (sc, sym, sdf, s) in enumerate(picks, 1):
+            clr = "#10b981" if sc >= 65 else "#f59e0b"
+            with st.container():
+                st.markdown(
+                    f'<div style="border:1px solid {clr};border-radius:14px;padding:18px 20px;'
+                    f'margin:10px 0;background:#111827">'
+                    f'<span style="font-size:11px;color:#64748b;text-transform:uppercase">#{rank} Today\'s Pick</span><br>'
+                    f'<span style="font-size:26px;font-weight:700;color:{clr}">{sym}</span>'
+                    f'<span style="font-size:13px;color:#94a3b8;margin-left:12px">Score {sc:.0f}/100</span>'
+                    f'</div>', unsafe_allow_html=True
+                )
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Entry", f"₹{s.entry_price:,.0f}")
+                m2.metric("Stop Loss", f"₹{s.stop_loss:,.0f}")
+                m3.metric("Target", f"₹{s.target_1:,.0f}")
+                m4.metric("R:R", f"{s.risk_reward:.1f}:1")
+                m5.metric("Win %", f"{s.win_probability:.0f}%")
+
+                if s.suggested_qty > 0:
+                    st.caption(f"Suggested: **{s.suggested_qty} shares** = ₹{s.position_value:,.0f} | Max loss ₹{s.max_loss:,.0f}")
+
+                with st.expander("📋 Why this stock?"):
+                    for r in s.reasons[:8]:
+                        st.caption(f"• {r}")
+
+                # ── "I Bought This" entry form ──
+                with st.expander(f"✅ I bought {sym} — record position"):
+                    bf1, bf2, bf3 = st.columns(3)
+                    with bf1:
+                        bought_price = st.number_input("Buy price ₹", value=float(s.entry_price),
+                                                        min_value=0.01, format="%.2f",
+                                                        key=f"bp_{sym}_{rank}")
+                    with bf2:
+                        bought_qty = st.number_input("Shares bought", value=max(s.suggested_qty, 1),
+                                                      min_value=1, key=f"bq_{sym}_{rank}")
+                    with bf3:
+                        sl_set = st.number_input("Your SL ₹", value=float(s.stop_loss),
+                                                  min_value=0.01, format="%.2f",
+                                                  key=f"bsl_{sym}_{rank}")
+                    if st.button(f"💾 Save {sym} position", key=f"save_{sym}_{rank}",
+                                 use_container_width=True):
+                        new_pos = {
+                            "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
+                            "stop_loss": sl_set, "target": s.target_1,
+                            "date": datetime.now().strftime("%Y-%m-%d"),
+                            "invested": bought_price * bought_qty,
+                        }
+                        positions = st.session_state.get("positions", [])
+                        # Replace existing if same symbol
+                        positions = [p for p in positions if p["symbol"] != sym]
+                        positions.append(new_pos)
+                        st.session_state["positions"] = positions
+                        st.success(f"✅ {sym} position saved! ({bought_qty} shares @ ₹{bought_price:.2f})")
+
+                st.markdown("---")
+
+    # ── My Positions ──
+    positions = st.session_state.get("positions", [])
+    if positions:
+        st.markdown("## 💼 My Open Positions")
+        total_invested = sum(p["invested"] for p in positions)
+        st.caption(f"Total deployed: ₹{total_invested:,.0f}")
+        for p in positions:
+            sym = p["symbol"]
+            invested = p["invested"]
+            qty = p["qty"]
+            buy_p = p["buy_price"]
+            sl = p["stop_loss"]
+            tgt = p["target"]
+            max_loss_inr = (buy_p - sl) * qty
+
+            pc1, pc2, pc3, pc4 = st.columns([3, 2, 2, 1])
+            with pc1:
+                st.markdown(f"**{sym}** — {qty} shares @ ₹{buy_p:.2f}")
+                st.caption(f"SL ₹{sl:.2f} | Target ₹{tgt:.2f} | Added {p['date']}")
+            with pc2:
+                st.metric("Invested", f"₹{invested:,.0f}")
+            with pc3:
+                st.metric("Max Loss", f"₹{max_loss_inr:,.0f}")
+            with pc4:
+                if st.button("🗑️", key=f"del_{sym}", help=f"Remove {sym}"):
+                    st.session_state["positions"] = [x for x in positions if x["symbol"] != sym]
+                    st.rerun()
+
+# ════════════════════════════════════════════════════════════════
 # DASHBOARD
 # ════════════════════════════════════════════════════════════════
-if page == "◆ Dashboard":
+elif page == "◆ Dashboard":
     st.markdown("# ◆ NSE Trading Lab")
     st.markdown("##### Your personal market intelligence terminal")
     st.markdown("---")
@@ -640,10 +784,15 @@ elif page == "📈 Trading Modes":
     st.markdown("_One stock, 5 trading perspectives — swing to options._")
 
     tm1, tm2 = st.columns([3, 1])
-    with tm1: tm_sym = st.text_input("Symbol", "COALINDIA", key="tm_sym").upper().strip()
+    with tm1: tm_sym_raw = st.text_input("Symbol", "COALINDIA", key="tm_sym")
     with tm2: tm_demo = st.checkbox("Demo", False, key="tm_demo")
 
-    if st.button("⚡  Analyze All Modes", type="primary", use_container_width=True) and tm_sym:
+    if st.button("⚡  Analyze All Modes", type="primary", use_container_width=True) and tm_sym_raw:
+        try:
+            tm_sym = _validate_sym_ui(tm_sym_raw)
+        except ValueError:
+            st.error(f"Invalid symbol '{tm_sym_raw}'. Use letters/numbers only (e.g. RELIANCE, M&M).")
+            st.stop()
         with st.spinner(f"Running 5 analysis modes on {tm_sym}..."):
             tm_df = trending_stock() if tm_demo else load_data(tm_sym)[0]
             results = analyze_all_modes(tm_df, tm_sym, st.session_state.capital)
@@ -990,27 +1139,40 @@ elif page == "💼 Positions":
 
         if st.button("📊  Analyze", type="primary", use_container_width=True):
             inv = pa * psh; cv = pc * psh; pnl = cv - inv; pnl_p = (pc / pa - 1) * 100 if pa > 0 else 0
-            di = inv * (pm / 100) / 365 if pm > 0 else 0; ti = di * pd_
+            # MTF: only the borrowed portion (75% at 25% margin) accrues interest
+            borrowed_frac = 0.75
+            di = inv * borrowed_frac * (pm / 100) / 365 if pm > 0 else 0
+            ti = inv * borrowed_frac * ((1 + pm / 100 / 365) ** pd_ - 1) if pm > 0 else 0  # compound
             be = pa + (ti / psh if psh > 0 else 0); rec = ((be - pc) / pc * 100) if pc > 0 else 0
             m = st.columns(4)
-            m[0].metric("Invested", f"₹{inv:,.0f}"); m[1].metric("Current", f"₹{cv:,.0f}")
+            m[0].metric("Invested (own)", f"₹{inv * 0.25:,.0f}" if pm > 0 else f"₹{inv:,.0f}")
+            m[1].metric("Current Value", f"₹{cv:,.0f}")
             m[2].metric("P&L", f"₹{pnl:,.0f}", delta=f"{pnl_p:+.1f}%", delta_color="normal" if pnl >= 0 else "inverse")
             m[3].metric("Breakeven", f"₹{be:,.2f}")
             if di > 0:
-                st.markdown("### MTF Interest Burn")
+                st.markdown("### MTF Interest Burn _(on 75% borrowed)_")
                 i1, i2, i3, i4 = st.columns(4)
                 i1.metric("Daily", f"₹{di:,.0f}"); i2.metric("Monthly", f"₹{di * 30:,.0f}")
-                i3.metric("Paid", f"₹{ti:,.0f}"); i4.metric("Recovery", f"{rec:.1f}%")
-                proj = [{"Days": d, "Interest": f"₹{di * (pd_ + d):,.0f}",
-                         "BE": f"₹{pa + di * (pd_ + d) / psh:,.2f}"} for d in [7, 14, 30, 60, 90]]
+                i3.metric("Paid so far", f"₹{ti:,.0f}"); i4.metric("Recovery needed", f"{rec:.1f}%")
+                proj = [{"Days ahead": d,
+                         "Total interest": f"₹{inv * borrowed_frac * ((1 + pm/100/365)**(pd_+d) - 1):,.0f}",
+                         "New breakeven": f"₹{pa + inv * borrowed_frac * ((1 + pm/100/365)**(pd_+d) - 1) / psh:,.2f}"}
+                        for d in [7, 14, 30, 60, 90]]
                 st.dataframe(pd.DataFrame(proj), use_container_width=True, hide_index=True)
-            st.markdown("### Exit Scenarios")
+            st.markdown("### Exit Scenarios _(after all charges)_")
             lo = max(int(min(pc, pa) * 0.80), 1); hi = max(int(max(pa, pc) * 1.15), lo + 10)
             step = max(int((hi - lo) / 15), 1)
-            exits = [{"Price": f"₹{ep}", "Gross": f"₹{(ep - pa) * psh:,.0f}",
-                       "Net": f"₹{(ep - pa) * psh - ti:,.0f}", "": "✅" if (ep - pa) * psh - ti > 0 else "❌"}
-                     for ep in range(lo, hi + step, step)]
+            exits = []
+            for ep in range(lo, hi + step, step):
+                gross = (ep - pa) * psh
+                # Realistic exit costs: STT on sell (0.1%) + DP charge (₹15.93)
+                exit_fees = ep * psh * 0.001 + 15.93
+                net = gross - ti - exit_fees
+                exits.append({"Price": f"₹{ep}", "Gross P&L": f"₹{gross:,.0f}",
+                               "Interest+Fees": f"₹{ti + exit_fees:,.0f}",
+                               "Net P&L": f"₹{net:,.0f}", "": "✅" if net > 0 else "❌"})
             st.dataframe(pd.DataFrame(exits), use_container_width=True, hide_index=True)
+            st.caption("_Exit fees = STT 0.1% + DP ₹15.93 per sell_")
             st.download_button("📥 Export", _safe_csv(pd.DataFrame(exits)), f"{_safe_filename(ps)}_exit.csv", "text/csv")
     except Exception as e: st.error(f"Error: {e}")
 
@@ -1388,7 +1550,8 @@ Only take R:R ≥ 2:1. Even 40% win rate is profitable at 2:1.
 # ════════════════════════════════════════════════════════════════
 elif page == "⚙️ Settings":
     st.markdown("# ⚙️ Settings")
-    st.session_state.capital = float(st.number_input("Capital ₹", value=int(st.session_state.capital), step=10000, min_value=1000))
+    st.session_state.capital = float(st.number_input("Capital ₹", value=int(st.session_state.capital),
+                                                       step=10_000, min_value=1_000, max_value=100_000_000))
     st.session_state.risk_pct = st.slider("Risk %", 0.5, 5.0, st.session_state.risk_pct, 0.5)
     st.session_state.sl_pct = st.slider("Default SL %", 1.0, 15.0, st.session_state.sl_pct, 0.5)
     st.success(f"Max loss/trade: **₹{st.session_state.capital * st.session_state.risk_pct / 100:,.0f}**")
