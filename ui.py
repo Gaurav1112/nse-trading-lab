@@ -1,7 +1,7 @@
 import streamlit as st
 from components import theme, state
 
-st.set_page_config(page_title="NSE Trading Lab", page_icon="◆", layout="wide",
+st.set_page_config(page_title="NSE Trading Lab", page_icon="📈", layout="wide",
                    initial_sidebar_state="expanded")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
 state.init_session()
@@ -25,4 +25,4 @@ with st.sidebar:
 st.markdown("# ◆ NSE Trading Lab")
 st.markdown("##### Your personal market intelligence terminal for real-world NSE trading")
 st.markdown("---")
-st.info("👈 Use the sidebar to navigate. Start with **Today's Picks** to find actionable trades.", icon="◆")
+st.info("👈 Use the sidebar to navigate. Start with **Today's Picks** to find actionable trades.")
