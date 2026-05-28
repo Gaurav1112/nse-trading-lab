@@ -35,7 +35,11 @@ def _fetch(sym: str) -> tuple:
 def _fetch_fundamentals(sym: str) -> dict:
     sym = _validate(sym)
     import yfinance as yf
-    result: dict = {}
+    result: dict = {
+        "pe": None, "forward_pe": None, "market_cap": None, "eps": None,
+        "earnings_growth": None, "revenue_growth": None,
+        "debt_to_equity": None, "roe": None, "promoter_pct": None,
+    }
     try:
         info = yf.Ticker(f"{sym}.NS").info
         result.update({
@@ -103,7 +107,7 @@ if run and sym_input:
         vol_ratio = df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1] if df["Volume"].rolling(20).mean().iloc[-1] > 0 else 1.0
         range_pct = (close - l52) / (h52 - l52) * 100 if h52 != l52 else 50.0
         h1, h2, h3, h4, h5 = st.columns(5)
-        h1.metric("CMP", f"₹{close:,.0f}", f"{day_chg:+.2f}%")
+        h1.metric("Last Close", f"₹{close:,.0f}", f"{day_chg:+.2f}%")
         h2.metric("52W High", f"₹{h52:,.0f}")
         h3.metric("52W Low", f"₹{l52:,.0f}")
         h4.metric("In 52W Range", f"{range_pct:.0f}%")
@@ -161,6 +165,7 @@ if run and sym_input:
             pc5.metric("Suggested Qty", f"{shares} shares", f"₹{pos_val:,.0f}")
             pc6.metric("Max Loss", f"₹{max_loss:,.0f}", f"{risk_pct:.1f}% capital")
             st.markdown(cards.zerodha_steps(sym_input, score.current_price, score.stop_loss, shares), unsafe_allow_html=True)
+            st.caption("⚠️ Prices based on previous day's close. Verify live price on Zerodha before trading.")
 
         with tab_fund:
             st.caption("Source: yfinance (P/E, ROE, EPS) + screener.in (promoter %) — 24hr cache")
@@ -170,27 +175,27 @@ if run and sym_input:
                 st.warning("Fundamentals unavailable for this symbol.")
             else:
                 fc1, fc2, fc3 = st.columns(3)
-                fc1.metric("Trailing P/E", f"{fund['pe']:.1f}" if fund['pe'] else "N/A")
-                fc2.metric("Forward P/E", f"{fund['forward_pe']:.1f}" if fund['forward_pe'] else "N/A")
-                fc3.metric("Trailing EPS", f"₹{fund['eps']:.2f}" if fund['eps'] else "N/A")
+                fc1.metric("Trailing P/E", f"{fund.get('pe'):.1f}" if fund.get('pe') else "N/A")
+                fc2.metric("Forward P/E", f"{fund.get('forward_pe'):.1f}" if fund.get('forward_pe') else "N/A")
+                fc3.metric("Trailing EPS", f"₹{fund.get('eps'):.2f}" if fund.get('eps') else "N/A")
                 fc4, fc5, fc6 = st.columns(3)
-                fc4.metric("Revenue Growth", f"{fund['revenue_growth']*100:.1f}%" if fund['revenue_growth'] else "N/A")
-                fc5.metric("Earnings Growth", f"{fund['earnings_growth']*100:.1f}%" if fund['earnings_growth'] else "N/A")
-                fc6.metric("ROE", f"{fund['roe']*100:.1f}%" if fund['roe'] else "N/A")
+                fc4.metric("Revenue Growth", f"{fund.get('revenue_growth')*100:.1f}%" if fund.get('revenue_growth') else "N/A")
+                fc5.metric("Earnings Growth", f"{fund.get('earnings_growth')*100:.1f}%" if fund.get('earnings_growth') else "N/A")
+                fc6.metric("ROE", f"{fund.get('roe')*100:.1f}%" if fund.get('roe') else "N/A")
                 fc7, fc8, fc9 = st.columns(3)
-                fc7.metric("Debt / Equity", f"{fund['debt_to_equity']:.2f}" if fund['debt_to_equity'] else "N/A")
-                mkt = fund['market_cap']
+                fc7.metric("Debt / Equity", f"{fund.get('debt_to_equity'):.2f}" if fund.get('debt_to_equity') else "N/A")
+                mkt = fund.get('market_cap')
                 fc8.metric("Market Cap", f"₹{mkt/1e7:.0f}L Cr" if mkt and mkt > 1e7 else (f"₹{mkt/1e5:.0f}K Cr" if mkt else "N/A"))
-                fc9.metric("Promoter Holding", f"{fund['promoter_pct']:.1f}%" if fund['promoter_pct'] else "N/A")
+                fc9.metric("Promoter Holding", f"{fund.get('promoter_pct'):.1f}%" if fund.get('promoter_pct') else "N/A")
                 red_flags = []
-                if fund['earnings_growth'] and fund['earnings_growth'] < -0.05:
-                    red_flags.append(f"EPS declining {fund['earnings_growth']*100:.1f}%")
-                if fund['debt_to_equity'] and fund['debt_to_equity'] > 1.5:
-                    red_flags.append(f"High leverage D/E {fund['debt_to_equity']:.2f} > 1.5")
-                if fund['promoter_pct'] and fund['promoter_pct'] < 30:
-                    red_flags.append(f"Low promoter holding {fund['promoter_pct']:.1f}% < 30%")
-                if fund['roe'] and fund['roe'] < 0.10:
-                    red_flags.append(f"Weak ROE {fund['roe']*100:.1f}% < 10%")
+                if fund.get('earnings_growth') and fund.get('earnings_growth') < -0.05:
+                    red_flags.append(f"EPS declining {fund.get('earnings_growth')*100:.1f}%")
+                if fund.get('debt_to_equity') and fund.get('debt_to_equity') > 1.5:
+                    red_flags.append(f"High leverage D/E {fund.get('debt_to_equity'):.2f} > 1.5")
+                if fund.get('promoter_pct') and fund.get('promoter_pct') < 30:
+                    red_flags.append(f"Low promoter holding {fund.get('promoter_pct'):.1f}% < 30%")
+                if fund.get('roe') and fund.get('roe') < 0.10:
+                    red_flags.append(f"Weak ROE {fund.get('roe')*100:.1f}% < 10%")
                 if red_flags:
                     st.markdown("**⚠️ Red Flags:**")
                     for f_flag in red_flags: st.markdown(cards.warning_card(f_flag), unsafe_allow_html=True)
