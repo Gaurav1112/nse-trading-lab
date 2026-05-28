@@ -22,11 +22,21 @@ def _validate_sym_ui(sym: str) -> str:
     return s
 
 
-def _safe_csv(df: pd.DataFrame | None) -> str:
-    """Return a CSV string with formula-injection protection on all string cells."""
-    if df is None or df.empty:
-        return ""
-    safe = df.copy()
+def _safe_csv(value: pd.DataFrame | str | None, fallback: str = "") -> str:
+    """Sanitise a value for safe CSV output.
+
+    - str → defang formula-injection prefix (=, +, -, @, |, %) with a leading '
+    - DataFrame → apply per-cell defanging and return CSV string
+    - None → return fallback
+    """
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return f"'{value}" if value.startswith(_FORMULA_PREFIXES) else value
+    # DataFrame path
+    if value.empty:
+        return fallback
+    safe = value.copy()
     for col in safe.select_dtypes(include="object").columns:
         safe[col] = safe[col].apply(
             lambda v: f"'{v}" if isinstance(v, str) and v.startswith(_FORMULA_PREFIXES) else v

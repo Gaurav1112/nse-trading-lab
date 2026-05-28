@@ -140,35 +140,18 @@ def test_scorer_negative_ev_downgrades_wait_to_avoid():
 
 def test_ui_csv_safe_defangs_formula_injection():
     """CSV cells starting with =, +, -, @ must be prefixed with single quote."""
-    # Import lazily because ui imports streamlit; run inside a guarded block.
-    if "streamlit" not in sys.modules:
-        try:
-            import streamlit  # noqa: F401
-        except Exception:
-            pytest.skip("streamlit not available")
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    import importlib
-    ui = importlib.import_module("ui")
-    csv_safe = getattr(ui, "_csv_safe")
-    assert csv_safe("=cmd|'/c calc'!A1").startswith("'=")
-    assert csv_safe("+1+1") == "'+1+1"
-    assert csv_safe("-cmd").startswith("'-")
-    assert csv_safe("@SUM(A1)").startswith("'@")
-    assert csv_safe("RELIANCE") == "RELIANCE"   # benign untouched
-    assert csv_safe(None) == ""
+    from components.security import _safe_csv
+    assert _safe_csv("=cmd|'/c calc'!A1").startswith("'=")
+    assert _safe_csv("+1+1") == "'+1+1"
+    assert _safe_csv("-cmd").startswith("'-")
+    assert _safe_csv("@SUM(A1)").startswith("'@")
+    assert _safe_csv("RELIANCE") == "RELIANCE"   # benign untouched
+    assert _safe_csv(None) == ""
 
 
 def test_ui_safe_filename_strips_path_traversal():
-    if "streamlit" not in sys.modules:
-        try:
-            import streamlit  # noqa: F401
-        except Exception:
-            pytest.skip("streamlit not available")
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    import importlib
-    ui = importlib.import_module("ui")
-    safe = getattr(ui, "_safe_filename")
-    assert "/" not in safe("../../etc/passwd")
-    assert ".." not in safe("../../etc/passwd")
-    assert safe("RELIANCE") == "RELIANCE"
-    assert safe("") == "export"
+    from components.security import _safe_filename
+    assert "/" not in _safe_filename("../../etc/passwd")
+    assert ".." not in _safe_filename("../../etc/passwd")
+    assert _safe_filename("RELIANCE") == "RELIANCE"
+    assert _safe_filename("") == "export"
