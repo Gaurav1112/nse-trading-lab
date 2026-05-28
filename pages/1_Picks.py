@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from components import theme, state, cards
+from components.market_data import get_live_price
 from nse_backtest.data import fetch_multiple, NIFTY50_SYMBOLS, NIFTY100_SYMBOLS
 from nse_backtest.trading_modes import analyze_swing
 from nse_backtest.sample_data import trending_stock, volatile_midcap, sideways_stock
@@ -54,13 +55,25 @@ if not picks:
 else:
     st.markdown(f"### ✅ {len(picks)} stocks cleared the {min_score}+ score filter")
     for rank, (sc, sym, s) in enumerate(picks, 1):
-        clr = "#10b981" if sc >= 65 else "#f59e0b"
+        # Apply live-price ratio correction — yfinance auto_adjust=True can return
+        # split-adjusted prices that diverge from the actual market price by >5%.
+        if not sym.startswith("DEMO"):
+            _live, _prev_close = get_live_price(sym)
+            if _live and s.entry_price > 0 and abs(_live / s.entry_price - 1.0) > 0.05:
+                _r = _live / s.entry_price
+                s.entry_price = round(_live, 2)
+                s.stop_loss = round(s.stop_loss * _r, 2)
+                s.target_1 = round(s.target_1 * _r, 2)
+                s.position_value = s.suggested_qty * s.entry_price
+                s.max_loss = (s.entry_price - s.stop_loss) * s.suggested_qty
+
+        clr = "#00FF87" if sc >= 65 else "#FFB800"
         st.markdown(
             f'<div style="border:1px solid {clr};border-radius:14px;padding:18px 20px;'
-            f'margin:10px 0;background:#111827">'
-            f'<span style="font-size:11px;color:#64748b;text-transform:uppercase">#{rank} Pick</span><br>'
+            f'margin:10px 0;background:#0D1526">'
+            f'<span style="font-size:11px;color:#5A7390;text-transform:uppercase">#{rank} Pick</span><br>'
             f'<span style="font-size:26px;font-weight:700;color:{clr}">{sym}</span>'
-            f'<span style="font-size:13px;color:#94a3b8;margin-left:12px">Score {sc:.0f}/100</span>'
+            f'<span style="font-size:13px;color:#7A93AA;margin-left:12px">Score {sc:.0f}/100</span>'
             f'</div>', unsafe_allow_html=True)
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Entry", f"₹{s.entry_price:,.0f}")

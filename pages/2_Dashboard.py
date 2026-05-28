@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 from components import theme, state, cards, charts, market_data
+from components.market_data import get_live_price
 from nse_backtest.data import NIFTY100_SYMBOLS
 
 st.set_page_config(page_title="Dashboard | Trading Lab", page_icon="📊", layout="wide")
@@ -16,14 +17,14 @@ if st.button("🔄 Refresh", key="dash_refresh"):
 with st.spinner("Loading indices…"):
     indices = market_data.get_indices()
 idx_cols = st.columns(3)
-idx_border = {"Nifty 50": "#3b82f6", "Nifty Bank": "#8b5cf6", "India VIX": "#f59e0b"}
+idx_border = {"Nifty 50": "#4D9FFF", "Nifty Bank": "#A78BFA", "India VIX": "#FFB800"}
 for i, (name, data) in enumerate(indices.items()):
     with idx_cols[i]:
         if data["price"] is not None:
             chg = data["change_pct"] or 0.0
-            color = "#10b981" if chg >= 0 else "#ef4444"
+            color = "#00FF87" if chg >= 0 else "#FF3355"
             st.markdown(cards.metric_card(name, f"{data['price']:,.2f}", f"{chg:+.2f}%",
-                                           idx_border.get(name, "#3b82f6")), unsafe_allow_html=True)
+                                           idx_border.get(name, "#4D9FFF")), unsafe_allow_html=True)
         else:
             st.warning(f"{name}: unavailable")
 
@@ -36,13 +37,13 @@ with col_b:
     with st.spinner("Computing…"):
         breadth = market_data.get_market_breadth(tuple(NIFTY100_SYMBOLS))
     pct = breadth["pct"]
-    color = "#10b981" if pct >= 60 else "#f59e0b" if pct >= 40 else "#ef4444"
+    color = "#00FF87" if pct >= 60 else "#FFB800" if pct >= 40 else "#FF3355"
     sentiment = "🟢 Bullish" if pct >= 60 else "🟡 Neutral" if pct >= 40 else "🔴 Bearish"
     st.markdown(
-        f'<div style="background:#111827;padding:16px;border-radius:10px;border:1px solid #1e2a42;text-align:center">'
+        f'<div style="background:#0D1526;padding:16px;border-radius:10px;border:1px solid #1E3A5F;text-align:center">'
         f'<div style="font-size:36px;font-weight:700;color:{color};font-family:JetBrains Mono,monospace">{pct:.0f}%</div>'
-        f'<div style="font-size:12px;color:#64748b;margin-top:4px">{breadth["above"]} of {breadth["total"]} stocks above EMA20</div>'
-        f'<div style="font-size:11px;color:#94a3b8;margin-top:8px">{sentiment}</div>'
+        f'<div style="font-size:12px;color:#5A7390;margin-top:4px">{breadth["above"]} of {breadth["total"]} stocks above EMA20</div>'
+        f'<div style="font-size:11px;color:#7A93AA;margin-top:8px">{sentiment}</div>'
         f'</div>', unsafe_allow_html=True)
 
 with col_m:
@@ -54,19 +55,19 @@ with col_m:
         st.caption("🟢 Top Gainers")
         for m in movers["gainers"]:
             st.markdown(
-                f'<div style="background:#052e16;padding:8px 12px;border-radius:8px;margin:4px 0;'
+                f'<div style="background:#071a10;padding:8px 12px;border-radius:8px;margin:4px 0;'
                 f'display:flex;justify-content:space-between">'
                 f'<span style="font-weight:600">{m["symbol"]}</span>'
-                f'<span style="color:#10b981;font-family:JetBrains Mono,monospace">{m["change_pct"]:+.2f}%</span>'
+                f'<span style="color:#00FF87;font-family:JetBrains Mono,monospace">{m["change_pct"]:+.2f}%</span>'
                 f'</div>', unsafe_allow_html=True)
     with mc2:
         st.caption("🔴 Top Losers")
         for m in movers["losers"]:
             st.markdown(
-                f'<div style="background:#2a0a0a;padding:8px 12px;border-radius:8px;margin:4px 0;'
+                f'<div style="background:#1a0709;padding:8px 12px;border-radius:8px;margin:4px 0;'
                 f'display:flex;justify-content:space-between">'
                 f'<span style="font-weight:600">{m["symbol"]}</span>'
-                f'<span style="color:#ef4444;font-family:JetBrains Mono,monospace">{m["change_pct"]:+.2f}%</span>'
+                f'<span style="color:#FF3355;font-family:JetBrains Mono,monospace">{m["change_pct"]:+.2f}%</span>'
                 f'</div>', unsafe_allow_html=True)
 
 st.markdown("---")
@@ -79,7 +80,7 @@ st.plotly_chart(charts.make_sector_heat(sector_perf), use_container_width=True)
 
 st.markdown("---")
 
-# ── Watchlist ──
+# ── Watchlist — uses fast_info so split-adjusted prices don't corrupt display ──
 st.markdown("#### ⭐ My Watchlist")
 watchlist = state.get_watchlist()
 if watchlist:
@@ -87,11 +88,10 @@ if watchlist:
     for i, sym in enumerate(watchlist[:5]):
         with wl_cols[i]:
             try:
-                hist = yf.Ticker(f"{sym}.NS").history(period="2d")
-                if len(hist) >= 2:
-                    price = hist["Close"].iloc[-1]
-                    chg = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100
-                    color = "#10b981" if chg >= 0 else "#ef4444"
+                price, prev = get_live_price(sym)
+                if price and prev:
+                    chg = (price - prev) / prev * 100
+                    color = "#00FF87" if chg >= 0 else "#FF3355"
                     st.markdown(cards.metric_card(sym, f"₹{price:,.0f}", f"{chg:+.2f}%", color), unsafe_allow_html=True)
                 else:
                     st.metric(sym, "N/A")

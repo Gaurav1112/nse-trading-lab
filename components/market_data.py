@@ -1,6 +1,20 @@
 import yfinance as yf
 import streamlit as st
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_live_price(sym: str) -> tuple[float | None, float | None]:
+    """Return (last_price, prev_close) via fast_info — never split-adjusted."""
+    try:
+        fi = yf.Ticker(f"{sym}.NS").fast_info
+        last = getattr(fi, "last_price", None)
+        prev = getattr(fi, "previous_close", None)
+        last = float(last) if last and float(last) > 0 else None
+        prev = float(prev) if prev and float(prev) > 0 else None
+        return last, prev
+    except Exception:
+        return None, None
+
 NSE_SECTOR_INDICES: dict[str, str] = {
     "IT": "^CNXIT", "Bank": "^NSEBANK", "Auto": "^CNXAUTO",
     "FMCG": "^CNXFMCG", "Pharma": "^CNXPHARMA", "Metal": "^CNXMETAL",

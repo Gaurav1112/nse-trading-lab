@@ -110,22 +110,39 @@ if run and sym_input:
             st.error("⚠️ Could not fetch live data for this symbol. Showing demo data — do NOT trade based on this.")
         score = analyze_stock(df, sym_input, run_backtests=True)
 
-        # ── Header strip ──
+        # ── Price correction + display dataframe ──
+        # yfinance auto_adjust=True adjusts all historical bars backward for
+        # splits/bonuses so the final bar may not match the actual market price
+        # (e.g. LICI: adjusted=415, actual=830 after a 1:1 bonus).
+        # We keep the adjusted df for signal generation (EMAs, RSI, etc.) but
+        # build a separate disp_df scaled to real market prices for the chart
+        # and all header metrics.
         _df_close = float(df["Close"].iloc[-1])
         _live = _fetch_live_price(sym_input)
-        # Correct yfinance download adjustment errors (e.g. LICI: download=415, live=830)
         _ratio = (_live / _df_close) if (_live and _df_close > 0 and abs(_live / _df_close - 1.0) > 0.05) else 1.0
+
+        # Scale score price levels to match live market prices.
         if _ratio != 1.0:
             score.current_price = _live
             score.stop_loss *= _ratio
             score.target_1 *= _ratio
             score.target_2 *= _ratio
+
+        # disp_df has market-accurate OHLC for chart + 52W metrics.
+        if _ratio != 1.0:
+            disp_df = df.copy()
+            for col in ("Open", "High", "Low", "Close"):
+                if col in disp_df.columns:
+                    disp_df[col] = disp_df[col] * _ratio
+        else:
+            disp_df = df
+
         close = _live if _live else _df_close
         _df_prev = float(df["Close"].iloc[-2]) if len(df) > 1 else _df_close
         prev = _df_prev * _ratio
         day_chg = (close - prev) / prev * 100
-        h52 = df["High"].rolling(252).max().iloc[-1]
-        l52 = df["Low"].rolling(252).min().iloc[-1]
+        h52 = disp_df["High"].rolling(252).max().iloc[-1]
+        l52 = disp_df["Low"].rolling(252).min().iloc[-1]
         vol_ratio = df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1] if df["Volume"].rolling(20).mean().iloc[-1] > 0 else 1.0
         range_pct = (close - l52) / (h52 - l52) * 100 if h52 != l52 else 50.0
         h1, h2, h3, h4, h5 = st.columns(5)
@@ -141,7 +158,7 @@ if run and sym_input:
         ch_col, v_col = st.columns([2, 1])
         with ch_col:
             period = st.select_slider("Chart period", [60, 120, 250, 500, 1000], 250, key="analyze_period")
-            st.plotly_chart(charts.make_candlestick(df, score=score, title=sym_input, period=period),
+            st.plotly_chart(charts.make_candlestick(disp_df, score=score, title=sym_input, period=period),
                             use_container_width=True)
         with v_col:
             st.markdown(cards.verdict_card(score.verdict, score.final_score, score.reasons), unsafe_allow_html=True)
