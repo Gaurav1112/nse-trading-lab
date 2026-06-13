@@ -53,3 +53,5 @@ Thumbs.db
 .env
 secrets.py
 kite_credentials.py
+positions.json
+trade_journal.json
