@@ -1,5 +1,6 @@
 import streamlit as st
 from components import theme, state, cards, charts
+from components.data_freshness import check_freshness
 from components.security import SYMBOL_RE
 from nse_backtest.data import fetch_nse, fetch_nifty50
 from nse_backtest.scorer import analyze_stock
@@ -118,6 +119,21 @@ if run and sym_input:
         df, is_demo = (trending_stock(), True) if use_demo else _fetch(sym_input)
         if is_demo:
             st.error("⚠️ Could not fetch live data for this symbol. Showing demo data — do NOT trade based on this.")
+
+        # ── Data freshness indicator (Rohan's integrity guard) ────────
+        _freshness = check_freshness(df)
+        st.markdown(
+            f'<div style="border:1px solid {_freshness.color};border-radius:10px;padding:8px 14px;'
+            f'margin:6px 0 12px 0;background:#0D1526;font-size:12px;color:#C9D5E0">'
+            f'<span style="color:{_freshness.color};font-weight:700">●</span> '
+            f'<b>{sym_input}</b> data as of <b>{_freshness.last_bar_date_str}</b> · '
+            f'{_freshness.message}</div>',
+            unsafe_allow_html=True,
+        )
+        if _freshness.status == "STALE" and not is_demo:
+            st.warning("⚠️ Stale data — analysis below may be misleading. Refresh or verify feed.")
+        # ── end freshness ─────────────────────────────────────────────
+
         score = analyze_stock(df, sym_input, run_backtests=True,
                               nifty_df=None if use_demo else _cached_nifty())
 
