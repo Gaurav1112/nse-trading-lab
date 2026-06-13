@@ -26,6 +26,10 @@ output/snapshots/*
 output/ab_replay/*
 !output/ab_replay/*.md
 !output/ab_replay/*.csv
+!output/walk_forward/
+output/walk_forward/*
+!output/walk_forward/*.md
+!output/walk_forward/*.csv
 *.png
 !README_assets/*.png
 
