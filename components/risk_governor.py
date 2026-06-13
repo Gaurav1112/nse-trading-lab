@@ -18,9 +18,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-# Paths — committed in .gitignore (positions.json + trade_journal.json + audit_log.jsonl)
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_AUDIT_LOG_PATH = _REPO_ROOT / "audit_log.jsonl"
+# Audit log lives in the user data dir (default ~/.nse-trading-lab/) so it never
+# leaks into the repo. Override with NSE_LAB_DATA_DIR. (Priya Nair — Phase H.20)
+_USER_DATA_DIR = os.environ.get("NSE_LAB_DATA_DIR") or os.path.join(
+    os.path.expanduser("~"), ".nse-trading-lab"
+)
+os.makedirs(_USER_DATA_DIR, exist_ok=True)
+_AUDIT_LOG_PATH = Path(_USER_DATA_DIR) / "audit_log.jsonl"
 
 DEFAULTS = {
     "max_open_positions": 5,

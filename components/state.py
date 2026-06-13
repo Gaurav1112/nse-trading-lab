@@ -8,14 +8,35 @@ _DEFAULTS: dict[str, Any] = {
     "watchlist": ["RELIANCE","TCS","COALINDIA","NTPC","SBIN"],
     "journal": [], "positions": [],
 }
-_JOURNAL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trade_journal.json")
-_POSITIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "positions.json")
+_USER_DATA_DIR = os.environ.get("NSE_LAB_DATA_DIR") or os.path.join(
+    os.path.expanduser("~"), ".nse-trading-lab"
+)
+os.makedirs(_USER_DATA_DIR, exist_ok=True)
+_JOURNAL_PATH = os.path.join(_USER_DATA_DIR, "trade_journal.json")
+_POSITIONS_PATH = os.path.join(_USER_DATA_DIR, "positions.json")
+
+
+def _migrate_legacy_files_at_repo_root() -> None:
+    """One-shot migration: move state files from repo root to user data dir.
+
+    Eliminates the 'force-push leaks trade data' risk class (Priya Nair H.20).
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for fname in ("trade_journal.json", "positions.json", "audit_log.jsonl"):
+        old = os.path.join(repo_root, fname)
+        new = os.path.join(_USER_DATA_DIR, fname)
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                os.replace(old, new)
+            except OSError:
+                pass
 
 
 def init_session() -> None:
     for k, v in _DEFAULTS.items():
         if k not in st.session_state:
             st.session_state[k] = copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v
+    _migrate_legacy_files_at_repo_root()
     _load_journal_from_disk()
     _load_positions_from_disk()
 
