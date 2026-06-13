@@ -752,17 +752,13 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
                 result.final_score = min(result.final_score + rs_boost, 100)
             adv_reasons.append(rs_reason)
 
-        from .features.regime_gate import regime_block
+        from .features.regime_gate import regime_action
         if nifty_df is not None:
-            blocked, regime_reason = regime_block(nifty_df)
-            if blocked:
-                # Defensive downgrade — never let GO survive in hostile tape.
-                if result.verdict == "GO":
-                    result.verdict = "WAIT"
-                    result.confidence = "LOW"
-                adv_reasons.append(regime_reason)
-            else:
-                adv_reasons.append(regime_reason)
+            downgrade, regime_reason = regime_action(nifty_df, final_score=result.final_score)
+            if downgrade and result.verdict == "GO":
+                result.verdict = "WAIT"
+                result.confidence = "LOW"
+            adv_reasons.append(regime_reason)
 
     result.reasons = trend_r + mom_r + vol_r + volume_r + bt_r + risk_r + adv_reasons
     result.stop_loss = levels["stop_loss"]
