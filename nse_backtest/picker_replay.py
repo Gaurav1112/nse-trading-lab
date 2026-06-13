@@ -8,6 +8,7 @@ Owner: Sandeep Kumar (E.13).
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
@@ -209,47 +210,57 @@ def replay_picker(
     capital: float = 100_000,
     risk_pct: float = 2.0,
     one_position_per_symbol: bool = True,
+    nifty_df=None,
+    engine: str = "v1",
 ) -> BacktestReport:
     """Walk every trading day in [start, end], replay analyze_swing on truncated data."""
-    report = BacktestReport()
-    if not symbol_data:
+    _prev_engine = os.environ.get("NSE_SCORER_ENGINE")
+    os.environ["NSE_SCORER_ENGINE"] = engine
+    try:
+        report = BacktestReport()
+        if not symbol_data:
+            return report
+
+        start_ts = pd.Timestamp(start)
+        end_ts = pd.Timestamp(end)
+        all_dates = sorted({d for df in symbol_data.values() for d in df.index
+                            if start_ts <= d <= end_ts})
+
+        open_until: dict[str, pd.Timestamp] = {}
+
+        for d in all_dates:
+            for sym, df in symbol_data.items():
+                if one_position_per_symbol and open_until.get(sym, pd.Timestamp.min) >= d:
+                    continue
+                df_until = df.loc[:d]
+                if len(df_until) < 60:
+                    continue
+                try:
+                    setup = analyze_swing(df_until, sym, capital, risk_pct, nifty_df=nifty_df)
+                except Exception:
+                    continue
+                if setup.signal != "BUY" or setup.score < min_score:
+                    continue
+
+                atr_proxy = (setup.entry_price - setup.stop_loss) / 1.5
+                future = df.loc[d:]
+                outcome = simulate_trade(
+                    symbol=sym, entry_date=d,
+                    entry_price=setup.entry_price, stop_loss=setup.stop_loss,
+                    target_1=setup.target_1, target_2=setup.target_2,
+                    atr=max(atr_proxy, 0.01), future_data=future, max_hold=max_hold,
+                )
+                if outcome is None:
+                    continue
+                outcome.score_at_entry = setup.score
+                outcome.win_probability_at_entry = setup.win_probability
+                outcome.reasons = setup.reasons[:5]
+                report.trades.append(outcome)
+                open_until[sym] = outcome.exit_date
+
         return report
-
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    all_dates = sorted({d for df in symbol_data.values() for d in df.index
-                        if start_ts <= d <= end_ts})
-
-    open_until: dict[str, pd.Timestamp] = {}
-
-    for d in all_dates:
-        for sym, df in symbol_data.items():
-            if one_position_per_symbol and open_until.get(sym, pd.Timestamp.min) >= d:
-                continue
-            df_until = df.loc[:d]
-            if len(df_until) < 60:
-                continue
-            try:
-                setup = analyze_swing(df_until, sym, capital, risk_pct)
-            except Exception:
-                continue
-            if setup.signal != "BUY" or setup.score < min_score:
-                continue
-
-            atr_proxy = (setup.entry_price - setup.stop_loss) / 1.5
-            future = df.loc[d:]
-            outcome = simulate_trade(
-                symbol=sym, entry_date=d,
-                entry_price=setup.entry_price, stop_loss=setup.stop_loss,
-                target_1=setup.target_1, target_2=setup.target_2,
-                atr=max(atr_proxy, 0.01), future_data=future, max_hold=max_hold,
-            )
-            if outcome is None:
-                continue
-            outcome.score_at_entry = setup.score
-            outcome.win_probability_at_entry = setup.win_probability
-            outcome.reasons = setup.reasons[:5]
-            report.trades.append(outcome)
-            open_until[sym] = outcome.exit_date
-
-    return report
+    finally:
+        if _prev_engine is None:
+            os.environ.pop("NSE_SCORER_ENGINE", None)
+        else:
+            os.environ["NSE_SCORER_ENGINE"] = _prev_engine

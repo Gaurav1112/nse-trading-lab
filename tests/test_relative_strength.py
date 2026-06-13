@@ -7,6 +7,7 @@ def _df_with_returns(start_price=100.0, returns_pct=None, n=120):
     """Build OHLCV where Close grows by the given list of daily returns_pct."""
     if returns_pct is None:
         returns_pct = [0.005] * n
+    n = len(returns_pct)
     prices = [start_price]
     for r in returns_pct:
         prices.append(prices[-1] * (1 + r))
@@ -50,3 +51,20 @@ def test_missing_nifty_data_returns_zero_boost():
     boost, reason = rs_vs_nifty_boost(stock, nifty)
     assert boost == 0
     assert "insufficient" in reason.lower() or "unavailable" in reason.lower()
+
+
+def test_v2_engine_boost_applied_via_analyze_swing(monkeypatch):
+    """When NSE_SCORER_ENGINE=v2 and nifty_df is provided, the stock score should
+    be at least as high as the v1 score when outperforming."""
+    from nse_backtest.trading_modes import analyze_swing
+
+    stock = _df_with_returns(returns_pct=[0.010] * 260)
+    nifty = _df_with_returns(returns_pct=[0.002] * 260)
+
+    monkeypatch.setenv("NSE_SCORER_ENGINE", "v1")
+    v1 = analyze_swing(stock, "RS_TEST", nifty_df=nifty)
+
+    monkeypatch.setenv("NSE_SCORER_ENGINE", "v2")
+    v2 = analyze_swing(stock, "RS_TEST", nifty_df=nifty)
+
+    assert v2.score >= v1.score, f"v2 ({v2.score}) should be >= v1 ({v1.score}) for outperformer"

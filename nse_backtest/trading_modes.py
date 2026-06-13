@@ -93,15 +93,15 @@ class FuturesSetup:
 # ════════════════════════════════════════════════════════════════
 
 def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
-                  risk_pct: float = 2.0) -> TradeSetup:
+                  risk_pct: float = 2.0, nifty_df=None) -> TradeSetup:
     """
     Swing trading analysis — hold 2-15 days.
     Focus: Technical momentum, breakouts, mean reversion.
     Key indicators: RSI, MACD, BB, Volume, Supertrend.
     """
     from .scorer import analyze_stock
-    
-    score = analyze_stock(df, symbol, run_backtests=False)
+
+    score = analyze_stock(df, symbol, run_backtests=False, nifty_df=nifty_df)
     
     setup = TradeSetup(
         symbol=symbol, mode="SWING", timeframe="2-15 days",

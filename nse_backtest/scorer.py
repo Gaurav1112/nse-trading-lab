@@ -595,7 +595,7 @@ def score_risk(df: pd.DataFrame) -> tuple[float, list[str], dict]:
     return min(score, 100), reasons, levels
 
 
-def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> ScoreBreakdown:
+def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nifty_df=None) -> ScoreBreakdown:
     """
     Full stock analysis with GO/NO-GO verdict.
     
@@ -729,6 +729,16 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
             + result.volatility_score * weights["volatility"]
             + result.risk_score * weights["risk"]
         )
+
+    # --- Phase 2 features (additive boosters, behind NSE_SCORER_ENGINE=v2) ---
+    import os
+    if os.getenv("NSE_SCORER_ENGINE", "v1") == "v2":
+        from .features.relative_strength import rs_vs_nifty_boost
+        if nifty_df is not None:
+            rs_boost, rs_reason = rs_vs_nifty_boost(df, nifty_df)
+            if rs_boost > 0:
+                result.final_score = min(result.final_score + rs_boost, 100)
+            adv_reasons.append(rs_reason)
 
     if result.final_score >= 65:
         result.verdict = "GO"
