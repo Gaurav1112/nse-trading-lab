@@ -9,6 +9,7 @@ _DEFAULTS: dict[str, Any] = {
     "journal": [], "positions": [],
 }
 _JOURNAL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trade_journal.json")
+_POSITIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "positions.json")
 
 
 def init_session() -> None:
@@ -16,6 +17,7 @@ def init_session() -> None:
         if k not in st.session_state:
             st.session_state[k] = copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v
     _load_journal_from_disk()
+    _load_positions_from_disk()
 
 
 def get_capital() -> float:
@@ -49,12 +51,14 @@ def add_position(p: dict) -> None:
     positions = [x for x in get_positions() if x.get("symbol") != p.get("symbol")]
     positions.append(p)
     st.session_state["positions"] = positions
+    _save_positions_to_disk(positions)
 
 def remove_position(i: int) -> None:
     positions = get_positions()
     if 0 <= i < len(positions):
         positions.pop(i)
     st.session_state["positions"] = positions
+    _save_positions_to_disk(positions)
 
 def get_journal() -> list[dict]:
     return list(st.session_state.get("journal", []))
@@ -70,6 +74,29 @@ def get_analyze_sym() -> str:
 
 def set_analyze_sym(sym: str) -> None:
     st.session_state["analyze_sym"] = sym
+
+def _save_positions_to_disk(positions: list[dict]) -> None:
+    d = os.path.dirname(_POSITIONS_PATH) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_positions_", suffix=".json", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(positions, f, indent=2, default=str)
+        os.replace(tmp, _POSITIONS_PATH)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+
+
+def _load_positions_from_disk() -> None:
+    if st.session_state.get("positions"):
+        return
+    if os.path.exists(_POSITIONS_PATH):
+        try:
+            with open(_POSITIONS_PATH) as f:
+                st.session_state["positions"] = json.load(f)
+        except Exception:
+            st.session_state["positions"] = []
+
 
 def _save_journal_to_disk(journal: list[dict]) -> None:
     d = os.path.dirname(_JOURNAL_PATH) or "."

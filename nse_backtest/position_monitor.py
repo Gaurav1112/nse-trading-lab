@@ -59,7 +59,7 @@ def daily_check(position: dict, df: pd.DataFrame) -> ReScoreVerdict:
     sl = float(position["stop_loss"])
     cur = float(df["Close"].iloc[-1])
     pnl_pct = (cur / entry - 1.0) * 100 if entry > 0 else 0.0
-    bars = _bars_held(position.get("entry_date"), df)
+    bars = _bars_held(position.get("entry_date") or position.get("date"), df)
 
     setup = analyze_swing(df, symbol, capital=100_000, risk_pct=2.0)
     rescore = setup.score
