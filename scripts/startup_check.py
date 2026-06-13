@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 def check_data_dir() -> tuple[bool, str]:
     d = os.environ.get("NSE_LAB_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".nse-trading-lab")
