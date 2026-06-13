@@ -14,6 +14,36 @@ state.init_session()
 st.markdown("# 🎯 Today's Best Stocks")
 st.markdown("_Top actionable NSE stocks right now. Scored, ranked, one-tap position entry._")
 
+# ── Tape regime banner ─────────────────────────────────────────
+from nse_backtest.tape_monitor import assess_tape, TapeRegime
+from nse_backtest.data import fetch_nifty50
+
+@st.cache_data(ttl=3600)  # refresh hourly
+def _cached_tape():
+    try:
+        nifty_df = fetch_nifty50(start="2022-01-01")
+        return assess_tape(nifty_df)
+    except Exception as e:
+        return None
+
+_tape = _cached_tape()
+if _tape is not None:
+    st.markdown(
+        f'<div style="border:1px solid {_tape.color};border-radius:14px;padding:14px 18px;'
+        f'margin:8px 0 16px 0;background:#0D1526">'
+        f'<span style="font-size:11px;color:#5A7390;text-transform:uppercase;letter-spacing:1px">'
+        f'Tape Regime · Nifty 50 ₹{_tape.nifty_close:,.0f}</span><br>'
+        f'<span style="font-size:24px;font-weight:700;color:{_tape.color}">{_tape.regime}</span>'
+        f'<span style="font-size:13px;color:#7A93AA;margin-left:12px">'
+        f'60d {_tape.return_60d_pct:+.1f}% · 200EMA slope {_tape.ema_200_slope_pct_20d:+.2f}%/20d'
+        f'</span>'
+        f'<div style="margin-top:8px;color:#C9D5E0;font-size:13px;line-height:1.4">'
+        f'{_tape.recommendation}</div>'
+        f'</div>', unsafe_allow_html=True)
+else:
+    st.caption("⚠️ Tape regime unavailable (Nifty data fetch failed)")
+# ── end banner ─────────────────────────────────────────────────
+
 pc1, pc2, pc3 = st.columns([2, 2, 1])
 scan_univ = pc1.selectbox("Universe", ["Nifty 100 (Live)", "Nifty 50 (Live)", "Demo (Instant)"], key="picks_univ")
 min_score = pc2.slider("Min Score", 40, 90, 65, key="picks_min_score")
