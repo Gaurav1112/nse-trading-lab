@@ -135,12 +135,18 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
 # ════════════════════════════════════════════════════════════════
 
 def analyze_positional(df: pd.DataFrame, symbol: str, capital: float = 100000,
-                       risk_pct: float = 3.0) -> TradeSetup:
+                       risk_pct: float = 3.0, nifty_df=None) -> TradeSetup:
     """
     Positional trading — hold 15-90 days.
     Focus: Trend following, sector strength, wider stops.
     Key indicators: 50/200 EMA, ADX, weekly trend, Ichimoku.
+
+    ``nifty_df`` is accepted for signature uniformity with analyze_swing so
+    call sites can thread it through without branching. Positional has its
+    own scoring logic and does not currently use nifty_df; Phase 3 will wire
+    it in for relative-strength / regime gating.
     """
+    del nifty_df  # explicitly unused — see docstring
     close = df["Close"]
     cur = close.iloc[-1]
     n = len(close)
@@ -266,11 +272,17 @@ def analyze_positional(df: pd.DataFrame, symbol: str, capital: float = 100000,
 #  LONG TERM INVESTING (90+ days)
 # ════════════════════════════════════════════════════════════════
 
-def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000) -> TradeSetup:
+def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000,
+                     nifty_df=None) -> TradeSetup:
     """
     Long-term analysis — hold 90+ days.
     Focus: Macro trend, value, sector rotation, accumulation.
+
+    ``nifty_df`` is accepted for signature uniformity with analyze_swing.
+    Long-term has its own scoring logic and does not currently use it;
+    Phase 3 will wire it in for relative-strength / regime gating.
     """
+    del nifty_df  # explicitly unused — see docstring
     close = df["Close"]
     cur = close.iloc[-1]
     n = len(close)
@@ -388,12 +400,17 @@ def analyze_longterm(df: pd.DataFrame, symbol: str, capital: float = 100000) -> 
 # ════════════════════════════════════════════════════════════════
 
 def analyze_intraday(df: pd.DataFrame, symbol: str, capital: float = 100000,
-                     risk_pct: float = 1.0) -> TradeSetup:
+                     risk_pct: float = 1.0, nifty_df=None) -> TradeSetup:
     """
     Intraday analysis — exit same day.
     Focus: VWAP, ORB, volume spikes, momentum bursts.
     Uses daily data to estimate intraday setups.
+
+    ``nifty_df`` is accepted for signature uniformity with analyze_swing.
+    Intraday has its own scoring logic and does not currently use it;
+    Phase 3 will wire it in for relative-strength / regime gating.
     """
+    del nifty_df  # explicitly unused — see docstring
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
@@ -723,27 +740,34 @@ def analyze_futures(df: pd.DataFrame, symbol: str,
 #  UNIFIED ANALYZER — Run all modes at once
 # ════════════════════════════════════════════════════════════════
 
-def analyze_all_modes(df: pd.DataFrame, symbol: str, capital: float = 100000) -> dict:
-    """Run all 5 analysis modes and return unified results."""
+def analyze_all_modes(df: pd.DataFrame, symbol: str, capital: float = 100000,
+                      nifty_df=None) -> dict:
+    """Run all 5 analysis modes and return unified results.
+
+    ``nifty_df`` threads through to each sub-call so analyze_swing (which uses
+    the v2 scorer's rs_vs_nifty + regime_gate) gets the same Nifty context
+    that callers already cached. Other modes accept the param but do not yet
+    use it — see their docstrings.
+    """
     results = {}
-    
+
     try:
-        results["swing"] = analyze_swing(df, symbol, capital)
+        results["swing"] = analyze_swing(df, symbol, capital, nifty_df=nifty_df)
     except Exception as e:
         results["swing"] = TradeSetup(symbol=symbol, mode="SWING", signal="ERROR", reasons=[str(e)])
-    
+
     try:
-        results["positional"] = analyze_positional(df, symbol, capital)
+        results["positional"] = analyze_positional(df, symbol, capital, nifty_df=nifty_df)
     except Exception as e:
         results["positional"] = TradeSetup(symbol=symbol, mode="POSITIONAL", signal="ERROR", reasons=[str(e)])
-    
+
     try:
-        results["longterm"] = analyze_longterm(df, symbol, capital)
+        results["longterm"] = analyze_longterm(df, symbol, capital, nifty_df=nifty_df)
     except Exception as e:
         results["longterm"] = TradeSetup(symbol=symbol, mode="LONGTERM", signal="ERROR", reasons=[str(e)])
-    
+
     try:
-        results["intraday"] = analyze_intraday(df, symbol, capital)
+        results["intraday"] = analyze_intraday(df, symbol, capital, nifty_df=nifty_df)
     except Exception as e:
         results["intraday"] = TradeSetup(symbol=symbol, mode="INTRADAY", signal="ERROR", reasons=[str(e)])
     
