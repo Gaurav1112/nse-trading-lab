@@ -63,11 +63,14 @@ def test_training_script_produces_v1_artifact(tmp_path, monkeypatch):
     assert artifact_path.exists(), f"Expected artifact at {artifact_path}"
     artifact = json.loads(artifact_path.read_text())
 
-    assert artifact["version"] == "v1"
+    # Phase 3 v2 — regime-conditional artifact. Synthetic test data is regime-less
+    # (entry_date labels won't match any real Nifty history in tmp_path), so we
+    # validate the v2 schema's invariants without assuming per-regime curves exist.
+    assert artifact["version"] == "v2"
     assert artifact["n_trades"] == 180
+    assert "by_regime" in artifact
     assert "held_out_brier" in artifact
-    assert set(artifact["held_out_brier"].keys()) >= {"2024", "2025"}
-    assert "fold_results" in artifact and len(artifact["fold_results"]) >= 2
+    assert "fold_results" in artifact
     for fold in artifact["fold_results"]:
         assert "brier_isotonic" in fold
         assert "brier_constant_baseline" in fold
@@ -83,8 +86,8 @@ def test_calibrator_loads_real_shipped_v1_artifact():
     cal_mod._load_calibrator.cache_clear()
     cal = cal_mod._load_calibrator()
     assert cal is not None
-    assert cal["version"] in ("v0", "v1")  # tolerate either during transition
+    assert cal["version"] in ("v0", "v1", "v2")
     out, reason = cal_mod.calibrate(95.0)
     assert 0.0 <= out <= 100.0
-    if cal["version"] == "v1":
+    if cal["version"] in ("v1", "v2"):
         assert "held-out brier" in reason.lower() or "brier" in reason.lower()

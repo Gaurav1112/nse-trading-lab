@@ -52,19 +52,45 @@ on redeploy). For ongoing trade journaling, do that locally.
   and export your positions JSON to your laptop periodically.
   (Position-export download button is the natural next feature.)
 
-## Authentication (optional, recommended)
+## Authentication (recommended for real-money use)
 
-Streamlit Cloud free tier offers private apps via Google sign-in. To
-restrict access to your email only:
+Because you've decided to trade real money based on this tool's output,
+you should restrict the deployed URL to your email only. Streamlit
+Cloud's free tier offers Google sign-in gating for private apps:
 
-1. Cloud dashboard → your app → **Settings → Sharing**
-2. Set "App access" to **Restricted**
-3. Add `gaurav.kumar@loglass.co.jp` (and any other addresses) to the
-   allowed list.
+1. Cloud dashboard → your app → **Settings** tab
+2. Find the **"Sharing"** section
+3. Set **"Who can view this app"** to **"Only specific people"**
+4. Add `gaurav.kumar@loglass.co.jp` (and any backup addresses)
+5. Save. The next visit to the URL will prompt for Google sign-in;
+   only your allowlist can pass.
 
-Without this, the app URL is public — anyone who knows the URL can use
-it. That's *fine* for an analysis tool (no private data is rendered to
-new sessions), but enabling auth gives you peace of mind.
+Without this, the URL is public — and while no per-user trading
+positions persist across sessions, a public URL is a fingerprint
+of "what stocks am I scanning today" that's better not exposed.
+
+## Persisting your trading data across Cloud restarts
+
+Cloud's container filesystem is ephemeral — positions saved to
+`~/.nse-trading-lab/positions.json` vanish when the container
+restarts. The Picks page now has a **Backup / Restore** section at
+the bottom:
+
+- **⬇️ Download positions + journal (JSON)** — one click, saves a
+  `nse_lab_backup_YYYYMMDD_HHMM.json` to your laptop's Downloads.
+- **⬆️ Upload backup to restore** — one click, re-hydrates session
+  state + persists to whatever data dir the runtime points at.
+
+Suggested workflow:
+- **End of every trading day**: click Download. The file is small
+  (JSON), keeps a verifiable trail of every position you held.
+- **After any Cloud restart** (rare but possible nightly): click
+  Upload and pick the latest backup.
+
+You can also keep your trading positions purely on your local
+`./start.sh` instance (where filesystem persists naturally) and
+use the Cloud URL purely for browsing picks / tape regime from
+phone or anywhere else.
 
 ## What auto-deploys after the one-time setup
 

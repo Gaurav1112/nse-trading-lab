@@ -260,7 +260,11 @@ def replay_picker(
 ) -> BacktestReport:
     """Walk every trading day in [start, end], replay analyze_swing on truncated data."""
     _prev_engine = os.environ.get("NSE_SCORER_ENGINE")
+    _prev_backtest = os.environ.get("NSE_BACKTEST_MODE")
     os.environ["NSE_SCORER_ENGINE"] = engine
+    # Disables live earnings-calendar lookups so the historical replay isn't
+    # contaminated by today's upcoming-earnings status (look-ahead bias).
+    os.environ["NSE_BACKTEST_MODE"] = "1"
     try:
         report = BacktestReport()
         if not symbol_data:
@@ -313,3 +317,7 @@ def replay_picker(
             os.environ.pop("NSE_SCORER_ENGINE", None)
         else:
             os.environ["NSE_SCORER_ENGINE"] = _prev_engine
+        if _prev_backtest is None:
+            os.environ.pop("NSE_BACKTEST_MODE", None)
+        else:
+            os.environ["NSE_BACKTEST_MODE"] = _prev_backtest

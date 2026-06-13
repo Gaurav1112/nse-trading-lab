@@ -761,6 +761,29 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
                 result.confidence = "LOW"
             adv_reasons.append(regime_reason)
 
+        # Wave A safety gates (W1-W4): each can downgrade GO -> WAIT independently.
+        # Order is cheap-first so we short-circuit network calls on already-failed setups.
+        from .features.mtf_confirmation import mtf_confirms
+        from .features.liquidity_filter import is_liquid_enough
+        from .features.gap_guard import gap_within_tolerance
+        from .features.earnings_guard import earnings_clear
+
+        for gate_name, gate_fn, args in [
+            ("MTF",       mtf_confirms,         (df,)),
+            ("Liquidity", is_liquid_enough,     (df,)),
+            ("Gap",       gap_within_tolerance, (df,)),
+            ("Earnings",  earnings_clear,       (df, symbol)),
+        ]:
+            try:
+                downgrade, reason = gate_fn(*args)
+                adv_reasons.append(reason)
+                if downgrade and result.verdict == "GO":
+                    result.verdict = "WAIT"
+                    result.confidence = "LOW"
+            except Exception as e:  # gate failure must never crash the engine
+                _log.warning("%s gate raised on %s: %s", gate_name, symbol, e)
+                adv_reasons.append(f"{gate_name} gate: error (skipped)")
+
     result.reasons = trend_r + mom_r + vol_r + volume_r + bt_r + risk_r + adv_reasons
     result.stop_loss = levels["stop_loss"]
     result.target_1 = levels["target_1"]
@@ -794,10 +817,19 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
         _log.warning("probability estimation failed for %s: %s", symbol, e)
         result.win_probability = 50.0
 
-    # --- Phase 3 v0: calibrated win_probability (v3 engine, behind NSE_SCORER_ENGINE=v3) ---
+    # --- Phase 3 v2: regime-conditional calibrated win_probability (v3 engine) ---
     if os.getenv("NSE_SCORER_ENGINE", "v2") == "v3":
         from .model.calibrator import calibrate
-        calibrated_pct, cal_reason = calibrate(result.win_probability)
+        regime_hint = None
+        if nifty_df is not None:
+            try:
+                from .tape_monitor import assess_tape
+                tape = assess_tape(nifty_df)
+                if tape is not None:
+                    regime_hint = tape.regime
+            except Exception:
+                regime_hint = None
+        calibrated_pct, cal_reason = calibrate(result.win_probability, regime=regime_hint)
         result.win_probability = calibrated_pct
         adv_reasons.append(cal_reason)
 

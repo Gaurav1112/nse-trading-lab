@@ -84,6 +84,24 @@ def remove_position(i: int) -> None:
 def get_journal() -> list[dict]:
     return list(st.session_state.get("journal", []))
 
+def set_positions(positions: list[dict]) -> None:
+    """Replace the positions list wholesale and persist to disk.
+    Used by the Cloud restore flow — Streamlit Cloud's container filesystem
+    is ephemeral, so the user re-uploads their JSON backup after any
+    restart and this re-hydrates both session and disk state.
+    """
+    if not isinstance(positions, list):
+        raise ValueError("positions must be a list")
+    st.session_state["positions"] = list(positions)
+    _save_positions_to_disk(st.session_state["positions"])
+
+def set_journal(journal: list[dict]) -> None:
+    """Replace the journal list wholesale and persist to disk. See set_positions."""
+    if not isinstance(journal, list):
+        raise ValueError("journal must be a list")
+    st.session_state["journal"] = list(journal)
+    _save_journal_to_disk(st.session_state["journal"])
+
 def add_trade(t: dict) -> None:
     journal = get_journal()
     journal.append(t)

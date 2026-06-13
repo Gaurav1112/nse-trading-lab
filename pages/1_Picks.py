@@ -212,10 +212,16 @@ else:
                 placeholder="e.g. score 78, breakout above 200EMA on 2x volume, tape MIXED, willing to risk ₹2k for ₹6k target",
                 height=80,
             )
+            from components.risk_governor import can_open_in_sector
+            _sector_ok, _sector_reason = can_open_in_sector(state.get_positions(), sym)
             if not _risk.can_trade:
                 st.caption(f"⛔ Save disabled by risk governor: {' · '.join(_risk.reasons)}")
+            elif not _sector_ok:
+                st.caption(f"⛔ {_sector_reason}")
+            else:
+                st.caption(f"🛡️ {_sector_reason}")
             if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True,
-                         disabled=(not _risk.can_trade) or len(thesis.strip()) < 20):
+                         disabled=(not _risk.can_trade) or (not _sector_ok) or len(thesis.strip()) < 20):
                 state.add_position({
                     "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
                     "stop_loss": sl_set, "target": s.target_1,
@@ -243,3 +249,42 @@ if positions:
         with c4:
             if st.button("🗑️", key=f"del_{p['symbol']}_{i}"):
                 state.remove_position(i); st.rerun()
+
+    # --- Cloud-persistence helpers (Streamlit Cloud's filesystem is ephemeral) ---
+    import json as _json
+    st.markdown("---")
+    st.markdown("### 💾 Backup / Restore")
+    st.caption(
+        "Streamlit Cloud's container restarts wipe local writes. Use these "
+        "controls to download your positions + journal locally and re-upload "
+        "after any restart."
+    )
+    bk1, bk2 = st.columns(2)
+    backup_blob = _json.dumps({
+        "positions": state.get_positions(),
+        "journal": state.get_journal(),
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+    }, indent=2)
+    bk1.download_button(
+        "⬇️ Download positions + journal (JSON)",
+        data=backup_blob,
+        file_name=f"nse_lab_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    uploaded = bk2.file_uploader(
+        "⬆️ Upload backup to restore", type=["json"], key="pos_restore",
+    )
+    if uploaded is not None:
+        try:
+            payload = _json.loads(uploaded.read().decode("utf-8"))
+            new_pos = payload.get("positions", [])
+            new_journal = payload.get("journal", [])
+            if isinstance(new_pos, list) and isinstance(new_journal, list):
+                state.set_positions(new_pos)
+                state.set_journal(new_journal)
+                st.success(f"✅ Restored {len(new_pos)} positions, {len(new_journal)} journal entries.")
+            else:
+                st.error("Invalid backup format — expected JSON with positions[] and journal[].")
+        except Exception as e:
+            st.error(f"Restore failed: {e}")

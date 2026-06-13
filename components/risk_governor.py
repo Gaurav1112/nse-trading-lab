@@ -28,6 +28,7 @@ _AUDIT_LOG_PATH = Path(_USER_DATA_DIR) / "audit_log.jsonl"
 
 DEFAULTS = {
     "max_open_positions": 5,
+    "max_per_sector": 2,              # correlated-drawdown cap: max open positions per sector
     "weekly_dd_threshold_pct": 5.0,   # cooling-off triggers when last 7d realised loss > 5% of capital
     "cooling_off_days": 7,            # length of the cooling-off period after breach
 }
@@ -104,6 +105,38 @@ def is_cooling_off(journal: list[dict], capital: float) -> tuple[bool, Optional[
         until = (datetime.now() + timedelta(days=window)).date().isoformat()
         return True, until
     return False, None
+
+
+def count_by_sector(positions: list[dict]) -> dict[str, int]:
+    """Tally open positions by sector. Unknown symbols -> 'Unclassified'."""
+    from nse_backtest.sectors import sector_of
+    out: dict[str, int] = {}
+    for p in positions:
+        if p.get("closed_date"):
+            continue
+        s = sector_of(p.get("symbol", ""))
+        out[s] = out.get(s, 0) + 1
+    return out
+
+
+def can_open_in_sector(positions: list[dict], symbol: str) -> tuple[bool, str]:
+    """Return (allowed, reason). Blocks when sector exposure >= cap.
+
+    Unclassified sector never blocks (would otherwise refuse new listings
+    or non-Nifty-50 symbols indiscriminately).
+    """
+    from nse_backtest.sectors import sector_of
+    sector = sector_of(symbol)
+    if sector == "Unclassified":
+        return True, f"Sector cap: {symbol} unclassified — no block"
+    cap = int(_setting("max_per_sector", 2))
+    held = count_by_sector(positions).get(sector, 0)
+    if held >= cap:
+        return False, (
+            f"Sector cap reached: already holding {held} {sector} position(s) "
+            f"(cap {cap}). Close one before opening another in this sector."
+        )
+    return True, f"Sector OK: {sector} {held}/{cap}"
 
 
 def assess(positions: list[dict], journal: list[dict], capital: float) -> GovernorVerdict:
