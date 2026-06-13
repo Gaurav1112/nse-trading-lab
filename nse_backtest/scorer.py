@@ -730,15 +730,7 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
             + result.risk_score * weights["risk"]
         )
 
-    # --- Phase 2 features (additive boosters, behind NSE_SCORER_ENGINE=v2) ---
     import os
-    if os.getenv("NSE_SCORER_ENGINE", "v1") == "v2":
-        from .features.relative_strength import rs_vs_nifty_boost
-        if nifty_df is not None:
-            rs_boost, rs_reason = rs_vs_nifty_boost(df, nifty_df)
-            if rs_boost > 0:
-                result.final_score = min(result.final_score + rs_boost, 100)
-            adv_reasons.append(rs_reason)
 
     if result.final_score >= 65:
         result.verdict = "GO"
@@ -749,6 +741,28 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
     else:
         result.verdict = "AVOID"
         result.confidence = "HIGH" if result.final_score < 30 else "MEDIUM"
+
+    # --- Phase 2 features (additive boosters + defensive gate, behind NSE_SCORER_ENGINE=v2) ---
+    # Runs AFTER verdict assignment so regime_gate can downgrade GO → WAIT.
+    if os.getenv("NSE_SCORER_ENGINE", "v1") == "v2":
+        from .features.relative_strength import rs_vs_nifty_boost
+        if nifty_df is not None:
+            rs_boost, rs_reason = rs_vs_nifty_boost(df, nifty_df)
+            if rs_boost > 0:
+                result.final_score = min(result.final_score + rs_boost, 100)
+            adv_reasons.append(rs_reason)
+
+        from .features.regime_gate import regime_block
+        if nifty_df is not None:
+            blocked, regime_reason = regime_block(nifty_df)
+            if blocked:
+                # Defensive downgrade — never let GO survive in hostile tape.
+                if result.verdict == "GO":
+                    result.verdict = "WAIT"
+                    result.confidence = "LOW"
+                adv_reasons.append(regime_reason)
+            else:
+                adv_reasons.append(regime_reason)
 
     result.reasons = trend_r + mom_r + vol_r + volume_r + bt_r + risk_r + adv_reasons
     result.stop_loss = levels["stop_loss"]
