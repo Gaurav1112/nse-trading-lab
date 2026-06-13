@@ -17,6 +17,7 @@ st.markdown("_Top actionable NSE stocks right now. Scored, ranked, one-tap posit
 # ── Tape regime banner ─────────────────────────────────────────
 from nse_backtest.tape_monitor import assess_tape, TapeRegime
 from nse_backtest.data import fetch_nifty50
+from components.data_freshness import check_freshness
 
 @st.cache_data(ttl=3600)  # refresh hourly
 def _cached_nifty():
@@ -50,6 +51,18 @@ if _tape is not None:
 else:
     st.caption("⚠️ Tape regime unavailable (Nifty data fetch failed)")
 # ── end banner ─────────────────────────────────────────────────
+
+# ── Data freshness badge (Rohan's integrity guard) ────────────
+_nifty_for_freshness = _cached_nifty()
+_freshness = check_freshness(_nifty_for_freshness)
+st.markdown(
+    f'<div style="border:1px solid {_freshness.color};border-radius:10px;padding:8px 14px;'
+    f'margin:6px 0;background:#0D1526;font-size:12px;color:#C9D5E0">'
+    f'<span style="color:{_freshness.color};font-weight:700">●</span> {_freshness.message}'
+    f'</div>', unsafe_allow_html=True)
+if _freshness.status == "STALE":
+    st.warning("⚠️ Stale data detected — picks below may be misleading. Refresh the page or check yfinance availability.")
+# ── end freshness ─────────────────────────────────────────────
 
 # ── Risk envelope banner (Kavya's portfolio guard) ─────────────
 from components.risk_governor import assess as _risk_assess
