@@ -25,3 +25,18 @@ rs_vs_nifty additive booster and regime_block defensive downgrade.
 - 2025 Δ expectancy: +0.90pp (need > +0.5pp)
 - 2023 v2 expectancy: +7.17% (need > +5%)
 - **VERDICT: Ship v2 (regime_gate + rs_vs_nifty) as the default engine.**
+
+## Statistical honesty (Phase G — Tomás)
+
+Multiple-testing tally: tested ~6 variants (rs_vs_nifty thresholds + regime_gate MIXED thresholds). Bonferroni-corrected per-test α = 0.0083 (from family α=0.05).
+
+Expectancy 95% CI is non-parametric bootstrap (n_boot=500) on per-trade net returns. Deflated Sharpe is Bailey & Lopez de Prado (2014): probability the true Sharpe exceeds the expected maximum under N independent trials. Prob Sharpe>0 is the classic probabilistic Sharpe ratio.
+
+| Window | Engine | Expectancy 95% CI (low / mid / high) | Deflated Sharpe | Prob Sharpe>0 |
+|---|---|---|---|---|
+| 2023 | v1 | +5.94% / +7.55% / +9.20% | 0.00 | 1.00 |
+| 2023 | v2 | +5.42% / +7.17% / +8.78% | 0.00 | 1.00 |
+| 2024 | v1 | +0.08% / +1.82% / +3.61% | 0.00 | 0.98 |
+| 2024 | v2 | +0.27% / +2.01% / +4.09% | 0.00 | 0.99 |
+| 2025_to_today | v1 | -2.00% / -0.57% / +0.85% | 0.00 | 0.22 |
+| 2025_to_today | v2 | -1.50% / +0.34% / +1.95% | 0.00 | 0.65 |
