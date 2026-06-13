@@ -1,6 +1,6 @@
 {
-  "version": "v0",
-  "fit_date": "2026-06-13T23:49:34",
+  "version": "v1",
+  "fit_date": "2026-06-14T00:29:50",
   "n_trades": 390,
   "grid": [
     0.0,
@@ -229,5 +229,49 @@
       "actual_win_rate": 0.5,
       "avg_raw_p": 0.8157777777777777
     }
-  }
+  },
+  "held_out_brier": {
+    "2024": 0.3714,
+    "2025": 0.2569,
+    "2026": 0.2747
+  },
+  "fold_results": [
+    {
+      "train_years": [
+        2023
+      ],
+      "eval_year": 2024,
+      "n_train": 103,
+      "n_eval": 146,
+      "brier_isotonic": 0.3714,
+      "brier_constant_baseline": 0.2483,
+      "improvement_vs_baseline": -0.1231
+    },
+    {
+      "train_years": [
+        2023,
+        2024
+      ],
+      "eval_year": 2025,
+      "n_train": 249,
+      "n_eval": 97,
+      "brier_isotonic": 0.2569,
+      "brier_constant_baseline": 0.2478,
+      "improvement_vs_baseline": -0.0091
+    },
+    {
+      "train_years": [
+        2023,
+        2024,
+        2025
+      ],
+      "eval_year": 2026,
+      "n_train": 346,
+      "n_eval": 44,
+      "brier_isotonic": 0.2747,
+      "brier_constant_baseline": 0.2314,
+      "improvement_vs_baseline": -0.0433
+    }
+  ],
+  "notes": "Walk-forward isotonic. LightGBM intentionally not used at this data scale (n~390) \u2014 would overfit on 2 informative inputs. Runtime ceiling cap in calibrator.py clips outputs at max(actual_win_rate) for buckets with n>=20."
 }

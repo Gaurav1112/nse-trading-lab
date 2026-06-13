@@ -69,14 +69,41 @@ chart_df["200 EMA"] = chart_df["Close"].ewm(span=200, adjust=False).mean()
 st.line_chart(chart_df)
 
 st.markdown("---")
-st.markdown("## 🎯 Win-probability calibration (Phase 3 v0)")
+st.markdown("## 🎯 Win-probability calibration")
 try:
-    from nse_backtest.model.calibrator import _load_calibrator
+    from nse_backtest.model.calibrator import _load_calibrator, _ceiling_from_buckets
     cal = _load_calibrator()
     if cal:
-        st.caption(f"Calibrator fit on {cal['n_trades']} walk-forward trades, version {cal['version']}, "
-                   f"trained {cal['fit_date']}. Enable v3 via NSE_SCORER_ENGINE=v3.")
+        st.caption(
+            f"**Calibrator v{cal.get('version', '?')}** — fit on {cal['n_trades']} "
+            f"walk-forward trades, trained {cal.get('fit_date', '?')[:10]}. "
+            "Enable v3 via `NSE_SCORER_ENGINE=v3`."
+        )
+        ceiling = _ceiling_from_buckets(cal.get("bucket_stats", {}))
+        if ceiling is not None:
+            st.caption(
+                f"Runtime ceiling cap: max calibrated win probability is "
+                f"**{ceiling * 100:.1f}%** (highest actual win rate in any "
+                f"reliable training bucket). The engine will never claim "
+                "more confidence than the data supports."
+            )
+        brier = cal.get("held_out_brier")
+        if isinstance(brier, dict) and brier:
+            rows = " | ".join(f"**{y}**: {v:.3f}" for y, v in sorted(brier.items()))
+            st.caption(
+                f"Held-out Brier per evaluation year — {rows}. "
+                "Reference: a constant-baseline predictor scores ~0.25. "
+                "Lower is better. If isotonic ≥ baseline, the calibrator "
+                "adds no information beyond the historical win rate — "
+                "use v2 (default) instead of v3."
+            )
+        if cal.get("notes"):
+            with st.expander("Calibrator notes & design decisions"):
+                st.write(cal["notes"])
     else:
-        st.caption("Calibrator not yet trained. Run `python scripts/train_calibration.py`.")
+        st.caption(
+            "Calibrator not yet trained. Run "
+            "`PYTHONPATH=. python3.13 scripts/train_calibration.py`."
+        )
 except Exception as e:
     st.caption(f"Calibrator status: error ({e})")

@@ -2,6 +2,12 @@
 
 Owner: Dr. Meera Nair (C.9). Calibrator JSON is produced by
 scripts/train_calibration.py and shipped in nse_backtest/model/calibrator.json.
+
+Phase 3 v1 adds a runtime ceiling cap so we never claim a calibrated win
+probability higher than the highest observed actual win rate in any reliable
+training bucket (n >= MIN_BUCKET_N). This is defense in depth: even if a
+future fit produces a curve that pins to 1.0 in a region with no training
+data, the cap clips it back to honesty.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ import numpy as np
 
 
 _CALIB_PATH = Path(__file__).resolve().parent / "calibrator.json"
+MIN_BUCKET_N = 20  # smaller buckets are too noisy to set a ceiling
 
 
 @lru_cache(maxsize=1)
@@ -26,6 +33,24 @@ def _load_calibrator() -> Optional[dict]:
         return None
 
 
+def _ceiling_from_buckets(bucket_stats: dict) -> Optional[float]:
+    """Highest actual_win_rate among buckets with reliable sample size."""
+    if not bucket_stats:
+        return None
+    reliable = [
+        b["actual_win_rate"] for b in bucket_stats.values()
+        if isinstance(b, dict) and b.get("n", 0) >= MIN_BUCKET_N
+        and "actual_win_rate" in b
+    ]
+    if reliable:
+        return float(max(reliable))
+    fallback = [
+        b["actual_win_rate"] for b in bucket_stats.values()
+        if isinstance(b, dict) and "actual_win_rate" in b
+    ]
+    return float(max(fallback)) if fallback else None
+
+
 def calibrate(raw_prob: float) -> tuple[float, str]:
     """Map a raw win-probability (0-1 or 0-100) to its calibrated equivalent.
 
@@ -36,7 +61,6 @@ def calibrate(raw_prob: float) -> tuple[float, str]:
     if cal is None:
         return float(raw_prob), "Calibrator unavailable; returning raw probability"
 
-    # Accept either 0-1 or 0-100 input
     if raw_prob > 1.0:
         x = float(raw_prob) / 100.0
     else:
@@ -45,7 +69,21 @@ def calibrate(raw_prob: float) -> tuple[float, str]:
 
     grid = np.asarray(cal["grid"], dtype=float)
     cal_arr = np.asarray(cal["calibrated"], dtype=float)
-    # Linear interpolation on the saved curve
     y = float(np.interp(x, grid, cal_arr))
+
+    ceiling = _ceiling_from_buckets(cal.get("bucket_stats", {}))
+    capped = False
+    if ceiling is not None and y > ceiling:
+        y = ceiling
+        capped = True
+
     pct = round(y * 100.0, 1)
-    return pct, f"Calibrated from raw {raw_prob:.1f}% via isotonic (n={cal.get('n_trades', '?')})"
+
+    bits = [f"Calibrated from raw {raw_prob:.1f}% via isotonic (n={cal.get('n_trades', '?')})"]
+    if capped:
+        bits.append(f"capped at observed top-bucket win rate {ceiling * 100:.1f}%")
+    brier = cal.get("held_out_brier")
+    if isinstance(brier, dict) and brier:
+        parts = ", ".join(f"{k}={v:.3f}" for k, v in sorted(brier.items()))
+        bits.append(f"held-out Brier: {parts}")
+    return pct, "; ".join(bits)
