@@ -21,7 +21,15 @@ from .exits import update_trail_stop, time_stop_triggered, ExitReason
 # --- Zerodha delivery cost shorthand (matches engine.TradeConfig defaults) ---
 _STT_SELL = 0.001
 _STAMP_BUY = 0.00015
-_SLIPPAGE_ONE_WAY = 0.001
+# Phase F (Daniel Foss): the old flat 0.1%/side slippage was a rough catch-all
+# that double-counted spread. We now model spread explicitly (see
+# _SPREAD_PER_SIDE below) and keep a small residual slippage for queue/latency.
+_SLIPPAGE_ONE_WAY = 0.00025
+# Per-side bid-ask spread for Nifty 50 names. ~0.075% is the median of bid-ask %
+# I observed on Nifty 50 names in Kite Connect quotes. Tuneable per-symbol via
+# a dict later. Round-trip drag ≈ 0.15pp of return.
+_SPREAD_PER_SIDE = 0.00075
+_DEFAULT_SPREAD_PER_SIDE_PCT = 0.075  # for documentation / external reference
 _DP_PER_SELL = 15.93
 _NSE_TXN = 0.0000297
 _SEBI = 0.000001
@@ -30,7 +38,12 @@ _IPFT = 0.0000001
 
 
 def _delivery_costs_pct(entry: float, exit_price: float, shares: int) -> float:
-    """Return total round-trip Zerodha delivery costs as % of (exit_price * shares)."""
+    """Return total round-trip Zerodha delivery costs as % of (exit_price * shares).
+
+    Phase F: spread drag (2 × _SPREAD_PER_SIDE) is now included explicitly,
+    and the residual slippage is reduced so net round-trip cost is comparable
+    to the old (overestimated flat slippage) figure.
+    """
     if shares <= 0 or exit_price <= 0:
         return 0.0
     buy_turnover = entry * shares
@@ -41,7 +54,8 @@ def _delivery_costs_pct(entry: float, exit_price: float, shares: int) -> float:
     gst = txn * _GST
     dp = _DP_PER_SELL
     slip = (buy_turnover + sell_turnover) * _SLIPPAGE_ONE_WAY
-    total = stt + stamp + txn + gst + dp + slip
+    spread = (buy_turnover + sell_turnover) * _SPREAD_PER_SIDE
+    total = stt + stamp + txn + gst + dp + slip + spread
     return total / sell_turnover * 100
 
 
@@ -142,8 +156,39 @@ def simulate_trade(
 
     for i in range(1, min(len(future_data), max_hold + 1)):
         bar = future_data.iloc[i]
+        bar_open = float(bar["Open"])
         bar_high = float(bar["High"])
         bar_low = float(bar["Low"])
+        bar_volume = float(bar["Volume"]) if "Volume" in bar.index else 1_000_000.0
+
+        # Phase F: circuit-lock heuristic. A bar with zero volume (or a flat bar
+        # at near-zero volume) means no trades happened — we cannot exit. Carry
+        # the position to the next bar; do not update SL or take partials.
+        if bar_volume == 0 or (bar_high == bar_low and bar_volume < 100):
+            continue
+
+        # Phase F: check Open FIRST. A resting GTT order would fill at the Open
+        # on a gap-through, not at the target/SL price.
+        if bar_open <= sl:
+            # Gapped DOWN through SL overnight: fill at Open (worse than SL).
+            exit_price = bar_open
+            if t1_hit:
+                exit_price = partial_exit_price * 0.5 + bar_open * 0.5
+            reason = ExitReason.TRAIL_STOP if t1_hit else ExitReason.STOP_LOSS_GAP
+            return _build_outcome(
+                symbol, entry_date, future_data.index[i], entry_price, exit_price,
+                i, reason, atr,
+            )
+
+        if bar_open >= target_2:
+            # Gapped UP through T2 overnight: fill at Open (better than T2).
+            exit_price = bar_open
+            if t1_hit:
+                exit_price = partial_exit_price * 0.5 + bar_open * 0.5
+            return _build_outcome(
+                symbol, entry_date, future_data.index[i], entry_price, exit_price,
+                i, ExitReason.TARGET_2_GAP, atr,
+            )
 
         if bar_high >= target_2:
             exit_price = target_2
