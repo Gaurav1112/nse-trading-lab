@@ -590,9 +590,11 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
 
     if run_backtests:
         result.backtest_score, bt_r = score_backtest(df)
+        backtest_dim_in_play = True
     else:
         result.backtest_score = 0
-        bt_r = ["Backtest dimension skipped (Phase 1: runtime weight removed)"]
+        bt_r = ["Backtest dimension skipped on fast path; re-added as nightly cache in roadmap Phase 2"]
+        backtest_dim_in_play = False
 
     # Phase 2: Advanced indicators (adjust core scores ±5-10 pts)
     from ._logging import get_logger
@@ -667,11 +669,11 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         _log.warning("market regime detection failed for %s: %s", symbol, e)
         result.regime = "UNKNOWN"
 
-    # Phase 1: Backtest dimension dropped from runtime scoring.
-    # When run_backtests=True (e.g., Analyze page, batch CLI), backtest_score
-    # is still computed and surfaced in the breakdown UI, but it does not
-    # contribute to final_score. Phase 2 re-introduces it as a nightly cache.
-    if run_backtests and result.backtest_score > 0:
+    # Branch on the caller's intent, not on the realized backtest_score: a legitimate
+    # 0 from score_backtest (no strategy produced ≥30 trades) is itself a signal worth
+    # weighting at 15%, and silently collapsing it into the 5-dim path would mask weak
+    # strategy-friendliness in the CLI Analyze report.
+    if backtest_dim_in_play:
         weights = {
             "trend": 0.25, "momentum": 0.20, "volume": 0.15,
             "volatility": 0.10, "backtest": 0.15, "risk": 0.15,
@@ -685,7 +687,7 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
             + result.risk_score * weights["risk"]
         )
     else:
-        # Phase 1 runtime weights — renormalized after dropping backtest dim.
+        # Fast-path weights — each = original_weight / (1 - 0.15), rounded to 2dp.
         weights = {"trend": 0.30, "momentum": 0.23, "volume": 0.18, "volatility": 0.12, "risk": 0.17}
         assert abs(sum(weights.values()) - 1.0) < 1e-9
         result.final_score = (
