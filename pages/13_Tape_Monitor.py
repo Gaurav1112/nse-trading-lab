@@ -67,3 +67,16 @@ chart_df = nifty.tail(250)[["Close"]].copy()
 chart_df["50 EMA"] = chart_df["Close"].ewm(span=50, adjust=False).mean()
 chart_df["200 EMA"] = chart_df["Close"].ewm(span=200, adjust=False).mean()
 st.line_chart(chart_df)
+
+st.markdown("---")
+st.markdown("## 🎯 Win-probability calibration (Phase 3 v0)")
+try:
+    from nse_backtest.model.calibrator import _load_calibrator
+    cal = _load_calibrator()
+    if cal:
+        st.caption(f"Calibrator fit on {cal['n_trades']} walk-forward trades, version {cal['version']}, "
+                   f"trained {cal['fit_date']}. Enable v3 via NSE_SCORER_ENGINE=v3.")
+    else:
+        st.caption("Calibrator not yet trained. Run `python scripts/train_calibration.py`.")
+except Exception as e:
+    st.caption(f"Calibrator status: error ({e})")
