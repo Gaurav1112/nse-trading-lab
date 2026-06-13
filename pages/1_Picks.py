@@ -126,12 +126,35 @@ if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_wid
                     pass
             picks.sort(reverse=True)
             st.session_state["today_picks"] = picks[:max_picks]
+            st.session_state["today_picks_scanned"] = True
         except Exception as e:
             st.error(f"Scan failed: {e}")
 
 picks = st.session_state.get("today_picks", [])
+scan_ran = st.session_state.get("today_picks_scanned", False)
 if not picks:
-    st.info("Hit **Find Today's Best Stocks** to scan the market.")
+    if scan_ran:
+        # Scan ran but zero qualified — regime-aware empty state
+        if _tape is not None and _tape.regime == TapeRegime.HOSTILE:
+            st.warning(
+                f"**0 picks today — and that's the right answer.** Tape is **HOSTILE** "
+                f"({_tape.recommendation[:120]}). The v2 engine is correctly blocking "
+                f"GO verdicts in this regime. Historical expectancy in HOSTILE tape "
+                f"was only +0.05% per trade (essentially break-even after costs). "
+                f"Come back when the Tape Monitor banner turns MIXED (be selective) "
+                f"or TRENDING (trade normally)."
+            )
+        elif _tape is not None and _tape.regime == TapeRegime.MIXED:
+            st.info(
+                f"**0 picks at score ≥{min_score}.** Tape is MIXED — engine is being selective. "
+                f"Try lowering the min score slider, or open the Analyze page to deep-dive specific names."
+            )
+        else:
+            st.info(
+                f"**0 picks at score ≥{min_score}.** Try lowering the slider, or scanning the wider universe."
+            )
+    else:
+        st.info("Hit **Find Today's Best Stocks** to scan the market.")
 else:
     st.markdown(f"### ✅ {len(picks)} stocks cleared the {min_score}+ score filter")
     for rank, (sc, sym, s) in enumerate(picks, 1):
@@ -163,6 +186,15 @@ else:
         m3.metric("Target 1", f"₹{s.target_1:,.0f}", f"+{t1_pct:.1f}%")
         m4.metric("R:R", f"{s.risk_reward:.1f}:1")
         m5.metric("Win %", f"{s.win_probability:.0f}%")
+        # Honest uncertainty annotation (Sara + Tomás — Phase E)
+        # Score ±5 is the empirical noise floor we observed across the threshold
+        # sweeps; entries/stops are rounded but the market moves intraday so
+        # "around" is more honest than "exactly".
+        st.caption(
+            f"💡 **Score interpretation:** {sc:.0f} ±5 (noise floor). "
+            f"Entry/SL/T1 are reference levels — slippage typically ±0.5%. "
+            f"Win% is calibrated against backtest, not live."
+        )
         if s.suggested_qty > 0:
             st.caption(f"Suggested: **{s.suggested_qty} shares** = ₹{s.position_value:,.0f} | Max loss ₹{s.max_loss:,.0f}")
         with st.expander("📋 Why this stock?"):
