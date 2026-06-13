@@ -22,6 +22,10 @@ output/*
 output/snapshots/*
 !output/snapshots/*.md
 !output/snapshots/*.csv
+!output/ab_replay/
+output/ab_replay/*
+!output/ab_replay/*.md
+!output/ab_replay/*.csv
 *.png
 !README_assets/*.png
 
