@@ -744,7 +744,8 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
 
     # --- Phase 2 features (additive boosters + defensive gate, behind NSE_SCORER_ENGINE=v2) ---
     # Runs AFTER verdict assignment so regime_gate can downgrade GO → WAIT.
-    if os.getenv("NSE_SCORER_ENGINE", "v2") == "v2":
+    # v3 inherits v2 features and additionally calibrates win_probability below.
+    if os.getenv("NSE_SCORER_ENGINE", "v2") in ("v2", "v3"):
         from .features.relative_strength import rs_vs_nifty_boost
         if nifty_df is not None:
             rs_boost, rs_reason = rs_vs_nifty_boost(df, nifty_df)
@@ -792,6 +793,13 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
     except Exception as e:
         _log.warning("probability estimation failed for %s: %s", symbol, e)
         result.win_probability = 50.0
+
+    # --- Phase 3 v0: calibrated win_probability (v3 engine, behind NSE_SCORER_ENGINE=v3) ---
+    if os.getenv("NSE_SCORER_ENGINE", "v2") == "v3":
+        from .model.calibrator import calibrate
+        calibrated_pct, cal_reason = calibrate(result.win_probability)
+        result.win_probability = calibrated_pct
+        adv_reasons.append(cal_reason)
 
     # Warnings
     if result.trend_score < 30:
