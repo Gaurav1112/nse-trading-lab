@@ -2,20 +2,26 @@
 
 > Last updated: 2026-06-14. v2 engine is default (v3 calibrated engine also live, opt-in via `NSE_SCORER_ENGINE=v3`). Today's tape is **HOSTILE**.
 
-## Before you launch
+## Launch (one step — pre-flight runs automatically)
 
 ```bash
 cd /Users/racit/PersonalProject/nse-trading-lab
-PYTHONPATH=. python3.13 scripts/startup_check.py
-# All checks must pass. Investigate any ✗ before opening the app.
-```
-
-## Launch
-
-```bash
 ./start.sh
-# Opens http://localhost:8501 in your browser
+# Runs scripts/startup_check.py first; refuses to launch if any check fails.
+# Override with SKIP_PREFLIGHT=1 ./start.sh (don't).
+# Then opens http://127.0.0.1:8501 in your browser.
 ```
+
+## What runs automatically (no manual action needed)
+
+- **Daily at 18:00 IST** — GitHub Action regenerates today's tape regime
+  report and commits it to `docs/daily/YYYY-MM-DD.md`. Read this file before
+  opening the app if you want a quick status without launching anything.
+- **Sunday 08:30 IST** — GitHub Action regenerates YTD walk-forward
+  snapshots, re-runs the v1/v2 A/B verdict, retrains the calibrator, and
+  commits refreshed artifacts. Pull `main` Monday morning to get them.
+- **Every push** — GitHub Actions CI runs the full pytest suite. Any
+  regression blocks the push from being trusted.
 
 ## The order to read the screen
 

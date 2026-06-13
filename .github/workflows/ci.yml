@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest scikit-learn
+
+      - name: Run pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest -q --tb=short
+
+      - name: Pre-flight check (offline portions)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          NSE_LAB_DATA_DIR: ${{ runner.temp }}/nse-lab-data
+        run: |
+          # yfinance + tape regime checks may flake from GHA IPs; tolerate
+          # network failures here so CI doesn't fail because of upstream.
+          python scripts/startup_check.py || {
+            echo "::warning::startup_check failed — likely yfinance from GHA IP, not a regression"
+            exit 0
+          }

@@ -25,6 +25,19 @@ else
 fi
 
 echo ""
+echo "  Running pre-flight check..."
+echo ""
+# Auto pre-flight. Skip with SKIP_PREFLIGHT=1 if you know what you're doing.
+if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
+    if ! python3 scripts/startup_check.py; then
+        echo ""
+        echo "  ⛔ Pre-flight failed. Fix the issues above before trading."
+        echo "  Override with SKIP_PREFLIGHT=1 ./start.sh (not recommended)."
+        exit 1
+    fi
+    echo ""
+fi
+
 echo "  Opening http://127.0.0.1:8501 in browser..."
 echo "  Press Ctrl+C to stop"
 echo ""

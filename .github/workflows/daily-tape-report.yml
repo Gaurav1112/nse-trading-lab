@@ -1,0 +1,52 @@
+name: Daily Tape Report
+
+on:
+  schedule:
+    # 12:30 UTC = 18:00 IST, ~2 hrs after Indian markets close (NSE closes 15:30 IST).
+    # yfinance usually has the day's close by then.
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We commit back from this workflow; need write access via the default token.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate today's tape report
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/write_daily_tape_report.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain docs/daily/)" ]; then
+            today=$(date -u +%Y-%m-%d)
+            git add docs/daily/
+            git commit -m "chore(daily): tape report ${today}"
+            git push
+          else
+            echo "No new daily report to commit."
+          fi

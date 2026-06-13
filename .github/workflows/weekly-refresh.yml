@@ -1,0 +1,84 @@
+name: Weekly Walk-Forward Refresh
+
+on:
+  schedule:
+    # Sunday 03:00 UTC = Sunday 08:30 IST. Well before any Monday trading
+    # decision and after the previous week's bars have settled in yfinance.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install scikit-learn
+
+      - name: Regenerate YTD snapshot
+        id: snapshot
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          SNAPSHOT_START: "2026-01-01"
+          SNAPSHOT_END: ""  # script defaults to today
+          SNAPSHOT_STRIDE: "5"
+          SNAPSHOT_MIN_SCORE: "65"
+          SNAPSHOT_MAX_HOLD: "15"
+        run: |
+          python scripts/generate_snapshots.py
+        timeout-minutes: 30
+
+      - name: Re-run walk-forward A/B verdict
+        if: steps.snapshot.outcome == 'success'
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/walk_forward_ab.py
+        timeout-minutes: 20
+
+      - name: Re-train calibrator
+        if: steps.snapshot.outcome == 'success'
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/train_calibration.py
+
+      - name: Run test suite (sanity)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest -q --tb=short
+
+      - name: Commit refreshed artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only stage the artifacts we actually expect to change.
+          git add output/snapshots/ output/walk_forward/ nse_backtest/model/calibrator.json 2>/dev/null || true
+          if [ -n "$(git status --porcelain)" ]; then
+            week=$(date -u +%Y-W%V)
+            git commit -m "chore(weekly): refresh walk-forward + calibration (${week})"
+            git push
+          else
+            echo "No refreshed artifacts to commit (likely yfinance issue from GHA IP)."
+          fi
