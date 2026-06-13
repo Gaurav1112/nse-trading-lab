@@ -223,7 +223,19 @@ if run and sym_input:
             shares = position_size_risk_based(cap, score.current_price, score.stop_loss, risk_pct)
             pos_val = shares * score.current_price
             max_loss = (score.current_price - score.stop_loss) * shares
-            pc1, pc2, pc3 = st.columns(3)
+            # Why-HOLD-on-high-score callout (mirrors Trading Modes page)
+            if score.verdict == "WAIT" and score.final_score >= 65:
+                gate = next((r for r in score.reasons
+                             if any(t in r for t in ("Regime block", "MTF disconfirmation",
+                                                     "Gap-up too large", "Liquidity too thin",
+                                                     "Earnings inside", "Negative expected value"))),
+                            None)
+                if gate:
+                    st.warning(f"⛔ **Why WAIT despite score {score.final_score:.0f}/100:** {gate}")
+                else:
+                    st.warning(f"⛔ **WAIT on score {score.final_score:.0f}/100** — a safety gate downgraded the GO. See reasons below.")
+            pc0, pc1, pc2, pc3 = st.columns(4)
+            pc0.metric("CMP (Current)", f"₹{score.current_price:,.2f}")
             pc1.metric("Entry Zone", score.entry_zone)
             pc2.metric("Stop Loss", f"₹{score.stop_loss:,.0f}", f"-{(score.current_price-score.stop_loss)/score.current_price*100:.1f}%" if score.current_price > 0 else "")
             pc3.metric("Target 1", f"₹{score.target_1:,.0f}", f"+{(score.target_1-score.current_price)/score.current_price*100:.1f}%" if score.current_price > 0 else "")

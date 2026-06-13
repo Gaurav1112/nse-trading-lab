@@ -64,11 +64,26 @@ if st.button("🔍 Scan", type="primary", use_container_width=True, key="scr_run
         try:
             setup = analyze_fn(df, sym, cap, risk, nifty_df=nifty_for_engine)
             if setup:
+                # Why-HOLD: when raw score is ≥65 but signal is HOLD, a downstream
+                # gate (regime / MTF / liquidity / gap / earnings) demoted the GO.
+                # Surface the most informative reason on the row.
+                why_hold = ""
+                if setup.signal == "HOLD" and setup.score >= 65:
+                    for r in setup.reasons:
+                        if any(t in r for t in ("Regime block", "MTF disconfirmation",
+                                                "Gap-up too large", "Liquidity too thin",
+                                                "Earnings inside")):
+                            why_hold = r[:60]
+                            break
+                    if not why_hold:
+                        why_hold = "Score ≥65 but downstream safety gate fired"
                 rows.append({"Symbol": sym, "Signal": setup.signal, "Score": round(setup.score, 0),
                               "Setup": getattr(setup, "strategy_name", mode) or mode,
-                              "Entry ₹": round(setup.entry_price, 0), "SL ₹": round(setup.stop_loss, 0),
+                              "CMP ₹": round(setup.entry_price, 0),
+                              "SL ₹": round(setup.stop_loss, 0),
                               "Target ₹": round(setup.target_1, 0), "R:R": round(setup.risk_reward, 2),
-                              "Win %": round(setup.win_probability, 0)})
+                              "Win %": round(setup.win_probability, 0),
+                              "Why HOLD": why_hold})
         except Exception:
             pass
     prog.empty()

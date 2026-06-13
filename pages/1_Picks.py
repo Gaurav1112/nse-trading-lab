@@ -179,7 +179,7 @@ else:
             f'<span style="font-size:13px;color:#7A93AA;margin-left:12px">Score {sc:.0f}/100</span>'
             f'</div>', unsafe_allow_html=True)
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Entry", f"₹{s.entry_price:,.0f}")
+        m1.metric("CMP / Entry", f"₹{s.entry_price:,.0f}")
         sl_pct = (s.entry_price - s.stop_loss) / s.entry_price * 100
         m2.metric("Stop Loss", f"₹{s.stop_loss:,.0f}", f"-{sl_pct:.1f}%")
         t1_pct = (s.target_1 - s.entry_price) / s.entry_price * 100

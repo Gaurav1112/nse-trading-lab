@@ -85,8 +85,19 @@ if st.button("⚡  Analyze All Modes", type="primary", use_container_width=True)
             return
         clr = "#10b981" if setup.signal == "BUY" else "#ef4444" if setup.signal == "SELL" else "#f59e0b"
         st.markdown(f'<div style="background:#111827;padding:16px;border-radius:12px;border-left:4px solid {clr};margin:8px 0"><span style="font-size:22px;font-weight:700;color:{clr}">{setup.signal}</span> <span style="color:#64748b">| Score {setup.score:.0f}/100 | Win Prob {setup.win_probability:.0f}% | {setup.timeframe}</span></div>', unsafe_allow_html=True)
+        # Surface why a high-score setup got downgraded so the user isn't left wondering.
+        if setup.signal == "HOLD" and setup.score >= 65:
+            gate_hit = next((r for r in setup.reasons
+                             if any(t in r for t in ("Regime block", "MTF disconfirmation",
+                                                     "Gap-up too large", "Liquidity too thin",
+                                                     "Earnings inside", "Negative expected value"))),
+                            None)
+            if gate_hit:
+                st.warning(f"⛔ **Why HOLD despite score {setup.score:.0f}/100:** {gate_hit}")
+            else:
+                st.warning(f"⛔ **HOLD on score {setup.score:.0f}/100** — a safety gate downgraded the GO. Check reasons below.")
         mc = st.columns(6)
-        mc[0].metric("Entry", f"₹{setup.entry_price:,.0f}")
+        mc[0].metric("CMP (Current)", f"₹{setup.entry_price:,.0f}")
         mc[1].metric("SL", f"₹{setup.stop_loss:,.0f}")
         mc[2].metric("T1", f"₹{setup.target_1:,.0f}")
         mc[3].metric("T2", f"₹{setup.target_2:,.0f}")
