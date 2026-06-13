@@ -53,6 +53,7 @@ Thumbs.db
 .env
 secrets.py
 kite_credentials.py
+.streamlit/secrets.toml
 positions.json
 trade_journal.json
 audit_log.jsonl

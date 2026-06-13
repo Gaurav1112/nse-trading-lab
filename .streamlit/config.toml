@@ -6,9 +6,15 @@ textColor = "#fafafa"
 font = "sans serif"
 
 [server]
+# headless/address/port intentionally not set so Streamlit Community Cloud
+# can supply its own values. For local runs, start.sh passes flags directly.
 headless = true
-address = "127.0.0.1"
-port = 8501
 
 [browser]
 gatherUsageStats = false
+
+[client]
+showErrorDetails = "stacktrace"  # surface errors clearly on Cloud + locally
+
+[logger]
+level = "info"
