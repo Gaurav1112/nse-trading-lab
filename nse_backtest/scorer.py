@@ -200,6 +200,38 @@ def score_momentum(df: pd.DataFrame) -> tuple[float, list[str]]:
         score += 5
         reasons.append(f"Positive 20d momentum ({roc:.1f}%)")
 
+    # --- Phase 1: Momentum-decay penalty (bagholder defense) ---
+    # If both 5-bar ROC and 5-bar OBV slope have flattened to <30% of their
+    # 20-bar counterparts, the trend is rolling over even though absolute
+    # levels still look healthy. This is the bagholder fingerprint.
+    if len(close) >= 25:
+        roc5 = momentum.ROCIndicator(close, window=5).roc().iloc[-1]
+        roc20 = momentum.ROCIndicator(close, window=20).roc().iloc[-1]
+        if pd.notna(roc5) and pd.notna(roc20) and abs(roc20) > 0.1:
+            roc_ratio = abs(roc5) / abs(roc20)
+        else:
+            roc_ratio = 1.0
+
+        obv_series = volume.OnBalanceVolumeIndicator(close, df["Volume"]).on_balance_volume()
+        if len(obv_series) >= 20:
+            obv5 = obv_series.iloc[-5:].dropna()
+            obv20 = obv_series.iloc[-20:].dropna()
+            if len(obv5) >= 2 and len(obv20) >= 2:
+                slope5 = np.polyfit(np.arange(len(obv5)), obv5.values, 1)[0]
+                slope20 = np.polyfit(np.arange(len(obv20)), obv20.values, 1)[0]
+                if abs(slope20) > 1:
+                    obv_ratio = abs(slope5) / abs(slope20)
+                else:
+                    obv_ratio = 1.0
+            else:
+                obv_ratio = 1.0
+        else:
+            obv_ratio = 1.0
+
+        if roc_ratio < 0.3 and obv_ratio < 0.25:
+            score = max(score - 25, 0)
+            reasons.append("⚠️ Momentum decaying — ROC and OBV both flatlining (bagholder risk)")
+
     return min(score, 100), reasons
 
 

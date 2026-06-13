@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from nse_backtest.scorer import analyze_stock
 
 
@@ -37,3 +38,41 @@ def test_backtest_score_is_zero_when_skipped():
     df = _bullish_df()
     out = analyze_stock(df, "TEST", run_backtests=False)
     assert out.backtest_score == 0
+
+
+def test_momentum_decay_penalty_fires_on_flatlined_uptrend():
+    """A stock that ran up hard for 60 bars then went sideways for 5 bars
+    should get a momentum penalty — that's the bagholder signal."""
+    n = 260
+    rng = np.random.default_rng(42)
+    trend = np.linspace(100, 180, 255)
+    flat = np.full(5, 180.0)
+    close = np.concatenate([trend, flat]) + rng.normal(0, 0.3, n)
+    df = pd.DataFrame({
+        "Open": close, "High": close * 1.005, "Low": close * 0.995,
+        "Close": close,
+        "Volume": np.concatenate([rng.integers(3_000_000, 5_000_000, 255),
+                                  rng.integers(800_000, 1_200_000, 5)]),
+    }, index=pd.bdate_range("2023-01-02", periods=n))
+
+    from nse_backtest.scorer import score_momentum
+    s, reasons = score_momentum(df)
+    assert any("Momentum decaying" in r for r in reasons), (
+        f"expected decay reason; got reasons={reasons}"
+    )
+
+
+def test_momentum_decay_does_not_fire_on_clean_uptrend():
+    """A still-accelerating uptrend must NOT get the penalty."""
+    n = 260
+    rng = np.random.default_rng(11)
+    close = np.linspace(100, 200, n) + rng.normal(0, 0.3, n)
+    df = pd.DataFrame({
+        "Open": close, "High": close * 1.005, "Low": close * 0.995,
+        "Close": close,
+        "Volume": rng.integers(3_000_000, 5_000_000, n),
+    }, index=pd.bdate_range("2023-01-02", periods=n))
+
+    from nse_backtest.scorer import score_momentum
+    s, reasons = score_momentum(df)
+    assert not any("Momentum decaying" in r for r in reasons)
