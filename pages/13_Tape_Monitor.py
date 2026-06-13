@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from components import theme, state
+from components.data_freshness import check_freshness
 from nse_backtest.data import fetch_nifty50
 from nse_backtest.tape_monitor import assess_tape, TapeRegime
 
@@ -34,6 +35,17 @@ st.markdown(
     f'<div style="margin-top:12px;color:#C9D5E0;font-size:16px;line-height:1.5">'
     f'{assessment.recommendation}</div>'
     f'</div>', unsafe_allow_html=True)
+
+# ── Data freshness indicator (Rohan's integrity guard) ────────
+_freshness = check_freshness(nifty)
+st.markdown(
+    f"<div style='font-size:12px;color:#7A93AA;margin:4px 0 10px 0'>"
+    f"<span style='color:{_freshness.color};font-weight:700'>●</span> "
+    f"Last Nifty bar: <b>{_freshness.last_bar_date_str}</b> · {_freshness.status} · "
+    f"{_freshness.message}</div>",
+    unsafe_allow_html=True,
+)
+# ── end freshness ─────────────────────────────────────────────
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Nifty 50", f"₹{assessment.nifty_close:,.0f}")
