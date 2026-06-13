@@ -1,7 +1,7 @@
 import re
 import streamlit as st
 from components import theme, state, cards
-from nse_backtest.data import fetch_nse
+from nse_backtest.data import fetch_nse, fetch_nifty50
 from nse_backtest.trading_modes import analyze_all_modes
 from nse_backtest.sample_data import trending_stock
 
@@ -26,6 +26,17 @@ def _fetch(sym: str):
         return trending_stock(), True
 
 
+# Threaded into analyze_all_modes so swing's analyze_stock call gets the v2
+# engine's rs_vs_nifty + regime_gate context (other modes accept but ignore
+# nifty_df today — see trading_modes docstrings).
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_nifty():
+    try:
+        return fetch_nifty50(start="2022-01-01")
+    except Exception:
+        return None
+
+
 tm1, tm2 = st.columns([3, 1])
 with tm1:
     tm_sym_raw = st.text_input("Symbol", "COALINDIA", key="tm_sym")
@@ -40,7 +51,8 @@ if st.button("⚡  Analyze All Modes", type="primary", use_container_width=True)
     tm_sym = s
     with st.spinner(f"Running 5 analysis modes on {tm_sym}..."):
         tm_df = trending_stock() if tm_demo else _fetch(tm_sym)[0]
-        results = analyze_all_modes(tm_df, tm_sym, state.get_capital())
+        results = analyze_all_modes(tm_df, tm_sym, state.get_capital(),
+                                    nifty_df=None if tm_demo else _cached_nifty())
 
     # ── Overview Strip ──
     st.markdown("### At a Glance")
