@@ -191,3 +191,54 @@ if results_list:
             )
         else:
             st.info("No completed trades for the best strategy.")
+
+# ════════════════════════════════════════════════════════════════
+#  PICKER REPLAY — Phase 1
+# ════════════════════════════════════════════════════════════════
+from datetime import date as _date
+from nse_backtest.data import fetch_multiple, NIFTY50_SYMBOLS
+from nse_backtest.picker_replay import replay_picker
+
+st.markdown("---")
+st.markdown("## 🔁 Picker Replay")
+st.markdown("_Walk history, replay every GO verdict, see what actually happened._")
+
+pr1, pr2, pr3, pr4 = st.columns([2, 2, 2, 1])
+pr_from = pr1.date_input("From", value=_date(2024, 1, 1), key="pr_from")
+pr_to = pr2.date_input("To", value=_date(2024, 12, 31), key="pr_to")
+pr_min_score = pr3.slider("Min score", 50, 90, 65, key="pr_min_score")
+pr_max_hold = pr4.number_input("Max hold (bars)", value=15, min_value=5, max_value=60, key="pr_max_hold")
+
+if st.button("🔁  Run Picker Replay (Nifty 50)", use_container_width=True, key="pr_run"):
+    with st.spinner("Fetching Nifty 50 history…"):
+        symbol_data = fetch_multiple(NIFTY50_SYMBOLS, start="2022-01-01")
+
+    with st.spinner(f"Replaying {pr_from} → {pr_to}…"):
+        report = replay_picker(
+            symbol_data=symbol_data,
+            start=str(pr_from), end=str(pr_to),
+            min_score=pr_min_score, max_hold=int(pr_max_hold),
+        )
+
+    st.session_state["picker_replay_report"] = report
+
+report = st.session_state.get("picker_replay_report")
+if report is not None and report.total_trades > 0:
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Trades", report.total_trades)
+    m2.metric("Win rate", f"{report.win_rate * 100:.1f}%")
+    m3.metric("Avg win", f"{report.avg_win_pct:+.2f}%")
+    m4.metric("Avg loss", f"{report.avg_loss_pct:+.2f}%")
+    m5.metric("Expectancy", f"{report.expectancy_pct:+.2f}%")
+    pf = report.profit_factor
+    st.metric("Profit factor", f"{pf:.2f}" if pf != float("inf") else "∞")
+
+    df_trades = report.to_dataframe()
+    st.dataframe(df_trades, use_container_width=True, hide_index=True)
+
+    csv = df_trades.to_csv(index=False).encode()
+    st.download_button("📥 Download trades CSV", csv,
+                       file_name=f"picker_replay_{pr_from}_to_{pr_to}.csv",
+                       mime="text/csv")
+elif report is not None:
+    st.info("Replay produced zero trades for these filters. Try lowering min score or widening dates.")
