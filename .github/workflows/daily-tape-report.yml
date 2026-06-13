@@ -43,10 +43,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain docs/daily/)" ]; then
-            today=$(date -u +%Y-%m-%d)
+            # Use IST so the commit-message date matches the filename date.
+            today=$(TZ='Asia/Kolkata' date +%Y-%m-%d)
             git add docs/daily/
             git commit -m "chore(daily): tape report ${today}"
             git push
           else
-            echo "No new daily report to commit."
+            echo "No new daily report to commit (already up to date)."
           fi

@@ -62,7 +62,7 @@ def build_report(now_ist: datetime) -> tuple[str, str] | None:
 
     md = f"""# Daily Tape Report — {date_str}
 
-> Generated {now_ist.strftime("%Y-%m-%d %H:%M:%S %Z")} from yfinance ^NSEI.
+> Source: yfinance ^NSEI (Nifty 50 index), generated for IST date {date_str}.
 > This file is committed automatically by the daily GitHub Action.
 
 ## {emoji} Today's regime: **{a.regime}**
