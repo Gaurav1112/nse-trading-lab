@@ -1,0 +1,68 @@
+name: Drawdown Alert
+
+on:
+  schedule:
+    # Daily at 13:00 UTC = 18:30 IST. After daily-tape-report runs.
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check drawdown
+        id: dd
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        continue-on-error: true
+        run: |
+          python scripts/check_drawdown.py
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Open / update drawdown alert issue
+        if: steps.dd.outcome == 'failure' && hashFiles('drawdown_alert_body.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('drawdown_alert_body.md', 'utf8');
+            const today = new Date().toISOString().slice(0, 10);
+
+            // Find a recent open drawdown issue (last 7 days) and append, else open new
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'drawdown-alert', per_page: 5,
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body: `Update for ${today}:\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `[Drawdown Alert] ${today}`,
+                body,
+                labels: ['drawdown-alert'],
+              });
+            }

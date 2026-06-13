@@ -118,15 +118,35 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
         warnings=score.warnings,
     )
     
-    # Position sizing
+    # Position sizing — Kelly when enabled (v2/v3), classic fixed-risk otherwise.
     risk_per_share = setup.entry_price - setup.stop_loss
     if risk_per_share > 0:
-        # Floor at 1 share — a "zero-share trade" is meaningless; the user wants
-        # to know if the setup is actionable, not a pure-math optimum.
-        setup.suggested_qty = max(1, int((capital * risk_pct / 100) / risk_per_share))
+        from .features.kelly_sizing import kelly_size
+        import os
+        use_kelly = os.environ.get("NSE_POSITION_SIZER", "kelly").lower() == "kelly"
+        if use_kelly and setup.signal == "BUY":
+            from .features.vix_sizing import vix_size_multiplier
+            ks = kelly_size(
+                calibrated_win_prob_pct=setup.win_probability,
+                risk_reward=setup.risk_reward,
+                entry_price=setup.entry_price,
+                stop_loss=setup.stop_loss,
+                capital=capital,
+                max_risk_pct=risk_pct,
+            )
+            vix_mult, vix_reason = vix_size_multiplier()
+            if ks.suggested_qty > 0:
+                setup.suggested_qty = max(1, int(ks.suggested_qty * vix_mult)) if vix_mult > 0 else 0
+                setup.reasons = list(setup.reasons) + [ks.rationale, vix_reason]
+            else:
+                setup.suggested_qty = 0
+                setup.reasons = list(setup.reasons) + [ks.rationale, vix_reason]
+        else:
+            # Classic fixed-risk fallback (v1 engine or explicit override).
+            setup.suggested_qty = max(1, int((capital * risk_pct / 100) / risk_per_share))
         setup.position_value = setup.suggested_qty * setup.entry_price
         setup.max_loss = setup.suggested_qty * risk_per_share
-    
+
     return setup
 
 
