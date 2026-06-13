@@ -17,10 +17,11 @@ build/
 *.swo
 
 # Output files
-output/
-output/*.png
-output/*.csv
-output/*.json
+output/*
+!output/snapshots/
+output/snapshots/*
+!output/snapshots/*.md
+!output/snapshots/*.csv
 *.png
 !README_assets/*.png
 
