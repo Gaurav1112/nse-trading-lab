@@ -1,7 +1,7 @@
 import streamlit as st
 from components import theme, state, cards, charts
 from components.security import SYMBOL_RE
-from nse_backtest.data import fetch_nse
+from nse_backtest.data import fetch_nse, fetch_nifty50
 from nse_backtest.scorer import analyze_stock
 from nse_backtest.sample_data import trending_stock
 from nse_backtest.risk import kelly_criterion, position_size_risk_based
@@ -9,6 +9,16 @@ from nse_backtest.risk import kelly_criterion, position_size_risk_based
 st.set_page_config(page_title="Analyze | Trading Lab", page_icon="🔍", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
 state.init_session()
+
+
+# Threaded into analyze_stock so the v2 engine's rs_vs_nifty + regime_gate
+# actually fire. Without this, the scorer silently falls back to v1.
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_nifty():
+    try:
+        return fetch_nifty50(start="2022-01-01")
+    except Exception:
+        return None
 
 
 def _validate(sym: str) -> str:
@@ -108,7 +118,8 @@ if run and sym_input:
         df, is_demo = (trending_stock(), True) if use_demo else _fetch(sym_input)
         if is_demo:
             st.error("⚠️ Could not fetch live data for this symbol. Showing demo data — do NOT trade based on this.")
-        score = analyze_stock(df, sym_input, run_backtests=True)
+        score = analyze_stock(df, sym_input, run_backtests=True,
+                              nifty_df=None if use_demo else _cached_nifty())
 
         # ── Price correction + display dataframe ──
         # yfinance auto_adjust=True adjusts all historical bars backward for
