@@ -133,12 +133,24 @@ else:
             bought_price = bf1.number_input("Buy price ₹", value=float(s.entry_price), min_value=0.01, format="%.2f", key=f"bp_{sym}_{rank}")
             bought_qty = bf2.number_input("Shares bought", value=max(s.suggested_qty, 1), min_value=1, key=f"bq_{sym}_{rank}")
             sl_set = bf3.number_input("Your SL ₹", value=float(s.stop_loss), min_value=0.01, format="%.2f", key=f"bsl_{sym}_{rank}")
-            if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True):
-                state.add_position({"symbol": sym, "buy_price": bought_price, "qty": bought_qty,
-                                     "stop_loss": sl_set, "target": s.target_1,
-                                     "date": datetime.now().strftime("%Y-%m-%d"),
-                                     "invested": bought_price * bought_qty})
-                st.success(f"✅ {sym} saved — {bought_qty} shares @ ₹{bought_price:.2f}")
+            thesis = st.text_area(
+                "📝 Thesis — why are you taking this trade? (min 20 chars)",
+                key=f"th_{sym}_{rank}",
+                placeholder="e.g. score 78, breakout above 200EMA on 2x volume, tape MIXED, willing to risk ₹2k for ₹6k target",
+                height=80,
+            )
+            if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True,
+                         disabled=len(thesis.strip()) < 20):
+                state.add_position({
+                    "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
+                    "stop_loss": sl_set, "target": s.target_1,
+                    "entry_date": datetime.now().strftime("%Y-%m-%d"),
+                    "thesis": thesis.strip(),
+                    "score_at_entry": float(sc),
+                    "tape_at_entry": _tape.regime if _tape else "UNKNOWN",
+                    "invested": bought_price * bought_qty,
+                })
+                st.success(f"✅ {sym} saved to positions. Will appear on Decay Watch next refresh.")
         st.markdown("---")
 
 positions = state.get_positions()
@@ -149,7 +161,7 @@ if positions:
     for i, p in enumerate(positions):
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         c1.markdown(f"**{p['symbol']}** — {p['qty']} shares @ ₹{p['buy_price']:.2f}")
-        c1.caption(f"SL ₹{p['stop_loss']:.2f} | Target ₹{p['target']:.2f} | {p['date']}")
+        c1.caption(f"SL ₹{p['stop_loss']:.2f} | Target ₹{p['target']:.2f} | {p.get('entry_date') or p.get('date', '')}")
         c2.metric("Invested", f"₹{p['invested']:,.0f}")
         c3.metric("Max Loss", f"₹{(p['buy_price'] - p['stop_loss']) * p['qty']:,.0f}")
         with c4:
