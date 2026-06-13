@@ -1,12 +1,9 @@
-"""Market-regime gate: downgrade BUY verdicts when broader tape is hostile.
+"""Market-regime gate — uses tape_monitor's TRENDING/MIXED/HOSTILE classification.
 
-Phase 2B (spec §6): blocks new GO verdicts in non-trending or high-vol Nifty.
-Owner: Rohan Mehta (A.5).
-
-Two checks (either blocks):
-  1. Trend filter: Nifty 50 below its own 20-day EMA — no broader uptrend.
-  2. Vol filter:   Nifty 50 20d realized vol > 1.5× its 60d realized vol
-                   — volatility expansion, hostile to swing.
+Decision matrix:
+  TRENDING tape — no change to GO verdicts
+  MIXED    tape — downgrade GO → WAIT when final_score < 75
+  HOSTILE  tape — downgrade ALL GO → WAIT
 
 Toggle via REGIME_GATE_ENABLED env var (default "1" when engine=v2).
 """
@@ -16,34 +13,29 @@ import os
 
 import pandas as pd
 
+from ..tape_monitor import assess_tape, TapeRegime
+
 
 def _enabled() -> bool:
     return os.getenv("REGIME_GATE_ENABLED", "1") != "0"
 
 
-def regime_block(nifty_df: pd.DataFrame | None) -> tuple[bool, str]:
-    """Return (block_buy, reason).
+def regime_action(nifty_df: pd.DataFrame | None, final_score: float) -> tuple[bool, str]:
+    """Return (downgrade_go, reason).
 
-    block_buy=True means the caller should downgrade any GO verdict to WAIT.
+    downgrade_go=True means caller should downgrade any GO verdict to WAIT.
     """
     if not _enabled():
-        return False, "Regime gate disabled (REGIME_GATE_ENABLED=0)"
-    if nifty_df is None or len(nifty_df) < 61:
-        return False, "Regime gate: insufficient nifty data"
+        return False, "Regime gate disabled"
+    if nifty_df is None:
+        return False, "Regime gate: no nifty data"
 
-    nifty_close = nifty_df["Close"]
-    last = nifty_close.iloc[-1]
+    assessment = assess_tape(nifty_df)
+    if assessment is None:
+        return False, "Regime gate: insufficient nifty history"
 
-    ema20 = nifty_close.ewm(span=20, adjust=False).mean().iloc[-1]
-    if last < ema20:
-        return True, f"Regime block: Nifty {last:.0f} below 20-EMA {ema20:.0f} — non-trending tape"
-
-    returns = nifty_close.pct_change().dropna()
-    if len(returns) >= 60:
-        vol_20 = returns.iloc[-20:].std()
-        vol_60 = returns.iloc[-60:].std()
-        if vol_60 > 0 and vol_20 > 1.5 * vol_60:
-            return True, (f"Regime block: Nifty 20d vol {vol_20*100:.2f}% "
-                          f">1.5× 60d vol {vol_60*100:.2f}% — hostile to swing")
-
-    return False, "Tape supportive (Nifty above 20-EMA, vol stable)"
+    if assessment.regime == TapeRegime.HOSTILE:
+        return True, f"Regime block (HOSTILE): {assessment.recommendation[:80]}…"
+    if assessment.regime == TapeRegime.MIXED and final_score < 75:
+        return True, f"Regime block (MIXED, score {final_score:.0f}<75): be selective"
+    return False, f"Tape regime: {assessment.regime} — no downgrade"
