@@ -235,8 +235,12 @@ def replay_picker(
                 df_until = df.loc[:d]
                 if len(df_until) < 60:
                     continue
+                # Truncate nifty_df to the same point-in-time as df_until — otherwise
+                # regime_gate / rs_vs_nifty evaluate against future nifty data and the
+                # walk-forward becomes look-ahead biased.
+                nifty_until = nifty_df.loc[:d] if nifty_df is not None else None
                 try:
-                    setup = analyze_swing(df_until, sym, capital, risk_pct, nifty_df=nifty_df)
+                    setup = analyze_swing(df_until, sym, capital, risk_pct, nifty_df=nifty_until)
                 except Exception:
                     continue
                 if setup.signal != "BUY" or setup.score < min_score:
