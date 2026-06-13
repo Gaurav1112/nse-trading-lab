@@ -56,11 +56,23 @@ The v2 regime gate is what keeps the engine non-negative in HOSTILE tape. Withou
 - Phase A–H — position persistence, required thesis (≥20 chars), risk_governor + audit log, data_freshness badges, HOSTILE empty-state UX, user-data dir
 - Phase F — execution realism (gap-through fills, spread, circuit-lock)
 - Phase G — deflated Sharpe + bootstrap CIs + Bonferroni
-- Phase 3 v0 — isotonic calibrator (engine v3, opt-in via `NSE_SCORER_ENGINE=v3`)
+- Phase 3 v0/v1 — isotonic calibrator with walk-forward CV (engine v3, opt-in via `NSE_SCORER_ENGINE=v3`). v1 added: ceiling cap that prevents the "100% win probability" overconfidence bug, plus held-out Brier surfaced in Tape Monitor.
+
+## Honest finding from Phase 3 v1 (read this)
+
+The walk-forward calibrator does NOT beat a constant-base-rate predictor on held-out years. Held-out Brier:
+
+| Fold | Isotonic | Constant baseline | Verdict |
+|---|---|---|---|
+| Train 2023 → eval 2024 | 0.371 | 0.248 | Worse than baseline (regime shift) |
+| Train 2023+2024 → eval 2025 | 0.257 | 0.248 | Tie with baseline |
+| Train all → eval 2026 partial | 0.275 | 0.231 | Worse than baseline |
+
+Translation: **the calibrator (v3) doesn't add useful information beyond saying "the historical win rate is ~50%."** This is why v2 (with the regime gate) remains the default. The regime gate is the actual edge; calibration is honest decoration on top of it.
 
 ## Deferred (not bugs — strategic choices)
 
-- Phase 3 v1: Full LightGBM with proper walk-forward CV + held-out Brier score (v0 calibrator was fit in-sample-ish; clean eval needs a held-out year)
+- Phase 3 v2: Regime-conditional calibration (calibrator gets regime as feature). Requires picker_replay CSVs to record regime-at-entry, then retrain. The realistic next ML improvement.
 - Phase 4: Kite Connect adapter for real intraday data
 - Phase 5: Real options-chain data
 
