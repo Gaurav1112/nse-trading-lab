@@ -103,7 +103,7 @@ try:
     else:
         st.caption(
             "Calibrator not yet trained. Run "
-            "`PYTHONPATH=. python3.13 scripts/train_calibration.py`."
+            "`PYTHONPATH=. python3 scripts/train_calibration.py`."
         )
 except Exception as e:
     st.caption(f"Calibrator status: error ({e})")

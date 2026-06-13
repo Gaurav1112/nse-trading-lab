@@ -98,7 +98,7 @@ else:
     grid_response = AgGrid(df_results, gridOptions=grid_opts,
                             update_mode=GridUpdateMode.SELECTION_CHANGED,
                             columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
-                            theme="alpine-dark",
+                            theme="alpine",
                             height=min(400, 80 + len(df_results) * 40),
                             allow_unsafe_jscode=True)
     selected = grid_response.get("selected_rows", [])

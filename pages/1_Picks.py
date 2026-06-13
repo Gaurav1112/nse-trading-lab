@@ -231,7 +231,8 @@ else:
 positions = state.get_positions()
 if positions:
     st.markdown("## 💼 My Open Positions")
-    total_invested = sum(p["invested"] for p in positions)
+    total_invested = sum(p.get("invested", p.get("buy_price", 0) * p.get("qty", 0)) for p in positions)
+    # Keep schema robust: older positions saved before the "invested" field was added still tally correctly.
     st.caption(f"Total deployed: ₹{total_invested:,.0f}")
     for i, p in enumerate(positions):
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])

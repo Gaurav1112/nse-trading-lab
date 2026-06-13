@@ -89,7 +89,7 @@ If something feels wrong: close Streamlit. Your positions persist on disk in `~/
 ## Recompute walk-forward expectancy quarterly
 
 ```bash
-PYTHONPATH=. python3.13 scripts/walk_forward_ab.py
+PYTHONPATH=. python3 scripts/walk_forward_ab.py
 cat output/walk_forward/v2_regime_gate_verdict.md
 ```
 

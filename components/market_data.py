@@ -57,32 +57,54 @@ def get_sector_performance() -> dict[str, float | None]:
     return result
 
 
+def _batch_download(symbols: tuple[str, ...], period: str):
+    """One yf.download call with all tickers instead of N sequential history() calls.
+    Critical on Streamlit Cloud where shared egress IPs hit yfinance rate limits
+    fast — 200 sequential requests reliably trigger 429s and blank UI tiles.
+    """
+    tickers = " ".join(f"{s}.NS" for s in symbols)
+    try:
+        return yf.download(
+            tickers=tickers, period=period, interval="1d",
+            group_by="ticker", auto_adjust=True, progress=False, threads=False,
+        )
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_breadth(symbols: tuple[str, ...]) -> dict[str, int | float]:
+    data = _batch_download(symbols, period="3mo")
     above = total = 0
-    for sym in symbols:
-        try:
-            df = yf.Ticker(f"{sym}.NS").history(period="3mo")
-            if len(df) >= 20:
-                ema20 = df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
-                if df["Close"].iloc[-1] > ema20:
-                    above += 1
-                total += 1
-        except Exception:
-            pass
-    return {"above": above, "total": total, "pct": round(above / total * 100, 1) if total else 0.0}
+    if data is not None and len(data) > 0:
+        for sym in symbols:
+            try:
+                df = data[f"{sym}.NS"].dropna() if len(symbols) > 1 else data.dropna()
+                if len(df) >= 20:
+                    ema20 = df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                    if df["Close"].iloc[-1] > ema20:
+                        above += 1
+                    total += 1
+            except (KeyError, IndexError, ValueError):
+                pass
+    return {"above": above, "total": total,
+            "pct": round(above / total * 100, 1) if total else 0.0}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_top_movers(symbols: tuple[str, ...], n: int = 5) -> dict[str, list[dict]]:
+    data = _batch_download(symbols, period="5d")
     movers = []
-    for sym in symbols:
-        try:
-            hist = yf.Ticker(f"{sym}.NS").history(period="2d")
-            if len(hist) >= 2:
-                last, prev = float(hist["Close"].iloc[-1]), float(hist["Close"].iloc[-2])
-                movers.append({"symbol": sym, "price": last, "change_pct": (last - prev) / prev * 100})
-        except Exception:
-            pass
+    if data is not None and len(data) > 0:
+        for sym in symbols:
+            try:
+                df = data[f"{sym}.NS"].dropna() if len(symbols) > 1 else data.dropna()
+                if len(df) >= 2:
+                    last = float(df["Close"].iloc[-1])
+                    prev = float(df["Close"].iloc[-2])
+                    movers.append({"symbol": sym, "price": last,
+                                   "change_pct": (last - prev) / prev * 100})
+            except (KeyError, IndexError, ValueError):
+                pass
     movers.sort(key=lambda x: x["change_pct"], reverse=True)
     return {"gainers": movers[:n], "losers": movers[-n:][::-1]}
