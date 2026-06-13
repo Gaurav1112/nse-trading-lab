@@ -591,8 +591,8 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
     if run_backtests:
         result.backtest_score, bt_r = score_backtest(df)
     else:
-        result.backtest_score = 50
-        bt_r = ["Backtest skipped"]
+        result.backtest_score = 0
+        bt_r = ["Backtest dimension skipped (Phase 1: runtime weight removed)"]
 
     # Phase 2: Advanced indicators (adjust core scores ±5-10 pts)
     from ._logging import get_logger
@@ -667,20 +667,34 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True) -> 
         _log.warning("market regime detection failed for %s: %s", symbol, e)
         result.regime = "UNKNOWN"
 
-    # Phase 4: Weighted final score
-    weights = {
-        "trend": 0.25, "momentum": 0.20, "volume": 0.15,
-        "volatility": 0.10, "backtest": 0.15, "risk": 0.15,
-    }
-    assert abs(sum(weights.values()) - 1.0) < 1e-9, f"scorer weights must sum to 1.0, got {sum(weights.values())}"
-    result.final_score = (
-        result.trend_score * weights["trend"]
-        + result.momentum_score * weights["momentum"]
-        + result.volume_score * weights["volume"]
-        + result.volatility_score * weights["volatility"]
-        + result.backtest_score * weights["backtest"]
-        + result.risk_score * weights["risk"]
-    )
+    # Phase 1: Backtest dimension dropped from runtime scoring.
+    # When run_backtests=True (e.g., Analyze page, batch CLI), backtest_score
+    # is still computed and surfaced in the breakdown UI, but it does not
+    # contribute to final_score. Phase 2 re-introduces it as a nightly cache.
+    if run_backtests and result.backtest_score > 0:
+        weights = {
+            "trend": 0.25, "momentum": 0.20, "volume": 0.15,
+            "volatility": 0.10, "backtest": 0.15, "risk": 0.15,
+        }
+        result.final_score = (
+            result.trend_score * weights["trend"]
+            + result.momentum_score * weights["momentum"]
+            + result.volume_score * weights["volume"]
+            + result.volatility_score * weights["volatility"]
+            + result.backtest_score * weights["backtest"]
+            + result.risk_score * weights["risk"]
+        )
+    else:
+        # Phase 1 runtime weights — renormalized after dropping backtest dim.
+        weights = {"trend": 0.30, "momentum": 0.23, "volume": 0.18, "volatility": 0.12, "risk": 0.17}
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+        result.final_score = (
+            result.trend_score * weights["trend"]
+            + result.momentum_score * weights["momentum"]
+            + result.volume_score * weights["volume"]
+            + result.volatility_score * weights["volatility"]
+            + result.risk_score * weights["risk"]
+        )
 
     if result.final_score >= 65:
         result.verdict = "GO"
