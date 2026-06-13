@@ -20,6 +20,10 @@ class ExitReason:
     TIME_STOP: Final[str] = "TIME_STOP"
     SCORE_DECAY: Final[str] = "SCORE_DECAY"
     END_OF_REPLAY: Final[str] = "END_OF_REPLAY"
+    # Phase F (Daniel Foss): honest-execution exit reasons.
+    STOP_LOSS_GAP: Final[str] = "STOP_LOSS_GAP"
+    TARGET_2_GAP: Final[str] = "TARGET_2_GAP"
+    CIRCUIT_LOCK: Final[str] = "CIRCUIT_LOCK"
 
 
 def update_trail_stop(
