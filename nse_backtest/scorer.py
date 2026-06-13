@@ -744,7 +744,7 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
 
     # --- Phase 2 features (additive boosters + defensive gate, behind NSE_SCORER_ENGINE=v2) ---
     # Runs AFTER verdict assignment so regime_gate can downgrade GO → WAIT.
-    if os.getenv("NSE_SCORER_ENGINE", "v1") == "v2":
+    if os.getenv("NSE_SCORER_ENGINE", "v2") == "v2":
         from .features.relative_strength import rs_vs_nifty_boost
         if nifty_df is not None:
             rs_boost, rs_reason = rs_vs_nifty_boost(df, nifty_df)

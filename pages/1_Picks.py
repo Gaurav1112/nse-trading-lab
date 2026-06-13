@@ -19,11 +19,18 @@ from nse_backtest.tape_monitor import assess_tape, TapeRegime
 from nse_backtest.data import fetch_nifty50
 
 @st.cache_data(ttl=3600)  # refresh hourly
+def _cached_nifty():
+    try:
+        return fetch_nifty50(start="2022-01-01")
+    except Exception:
+        return None
+
+@st.cache_data(ttl=3600)
 def _cached_tape():
     try:
-        nifty_df = fetch_nifty50(start="2022-01-01")
-        return assess_tape(nifty_df)
-    except Exception as e:
+        nifty_df = _cached_nifty()
+        return assess_tape(nifty_df) if nifty_df is not None else None
+    except Exception:
         return None
 
 _tape = _cached_tape()
@@ -62,6 +69,8 @@ if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_wid
 
             picks = []
             cap, risk = state.get_capital(), state.get_risk_pct()
+            # v2 engine: thread Nifty data so regime_gate + rs_vs_nifty can fire.
+            nifty_for_engine = _cached_nifty() if "Demo" not in scan_univ else None
             for sym, sdf in raw.items():
                 if len(sdf) < 60:
                     continue
@@ -69,7 +78,7 @@ if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_wid
                 if pd.notna(avg_vol) and avg_vol < 100_000:
                     continue
                 try:
-                    setup = analyze_swing(sdf, sym, cap, risk)
+                    setup = analyze_swing(sdf, sym, cap, risk, nifty_df=nifty_for_engine)
                     if setup and setup.signal == "BUY" and setup.score >= min_score:
                         picks.append((setup.score, sym, setup))
                 except Exception:

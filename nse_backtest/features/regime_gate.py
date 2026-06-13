@@ -20,6 +20,18 @@ def _enabled() -> bool:
     return os.getenv("REGIME_GATE_ENABLED", "1") != "0"
 
 
+def _mixed_threshold() -> float:
+    """Min score required for GO to survive in MIXED tape.
+
+    Default 70 (tuned vs 75 on walk-forward 2023/2024/2025 — see verdict.md).
+    Override via REGIME_GATE_MIXED_MIN env var to re-sweep.
+    """
+    try:
+        return float(os.getenv("REGIME_GATE_MIXED_MIN", "70"))
+    except ValueError:
+        return 70.0
+
+
 def regime_action(nifty_df: pd.DataFrame | None, final_score: float) -> tuple[bool, str]:
     """Return (downgrade_go, reason).
 
@@ -36,6 +48,7 @@ def regime_action(nifty_df: pd.DataFrame | None, final_score: float) -> tuple[bo
 
     if assessment.regime == TapeRegime.HOSTILE:
         return True, f"Regime block (HOSTILE): {assessment.recommendation[:80]}…"
-    if assessment.regime == TapeRegime.MIXED and final_score < 75:
-        return True, f"Regime block (MIXED, score {final_score:.0f}<75): be selective"
+    thr = _mixed_threshold()
+    if assessment.regime == TapeRegime.MIXED and final_score < thr:
+        return True, f"Regime block (MIXED, score {final_score:.0f}<{thr:.0f}): be selective"
     return False, f"Tape regime: {assessment.regime} — no downgrade"
