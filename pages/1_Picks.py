@@ -51,6 +51,26 @@ else:
     st.caption("⚠️ Tape regime unavailable (Nifty data fetch failed)")
 # ── end banner ─────────────────────────────────────────────────
 
+# ── Risk envelope banner (Kavya's portfolio guard) ─────────────
+from components.risk_governor import assess as _risk_assess
+_risk = _risk_assess(state.get_positions(), state.get_journal(), state.get_capital())
+if not _risk.can_trade:
+    st.markdown(
+        f'<div style="border:1px solid #FF4D4D;border-radius:14px;padding:14px 18px;'
+        f'margin:8px 0;background:#190d0d">'
+        f'<span style="font-size:11px;color:#5A7390;text-transform:uppercase;letter-spacing:1px">Risk Governor</span><br>'
+        f'<span style="font-size:18px;font-weight:700;color:#FF4D4D">⛔ TRADING DISABLED</span>'
+        f'<div style="margin-top:6px;color:#FFD0D0;font-size:13px;line-height:1.4">'
+        + " · ".join(_risk.reasons) + '</div></div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.caption(
+        f"🛡️ Risk envelope: {_risk.open_positions}/{_risk.max_open_positions} positions · "
+        f"weekly P&L {_risk.weekly_pnl_pct:+.1f}% (threshold {_risk.weekly_dd_threshold_pct:.1f}%)"
+    )
+# ── end risk envelope ─────────────────────────────────────────
+
 pc1, pc2, pc3 = st.columns([2, 2, 1])
 scan_univ = pc1.selectbox("Universe", ["Nifty 100 (Live)", "Nifty 50 (Live)", "Demo (Instant)"], key="picks_univ")
 min_score = pc2.slider("Min Score", 40, 90, 65, key="picks_min_score")
@@ -79,6 +99,14 @@ if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_wid
                     continue
                 try:
                     setup = analyze_swing(sdf, sym, cap, risk, nifty_df=nifty_for_engine)
+                    if setup:
+                        from components.risk_governor import log_verdict
+                        log_verdict(
+                            symbol=sym, verdict=setup.signal,
+                            score=setup.score, win_probability=setup.win_probability,
+                            tape_regime=_tape.regime if _tape else "UNKNOWN",
+                            engine="v2",
+                        )
                     if setup and setup.signal == "BUY" and setup.score >= min_score:
                         picks.append((setup.score, sym, setup))
                 except Exception:
@@ -139,8 +167,10 @@ else:
                 placeholder="e.g. score 78, breakout above 200EMA on 2x volume, tape MIXED, willing to risk ₹2k for ₹6k target",
                 height=80,
             )
+            if not _risk.can_trade:
+                st.caption(f"⛔ Save disabled by risk governor: {' · '.join(_risk.reasons)}")
             if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True,
-                         disabled=len(thesis.strip()) < 20):
+                         disabled=(not _risk.can_trade) or len(thesis.strip()) < 20):
                 state.add_position({
                     "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
                     "stop_loss": sl_set, "target": s.target_1,
