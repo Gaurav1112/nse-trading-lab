@@ -36,12 +36,15 @@ def _cached_tape():
 
 _tape = _cached_tape()
 if _tape is not None:
+    # Color-blindness: prefix each regime with a glyph and use a thick (3px)
+    # border so deuteranopia/protanopia users can still distinguish at a glance.
+    _glyph = {"HOSTILE": "■", "MIXED": "▲", "TRENDING": "●"}.get(_tape.regime, "◆")
     st.markdown(
-        f'<div style="border:1px solid {_tape.color};border-radius:14px;padding:14px 18px;'
+        f'<div style="border:3px solid {_tape.color};border-radius:14px;padding:14px 18px;'
         f'margin:8px 0 16px 0;background:#0D1526">'
         f'<span style="font-size:11px;color:#5A7390;text-transform:uppercase;letter-spacing:1px">'
         f'Tape Regime · Nifty 50 ₹{_tape.nifty_close:,.0f}</span><br>'
-        f'<span style="font-size:24px;font-weight:700;color:{_tape.color}">{_tape.regime}</span>'
+        f'<span style="font-size:24px;font-weight:700;color:{_tape.color}">{_glyph} {_tape.regime}</span>'
         f'<span style="font-size:13px;color:#7A93AA;margin-left:12px">'
         f'60d {_tape.return_60d_pct:+.1f}% · 200EMA slope {_tape.ema_200_slope_pct_20d:+.2f}%/20d'
         f'</span>'
@@ -84,6 +87,23 @@ if _freshness.status == "STALE":
 from components.risk_governor import assess as _risk_assess
 _risk = _risk_assess(state.get_positions(), state.get_journal(), state.get_capital(),
                      regime=_tape.regime if _tape else None)
+
+# Composer-style cooling-off after 2 consecutive losses.
+from components.discipline import assess as _disc_assess
+_disc = _disc_assess(state.get_journal(), state.get_positions())
+if _disc.cooling_off_recommended:
+    st.markdown(
+        '<div style="border:3px solid #FF6E00;border-radius:14px;padding:14px 18px;'
+        'margin:8px 0;background:#1f1208">'
+        '<span style="font-size:11px;color:#FFB070;text-transform:uppercase;letter-spacing:1px">'
+        'Cooling-off recommended</span><br>'
+        f'<span style="font-size:18px;font-weight:700;color:#FF9050">'
+        f'⏸ {_disc.consecutive_losses} consecutive losing trades. '
+        f'Composer-style discipline: skip the next setup OR paper-trade it. '
+        f'Hot streaks reverse; loss streaks also reverse, but only if you pause '
+        f'and re-examine your process first.</span></div>',
+        unsafe_allow_html=True,
+    )
 # Portfolio kill switch — surfaced as a dedicated banner above everything else
 # so the user sees "FLATTEN ALL" before considering new entries.
 if _risk.flatten_all:

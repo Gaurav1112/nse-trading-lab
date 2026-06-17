@@ -54,6 +54,43 @@ if st.button("⚡  Analyze All Modes", type="primary", use_container_width=True)
         results = analyze_all_modes(tm_df, tm_sym, state.get_capital(),
                                     nifty_df=None if tm_demo else _cached_nifty())
 
+    # ── Live-price correction (NSE direct, fallback to yfinance) ──────────
+    # yfinance is an EOD feed: during market hours the last bar is yesterday's
+    # close. Picks page already does this correction; Trading Modes needs the
+    # same so the displayed entry_price reflects today's actual market price.
+    if not tm_demo:
+        from components.market_data import get_live_price
+        _df_close = float(tm_df["Close"].iloc[-1])
+        _live, _prev_close = get_live_price(tm_sym)
+        _ratio = (_live / _df_close) if (_live and _df_close > 0 and abs(_live / _df_close - 1.0) > 0.02) else 1.0
+        if _live is not None:
+            st.markdown(
+                f'<div style="border:1px solid #00B0FF;border-radius:10px;padding:10px 14px;'
+                f'margin:6px 0 14px;background:#0D1526;font-size:13px;color:#C9D5E0">'
+                f'⚡ <b>Live NSE price ₹{_live:,.2f}</b> vs cached yfinance close ₹{_df_close:,.2f} '
+                f'(ratio {_ratio:.3f}). Levels below scaled to the live price.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption(
+                f"📊 yfinance last close ₹{_df_close:,.2f} (NSE live price unavailable — "
+                "trade levels are from yesterday's close)."
+            )
+        # Scale every setup's prices to match the live ratio so display + Zerodha
+        # cards reflect today's actual market.
+        if _ratio != 1.0:
+            for key in ("swing", "positional", "longterm", "intraday"):
+                setup = results.get(key)
+                if setup is None:
+                    continue
+                setup.entry_price = round(_live, 2)
+                setup.stop_loss = round(setup.stop_loss * _ratio, 2)
+                setup.target_1 = round(setup.target_1 * _ratio, 2)
+                setup.target_2 = round(setup.target_2 * _ratio, 2)
+                if setup.suggested_qty > 0:
+                    setup.position_value = setup.suggested_qty * setup.entry_price
+                    setup.max_loss = (setup.entry_price - setup.stop_loss) * setup.suggested_qty
+
     # ── Overview Strip ──
     st.markdown("### At a Glance")
     oc = st.columns(5)

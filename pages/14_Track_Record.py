@@ -44,6 +44,67 @@ if snap.notes:
     for n in snap.notes:
         st.warning(n)
 
+# ── Tear sheet (QuantConnect / PyFolio style) ──
+from components.tear_sheet import build as build_tearsheet
+ts = build_tearsheet(state.get_journal(), state.get_capital())
+if ts.n_closed > 0:
+    st.divider()
+    st.markdown("## 📑 Tear sheet")
+    st.caption("QuantConnect / PyFolio analog. Honest performance dashboard from your closed-trade journal.")
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Total return", f"{ts.total_return_pct:+.2f}%")
+    t2.metric("Max drawdown", f"-{ts.max_drawdown_pct:.2f}pp")
+    t3.metric("Sharpe (90d roll)", f"{ts.rolling_sharpe_90d:+.2f}")
+    t4.metric("Lifetime Sharpe", f"{ts.sharpe_lifetime:+.2f}")
+
+    # Monthly returns heatmap (text-based, color-blind safe)
+    st.markdown("### Monthly returns (%)")
+    if ts.monthly_returns:
+        df_m = pd.DataFrame(
+            [(k, v) for k, v in sorted(ts.monthly_returns.items())],
+            columns=["Month", "Net %"],
+        )
+
+        def _hl(val):
+            if val > 1: return "background-color:#0a4d28;color:#7FFFA0"
+            if val > 0: return "background-color:#16361f;color:#A0FFC8"
+            if val > -1: return "background-color:#3a1f1f;color:#FFB0B0"
+            return "background-color:#4d0a0a;color:#FF5050"
+        st.dataframe(
+            df_m.style.applymap(_hl, subset=["Net %"]).format({"Net %": "{:+.2f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    # Equity curve (PnL %, trade by trade)
+    if ts.equity_curve:
+        st.markdown("### Equity curve (trade index → cumulative %)")
+        df_eq = pd.DataFrame(ts.equity_curve, columns=["date", "cumulative_%"])
+        st.line_chart(df_eq.set_index("date"))
+
+    if ts.notes:
+        st.markdown("### Tear-sheet notes")
+        for n in ts.notes:
+            st.warning(n)
+
+# ── Discipline scorecard ──
+from components.discipline import assess as _disc_assess
+_disc = _disc_assess(state.get_journal(), state.get_positions())
+st.divider()
+st.markdown("## 🛡️ Process Adherence Index")
+st.caption("How well you followed the engine's rules — independent of whether the engine itself made money. Process > outcomes.")
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("PAI", f"{_disc.process_adherence_index:.0f}/100")
+d2.metric("Rule-following streak", f"{_disc.rule_following_streak_days} d")
+d3.metric("Override count", _disc.override_count_total)
+if _disc.override_count_total > 0:
+    gap = _disc.aligned_avg_return_pct - _disc.override_avg_return_pct
+    d4.metric("Override vs aligned", f"{gap:+.2f}pp",
+              help="Positive = aligned trades beat overrides; you should override less.")
+else:
+    d4.metric("Override vs aligned", "—")
+for n in _disc.notes:
+    st.info(n)
+
 st.divider()
 st.caption(
     "Reference: walk-forward A/B v2 expectancy was +0.34% in HOSTILE 2025, "

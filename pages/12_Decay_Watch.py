@@ -93,6 +93,19 @@ for v, pos in verdicts:
 
     st.caption(f"💡 {v.reason}")
 
+    # Sunk-cost defense — Behavioral audit #7. Reframe the position as a
+    # fresh decision so the user doesn't fall into "one more day" thinking.
+    if v.current_rescore < 55:
+        st.markdown(
+            f'<div style="background:#1a1010;border-left:4px solid #FF9050;'
+            f'padding:10px 14px;border-radius:8px;font-size:13px;color:#FFD0B0;margin:6px 0">'
+            f'🪞 <b>Sunk-cost check:</b> If you didn\'t already own {v.symbol}, '
+            f'would today\'s score of {v.current_rescore:.0f}/100 be a fresh Pick? '
+            f'If no, the EXIT card above is your honest answer.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
     # B2/B3/B4 — concrete next-action card per verdict.
     if v.action == ReScoreAction.EXIT:
         st.markdown(

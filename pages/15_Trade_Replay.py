@@ -90,6 +90,18 @@ if hits + misses > 0:
         "deserves investigation."
     )
 
+    # Post-mortem auto-narrative per trade (Tickeron-style)
+    from components.discipline import post_mortem
+    st.markdown("### 🔍 Per-trade post-mortem")
+    st.caption("Auto-generated narrative for the most recent closed trades.")
+    for t in reversed(journal[-5:]):  # last 5 closed
+        sym_ = t.get("symbol", "?")
+        ret_ = (t.get("net_return_pct") if isinstance(t.get("net_return_pct"), (int, float))
+                else 0.0)
+        with st.expander(f"{sym_} — {ret_:+.2f}%"):
+            for bullet in post_mortem(t):
+                st.markdown(f"- {bullet}")
+
     # R6 — discipline scorecard: how often did the user override the engine?
     overrides = [r for r in rows if r.get("Overrode engine", "") == "🛑 YES"]
     if overrides:

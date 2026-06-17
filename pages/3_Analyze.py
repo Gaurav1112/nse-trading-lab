@@ -44,14 +44,12 @@ def _fetch(sym: str) -> tuple:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_live_price(sym: str) -> float | None:
-    """Fetch actual live market price via fast_info — not affected by download adjustment bugs."""
-    try:
-        import yfinance as yf
-        fi = yf.Ticker(f"{sym}.NS").fast_info
-        p = getattr(fi, "last_price", None) or getattr(fi, "previous_close", None)
-        return float(p) if p and float(p) > 0 else None
-    except Exception:
-        return None
+    """Live market price via NSE-direct quote-equity (primary) with yfinance
+    fast_info fallback. Replaces the old yfinance-only path which was stale
+    or split-bleed-affected on Indian bonus-issue symbols."""
+    from components.market_data import get_live_price
+    last, _prev = get_live_price(sym)
+    return last
 
 
 @st.cache_data(ttl=86400, show_spinner=False)

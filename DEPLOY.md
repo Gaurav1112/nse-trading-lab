@@ -1,5 +1,26 @@
 # Deploying to Streamlit Community Cloud
 
+## 🛑 CRITICAL — read this before public deploy
+
+A public Streamlit URL serving BUY/SELL verdicts to any visitor is plausibly
+**unregistered investment advice under SEBI Research Analysts Regulations
+2014 §3**. The in-app disclaimer is necessary but not sufficient when
+others can access your URL.
+
+**Before anyone besides you visits your URL, do this (5 minutes, no code):**
+
+1. Visit https://share.streamlit.io and open your app.
+2. **Settings → Sharing**.
+3. **"Who can view this app"** → **"Only specific people"**.
+4. Add your email (e.g., `gaurav.kumar@loglass.co.jp`) and any backups you trust.
+5. Save. The URL now requires Google sign-in + email match.
+
+Without this gate, every "BUY ICICIBANK" verdict served to a stranger is
+plausibly an unregistered tip. This is the single most important deployment
+step.
+
+---
+
 One-time setup. Five minutes. Every push to `main` after this auto-redeploys.
 
 ## Prerequisites (one-time, per account)

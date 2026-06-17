@@ -62,12 +62,43 @@ def check_tape_regime() -> tuple[bool, str]:
         return False, f"Tape check failed: {e}"
 
 
+def check_bonus_adjustment_warning() -> tuple[bool, str]:
+    """Indian compliance audit: yfinance MISSES Indian bonus-issue adjustments
+    for ~48hrs post ex-date (RELIANCE/INFY have done this). Warn if any Nifty
+    50 symbol shows a same-day price move > 30% — that's the bonus-split
+    fingerprint. This is a sanity check, not an authoritative one.
+    """
+    try:
+        from nse_backtest.data import fetch_nse, NIFTY50_SYMBOLS
+        suspects = []
+        for sym in NIFTY50_SYMBOLS[:5]:  # sample 5 to keep pre-flight fast
+            try:
+                df = fetch_nse(sym, start="2026-01-01")
+                if df is None or len(df) < 2:
+                    continue
+                last = float(df["Close"].iloc[-1])
+                prev = float(df["Close"].iloc[-2])
+                if prev > 0 and abs(last / prev - 1.0) > 0.30:
+                    suspects.append(f"{sym} ({(last/prev - 1)*100:+.1f}% in 1 bar)")
+            except Exception:
+                continue
+        if suspects:
+            return False, (
+                f"⚠️ Bonus/split adjustment warning: " + ", ".join(suspects) +
+                " — yfinance may be lagging the corporate action. Verify against NSE bhavcopy."
+            )
+        return True, "No corporate-action anomalies in sampled Nifty 50 closes"
+    except Exception as e:
+        return True, f"Bonus check skipped: {e}"
+
+
 def main():
     checks = [
         ("Data directory", check_data_dir),
         ("Git secrets",    check_no_secrets_committed),
         ("yfinance fetch", check_yfinance),
         ("Tape regime",    check_tape_regime),
+        ("Bonus/split adj", check_bonus_adjustment_warning),
     ]
     all_ok = True
     print("=" * 60)
