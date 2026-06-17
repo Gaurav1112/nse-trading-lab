@@ -233,7 +233,9 @@ else:
         with st.expander("📋 Why this stock?"):
             for r in s.reasons[:8]:
                 st.caption(f"• {r}")
-        st.markdown(cards.zerodha_steps(sym, s.entry_price, s.stop_loss, s.suggested_qty), unsafe_allow_html=True)
+        st.markdown(cards.zerodha_steps(sym, s.entry_price, s.stop_loss, s.suggested_qty,
+                                        target_1=s.target_1, target_2=s.target_2),
+                    unsafe_allow_html=True)
         with st.expander(f"✅ I bought {sym} — record position"):
             bf1, bf2, bf3 = st.columns(3)
             bought_price = bf1.number_input("Buy price ₹", value=float(s.entry_price), min_value=0.01, format="%.2f", key=f"bp_{sym}_{rank}")
@@ -325,6 +327,10 @@ else:
                 state.add_position({
                     "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
                     "stop_loss": sl_set, "target": s.target_1,
+                    # B4: persist T1/T2 explicitly so Decay Watch can detect
+                    # T1-crossings and surface concrete sell triggers.
+                    "target_1": float(s.target_1),
+                    "target_2": float(s.target_2),
                     "entry_date": datetime.now().strftime("%Y-%m-%d"),
                     "thesis": thesis.strip(),
                     "score_at_entry": float(sc),

@@ -63,12 +63,92 @@ def warning_card(text: str) -> str:
     )
 
 
-def zerodha_steps(sym: str, entry: float, sl: float, shares: int) -> str:
-    return (
+def zerodha_steps(sym: str, entry: float, sl: float, shares: int,
+                  target_1: float = 0, target_2: float = 0) -> str:
+    """Complete BUY workflow: limit-buy, SL-M, T1 partial GTT (50%), T2 GTT.
+
+    Renders the four GTT/order placements as numbered steps so the user can
+    set everything in Kite in 60 seconds. If target_1/target_2 not provided,
+    falls back to the original 4-step (no GTT) version for backward compat.
+    """
+    half = max(1, shares // 2)
+    rest = max(1, shares - half)
+    base = (
         f'<div class="steps"><b>📱 Execute on Zerodha Kite</b>'
-        f'<ol><li>Open Kite → Search <b>{sym}</b></li>'
-        f'<li>Tap <b>B</b> → Product: <b>CNC</b> → Type: <b>LIMIT</b></li>'
-        f'<li>Price: <b>₹{entry:,.0f}</b> | Qty: <b>{shares}</b></li>'
-        f'<li>After fill → Place <b>SL-M</b> sell at <b>₹{sl:,.0f}</b></li></ol>'
-        f'<span style="color:#FFB800;font-size:13px">⚡ Always set SL-M immediately after buying</span></div>'
+        f'<ol>'
+        f'<li>Open Kite → Search <b>{sym}</b></li>'
+        f'<li>Tap <b>B</b> → Product: <b>CNC</b> → Type: <b>LIMIT</b> → '
+        f'Price <b>₹{entry:,.2f}</b> · Qty <b>{shares}</b></li>'
+        f'<li>After fill → Place <b>SL-M</b> sell at <b>₹{sl:,.2f}</b> · Qty <b>{shares}</b></li>'
+    )
+    if target_1 > 0:
+        base += (
+            f'<li>Place <b>GTT (Single)</b> sell <b>LIMIT ₹{target_1:,.2f}</b> · '
+            f'Qty <b>{half}</b> (book 50% at T1)</li>'
+        )
+    if target_2 > 0:
+        base += (
+            f'<li>Place <b>GTT (Single)</b> sell <b>LIMIT ₹{target_2:,.2f}</b> · '
+            f'Qty <b>{rest}</b> (book remaining at T2)</li>'
+        )
+    base += (
+        '</ol>'
+        '<span style="color:#FFB800;font-size:13px">'
+        '⚡ Set SL-M immediately after buy. When T1 GTT triggers, '
+        'manually move the SL-M trigger up to entry (breakeven trail).</span>'
+        '</div>'
+    )
+    return base
+
+
+def zerodha_sell_steps(sym: str, current_price: float, shares_held: int,
+                       reason: str = "") -> str:
+    """SELL-NOW workflow when daily_check returns EXIT.
+
+    The engine is recommending you close the position. Concrete steps to
+    sell at market or limit, with the reason surfaced inline.
+    """
+    return (
+        f'<div class="steps" style="border-left:4px solid #FF4D4D;'
+        f'background:#1a0d0d;padding:14px 18px;border-radius:10px"><b>'
+        f'🔴 SELL — exit position now</b>'
+        + (f'<div style="font-size:13px;color:#FFB0B0;margin:6px 0">{reason}</div>' if reason else '')
+        + f'<ol style="margin-top:8px">'
+        f'<li>Open Kite → Search <b>{sym}</b></li>'
+        f'<li>Cancel any open SL-M / GTT sell orders on this symbol first</li>'
+        f'<li>Tap <b>S</b> → Product: <b>CNC</b> → Type: <b>MARKET</b> → '
+        f'Qty <b>{shares_held}</b></li>'
+        f'<li>Confirm. Realised fill should be near current ₹{current_price:,.2f}.</li>'
+        '</ol>'
+        '<span style="color:#FFA0A0;font-size:13px">'
+        "Don't argue with the engine: it has re-scored the setup against today's "
+        'tape and finds the thesis no longer holds.</span>'
+        '</div>'
+    )
+
+
+def zerodha_modify_sl_steps(sym: str, old_sl: float, new_sl: float,
+                            shares_held: int) -> str:
+    """When daily_check returns TIGHTEN_STOP: concrete Kite steps to MODIFY
+    the existing SL-M sell order to the new (tighter) trigger price.
+    """
+    move = new_sl - old_sl
+    pct = (move / old_sl * 100) if old_sl > 0 else 0
+    return (
+        f'<div class="steps" style="border-left:4px solid #FFB800;'
+        f'background:#1a1408;padding:14px 18px;border-radius:10px"><b>'
+        f'⚠️ TIGHTEN STOP — move SL up</b>'
+        f'<div style="font-size:13px;color:#FFE0A0;margin:6px 0">'
+        f'Score is slipping. Lock in part of the open profit by moving SL up '
+        f'<b>₹{old_sl:,.2f} → ₹{new_sl:,.2f}</b> ({move:+.2f} INR, {pct:+.2f}%).'
+        f'</div><ol>'
+        f'<li>Open Kite → Orders → Open Orders tab</li>'
+        f'<li>Find the SL-M sell order on <b>{sym}</b> (Qty {shares_held})</li>'
+        f'<li>Tap <b>Modify</b> → change <b>Trigger Price</b> to <b>₹{new_sl:,.2f}</b></li>'
+        f'<li>Confirm. The order should now show the new trigger.</li>'
+        '</ol>'
+        '<span style="color:#FFB800;font-size:13px">'
+        'Never widen a stop — only tighten. If the price has already moved '
+        'past the suggested new SL, exit at market instead.</span>'
+        '</div>'
     )
