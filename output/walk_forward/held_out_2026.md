@@ -1,4 +1,4 @@
-# Held-out 2026 YTD validation — 2026-01-01 → 2026-06-14
+# Held-out 2026 YTD validation — 2026-01-01 → 2026-06-17
 
 **Honest framing.** The 2023, 2024, and 2025 windows referenced
 elsewhere in this repo are **in-sample tuning data** — gate thresholds
@@ -20,8 +20,8 @@ Reproduce: `PYTHONPATH=. python3 scripts/validate_held_out_2026.py`
 
 | Engine | Trades | Win rate | Expectancy | Avg win | Avg loss |
 |---|---|---|---|---|---|
-| v1 | 175 | 35.4% | -0.962% | +4.43% | -3.92% |
-| v2 | 64 | 28.1% | -1.612% | +4.60% | -4.04% |
+| v1 | 181 | 36.5% | -0.983% | +4.24% | -3.98% |
+| v2 | 64 | 28.1% | -1.713% | +4.60% | -4.18% |
 
 ## Interpretation guide
 

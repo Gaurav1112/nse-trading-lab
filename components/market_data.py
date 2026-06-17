@@ -4,7 +4,22 @@ import streamlit as st
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_live_price(sym: str) -> tuple[float | None, float | None]:
-    """Return (last_price, prev_close) via fast_info — never split-adjusted."""
+    """Return (last_price, prev_close) for an NSE cash equity symbol.
+
+    Primary: NSE's open /api/quote-equity endpoint (no auth, accurate, but
+    rate-limited from cloud egress IPs).
+    Fallback: yfinance fast_info (lagged ~1-15 min, occasionally returns
+    split-adjusted bleed-through that diverges from the actual market price).
+    """
+    # Try NSE first
+    try:
+        from components.nse_live_quote import get_nse_quote
+        last, prev = get_nse_quote(sym)
+        if last is not None and last > 0:
+            return last, (prev if (prev is not None and prev > 0) else None)
+    except Exception:
+        pass
+    # Fall back to yfinance fast_info
     try:
         fi = yf.Ticker(f"{sym}.NS").fast_info
         last = getattr(fi, "last_price", None)
