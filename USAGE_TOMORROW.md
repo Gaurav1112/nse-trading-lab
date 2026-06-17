@@ -45,7 +45,7 @@ cd /Users/racit/PersonalProject/nse-trading-lab
 
 ## What the engine knows that you should trust
 
-Walk-forward, v2 engine, net of Zerodha delivery costs + 0.075%/side spread + gap-through fills (Phase F honest execution):
+Walk-forward, v2 engine, net of Zerodha delivery costs + 0.075%/side spread + gap-through fills (Phase F honest execution). **These years (2023-2025) are in-sample tuning data — read the table as an upper bound, not a forward estimate. The only honest out-of-sample test is the 2026 YTD held-out result below.**
 
 | Regime | v2 expectancy | Win rate | Profit factor | Realistic next move |
 |---|---|---|---|---|
@@ -54,6 +54,15 @@ Walk-forward, v2 engine, net of Zerodha delivery costs + 0.075%/side spread + ga
 | HOSTILE (2025-like, today) | +0.34% per trade | 46.6% | 1.10 | Paper-trade only, sit out real money |
 
 The v2 regime gate is what keeps the engine non-negative in HOSTILE tape. Without it (v1), 2025 expectancy is **-0.57%** under honest execution.
+
+## The held-out 2026 YTD finding (read this every morning)
+
+| Engine | Trades | Win rate | Expectancy |
+|---|---|---|---|
+| v1 (no regime gate) | 175 | 35.4% | **-0.96%** |
+| **v2 + Wave A (the engine you actually use)** | **64** | **28.1%** | **-1.61%** |
+
+This is on 2026 data the engine has never seen during tuning. The number is within the walk-forward 2025 95% CI [-1.44%, +1.95%] — so it's *not a refutation*, but it confirms the **bottom** of that range. The Picks page now hard-blocks Save in HOSTILE tape unless you explicitly type the override phrase.
 
 ## What's shipped (as of 2026-06-14)
 

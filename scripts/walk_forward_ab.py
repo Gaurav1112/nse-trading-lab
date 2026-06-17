@@ -24,10 +24,14 @@ WINDOWS = [
 STRIDE = int(os.getenv("WF_STRIDE", "5"))
 MIN_SCORE = float(os.getenv("WF_MIN_SCORE", "65"))
 
-# Phase G — Tomás Vega: tally of variants tested across Phase 2A + 2B.
-# Phase 2A swept 4 rs_vs_nifty thresholds (5/7/8/10%); Phase 2B swept
-# 2 regime_gate MIXED thresholds (75/70). Total ~6 independent trials.
-N_TRIALS_PHASE_2 = 6
+# Honest variant count — Bailey/Lopez de Prado 2014: deflated Sharpe must
+# account for EVERY variant the researcher tested, including ones silently
+# discarded. Across Phases 1, 2A, 2B, A-H, F, G, and Wave A safety gates we
+# tuned ~40 variants total (rs_vs_nifty thresholds 4x, regime gate thresholds
+# 2x, score-weight sweeps ~6, MTF/liquidity/gap thresholds ~4 each, calibrator
+# hyperparams ~6, holding-period variants ~4, ~10 silent backtest tweaks).
+# The original "6" was just Phase 2's published sweep; it understated true N.
+N_TRIALS_PHASE_2 = 40
 
 
 def _stats_row(report):

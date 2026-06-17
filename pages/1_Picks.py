@@ -48,6 +48,22 @@ if _tape is not None:
         f'<div style="margin-top:8px;color:#C9D5E0;font-size:13px;line-height:1.4">'
         f'{_tape.recommendation}</div>'
         f'</div>', unsafe_allow_html=True)
+    # Held-out 2026 OOS banner — permanent in HOSTILE so the user sees the
+    # honest expectancy every single time they look at picks. Composer-style.
+    if _tape.regime == TapeRegime.HOSTILE:
+        st.markdown(
+            '<div style="border:2px solid #FF4D4D;border-radius:14px;padding:14px 18px;'
+            'margin:0 0 16px 0;background:#1a0d0d">'
+            '<span style="font-size:11px;color:#FF9090;text-transform:uppercase;letter-spacing:1px">'
+            'Honest evidence (held-out 2026 YTD)</span><br>'
+            '<span style="font-size:18px;font-weight:700;color:#FF4D4D">'
+            'Engine returned <strong>-1.61% expectancy / trade</strong> in this regime '
+            'on 2026 data it has never been tuned against (64 trades, 28% win rate). '
+            'v1 returned -0.96% (175 trades, 35% win rate). '
+            'Save button is hard-blocked below — typing the override does not '
+            'change the underlying data.</span></div>',
+            unsafe_allow_html=True,
+        )
 else:
     st.caption("⚠️ Tape regime unavailable (Nifty data fetch failed)")
 # ── end banner ─────────────────────────────────────────────────
@@ -214,6 +230,33 @@ else:
             )
             from components.risk_governor import can_open_in_sector
             _sector_ok, _sector_reason = can_open_in_sector(state.get_positions(), sym)
+            # ── HOSTILE hard-block with friction override ──────────────────────
+            # Held-out 2026 YTD with v2+Wave A returned -1.61% expectancy. On
+            # HOSTILE tape this is the dominant outcome. We disable Save unless
+            # the user types an exact override phrase so the act of trading
+            # against the engine becomes deliberate, not impulsive.
+            _OVERRIDE_PHRASE = "I accept -1.61% expectancy"
+            _hostile_block = (_tape is not None and _tape.regime == TapeRegime.HOSTILE)
+            _override_text = ""
+            if _hostile_block:
+                st.error(
+                    f"🛑 **HOSTILE tape — Save disabled.** Held-out 2026 YTD "
+                    f"showed **-1.61% expectancy per trade** on this engine in "
+                    f"this regime. To save anyway, type the exact phrase below."
+                )
+                _override_text = st.text_input(
+                    f"Type to override: `{_OVERRIDE_PHRASE}`",
+                    key=f"override_{sym}_{rank}", value="",
+                )
+            _override_ok = (not _hostile_block) or (_override_text.strip() == _OVERRIDE_PHRASE)
+
+            # Confirmation checkbox — required 2-step (loss-aversion friction).
+            _confirm = st.checkbox(
+                f"I have reviewed entry ₹{bought_price:,.0f}, SL ₹{sl_set:,.0f}, "
+                f"target ₹{s.target_1:,.0f}, qty {bought_qty}, and understand "
+                f"max loss = ₹{(bought_price - sl_set) * bought_qty:,.0f}",
+                key=f"confirm_{sym}_{rank}",
+            )
             if not _risk.can_trade:
                 st.caption(f"⛔ Save disabled by risk governor: {' · '.join(_risk.reasons)}")
             elif not _sector_ok:
@@ -221,7 +264,10 @@ else:
             else:
                 st.caption(f"🛡️ {_sector_reason}")
             if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True,
-                         disabled=(not _risk.can_trade) or (not _sector_ok) or len(thesis.strip()) < 20):
+                         disabled=(not _risk.can_trade) or (not _sector_ok)
+                                  or len(thesis.strip()) < 20
+                                  or (not _override_ok)
+                                  or (not _confirm)):
                 state.add_position({
                     "symbol": sym, "buy_price": bought_price, "qty": bought_qty,
                     "stop_loss": sl_set, "target": s.target_1,
