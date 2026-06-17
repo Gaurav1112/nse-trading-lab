@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from nse_backtest.picker_replay import simulate_trade, _SPREAD_PER_SIDE
+from nse_backtest.picker_replay import simulate_trade, _SPREAD_AVERAGE_BPS as _SPREAD_PER_SIDE
 from nse_backtest.exits import ExitReason
 
 

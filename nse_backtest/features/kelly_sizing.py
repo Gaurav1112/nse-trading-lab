@@ -43,6 +43,23 @@ class KellySizing:
     rationale: str               # human-readable explanation for the UI
 
 
+def correlation_haircut(correlations: list[float]) -> float:
+    """Multiplicative haircut applied to Kelly when adding a position that
+    correlates with the existing book.
+
+    haircut = 1 / sqrt(1 + sum(max(0, ρ)))
+
+    Industry analog: Carver, *Systematic Trading* ch. 4; Lopez de Prado on
+    correlation-aware sizing. Only positive correlations get penalised — a
+    negatively-correlated diversifier shouldn't shrink the position.
+    """
+    if not correlations:
+        return 1.0
+    positive_only = [max(0.0, float(r)) for r in correlations if r is not None]
+    denom = (1.0 + sum(positive_only)) ** 0.5
+    return 1.0 / denom if denom > 0 else 1.0
+
+
 def kelly_size(
     *,
     calibrated_win_prob_pct: float,
@@ -52,6 +69,7 @@ def kelly_size(
     capital: float,
     max_risk_pct: float = 2.0,
     fraction: float = _DEFAULT_KELLY_FRACTION,
+    open_book_correlations: list[float] | None = None,
 ) -> KellySizing:
     """Return KellySizing for the given setup. Never returns negative qty.
 
@@ -95,15 +113,24 @@ def kelly_size(
         )
 
     fractional = full_kelly * fraction          # quarter Kelly
-    risk_pct = fractional * 100                  # as percent of capital
+    # Correlation haircut — shrink Kelly when the candidate correlates with
+    # existing open book. Carver-style: 1 / sqrt(1 + Σmax(0,ρ)).
+    haircut = correlation_haircut(open_book_correlations or [])
+    fractional_after_haircut = fractional * haircut
+    risk_pct = fractional_after_haircut * 100    # as percent of capital
     risk_pct = max(_MIN_RISK_PCT, min(risk_pct, max_risk_pct))
     risk_inr = capital * risk_pct / 100
     qty = max(1, int(risk_inr / risk_per_share))
     actual_risk_pct = (qty * risk_per_share) / capital * 100
 
     rationale = (
-        f"Kelly (1/4 fractional): p_cal={p:.2%}, R:R={b:.2f} → full f*={full_kelly:.3f} → "
-        f"sized at {risk_pct:.2f}% of capital ({qty} shares risking ₹{qty * risk_per_share:,.0f})"
+        f"Kelly (1/4 fractional): p_cal={p:.2%}, R:R={b:.2f} → full f*={full_kelly:.3f}"
+    )
+    if open_book_correlations:
+        rationale += f", ρ-haircut={haircut:.3f}"
+    rationale += (
+        f" → sized at {risk_pct:.2f}% of capital "
+        f"({qty} shares risking ₹{qty * risk_per_share:,.0f})"
     )
     return KellySizing(
         suggested_qty=qty,

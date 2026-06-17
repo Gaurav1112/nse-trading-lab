@@ -82,7 +82,22 @@ if _freshness.status == "STALE":
 
 # ── Risk envelope banner (Kavya's portfolio guard) ─────────────
 from components.risk_governor import assess as _risk_assess
-_risk = _risk_assess(state.get_positions(), state.get_journal(), state.get_capital())
+_risk = _risk_assess(state.get_positions(), state.get_journal(), state.get_capital(),
+                     regime=_tape.regime if _tape else None)
+# Portfolio kill switch — surfaced as a dedicated banner above everything else
+# so the user sees "FLATTEN ALL" before considering new entries.
+if _risk.flatten_all:
+    st.markdown(
+        '<div style="border:3px solid #FF0000;border-radius:14px;padding:18px 20px;'
+        'margin:8px 0;background:#280000">'
+        '<span style="font-size:14px;color:#FFA0A0;text-transform:uppercase;letter-spacing:1px">'
+        'Portfolio Kill Switch</span><br>'
+        '<span style="font-size:24px;font-weight:800;color:#FF0000">⛔ FLATTEN ALL POSITIONS</span>'
+        f'<div style="margin-top:8px;color:#FFD0D0;font-size:14px;line-height:1.4">'
+        f'{_risk.flatten_reason} New entries are blocked. Close existing positions '
+        f'and review the journal before re-engaging.</div></div>',
+        unsafe_allow_html=True,
+    )
 if not _risk.can_trade:
     st.markdown(
         f'<div style="border:1px solid #FF4D4D;border-radius:14px;padding:14px 18px;'
@@ -96,6 +111,8 @@ if not _risk.can_trade:
 else:
     st.caption(
         f"🛡️ Risk envelope: {_risk.open_positions}/{_risk.max_open_positions} positions · "
+        f"aggregate book risk **{_risk.aggregate_risk_pct:.2f}%** / cap "
+        f"**{_risk.aggregate_risk_cap_pct:.1f}%** ({_tape.regime if _tape else 'TRENDING'}) · "
         f"weekly P&L {_risk.weekly_pnl_pct:+.1f}% (threshold {_risk.weekly_dd_threshold_pct:.1f}%)"
     )
 # ── end risk envelope ─────────────────────────────────────────

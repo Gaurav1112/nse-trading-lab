@@ -23,13 +23,38 @@ _STT_SELL = 0.001
 _STAMP_BUY = 0.00015
 # Phase F (Daniel Foss): the old flat 0.1%/side slippage was a rough catch-all
 # that double-counted spread. We now model spread explicitly (see
-# _SPREAD_PER_SIDE below) and keep a small residual slippage for queue/latency.
+# spread_pct_for_df below) and keep a small residual slippage for queue/latency.
 _SLIPPAGE_ONE_WAY = 0.00025
-# Per-side bid-ask spread for Nifty 50 names. ~0.075% is the median of bid-ask %
-# I observed on Nifty 50 names in Kite Connect quotes. Tuneable per-symbol via
-# a dict later. Round-trip drag ≈ 0.15pp of return.
-_SPREAD_PER_SIDE = 0.00075
-_DEFAULT_SPREAD_PER_SIDE_PCT = 0.075  # for documentation / external reference
+# Liquidity-bucketed bid-ask spread (Tier 2 audit). NSE 2023 microstructure
+# paper (Jain/Patro): top-decile liquidity Nifty 50 names trade 3 bps median
+# spread; bottom-decile trade 12-15 bps. Flat 7.5 bps was wrong on both ends.
+_SPREAD_THIN_BPS = 0.0012      # 12 bps per side for bottom-decile turnover
+_SPREAD_AVERAGE_BPS = 0.00075  # 7.5 bps per side for the middle of the universe
+_SPREAD_THICK_BPS = 0.0003     # 3 bps per side for top-decile turnover
+# ₹ thresholds — 20d median (Close × Volume). Roughly: thick > ₹500cr/day,
+# thin < ₹50cr/day. Calibrated to current (2026) Nifty 50 turnover distribution.
+_THICK_INR_PER_DAY = 500 * 10**7   # ₹500 crore
+_THIN_INR_PER_DAY = 50 * 10**7     # ₹50 crore
+
+# Intraday SL whipsaw slippage (T2.6). When the SL triggers intrabar (i.e.,
+# the bar opened above SL but the low dipped to SL), Zerodha SL-M orders slip
+# beyond the trigger. Empirical: 15-25 bps + a fraction of ATR on Nifty 50.
+_INTRADAY_SL_SLIP_PCT = 0.0015       # 15 bps floor
+_INTRADAY_SL_SLIP_ATR_FRAC = 0.10    # plus 0.1 × ATR
+
+
+def spread_pct_for_df(df: pd.DataFrame) -> float:
+    """Return the per-side spread (as a fraction) for this stock's liquidity
+    bucket, computed from the last 20 bars of ₹ turnover."""
+    if df is None or len(df) < 20 or "Volume" not in df.columns:
+        return _SPREAD_AVERAGE_BPS
+    last20 = df.tail(20)
+    median_inr = float((last20["Close"] * last20["Volume"]).median())
+    if median_inr >= _THICK_INR_PER_DAY:
+        return _SPREAD_THICK_BPS
+    if median_inr <= _THIN_INR_PER_DAY:
+        return _SPREAD_THIN_BPS
+    return _SPREAD_AVERAGE_BPS
 _DP_PER_SELL = 15.93
 _NSE_TXN = 0.0000297
 _SEBI = 0.000001
@@ -37,12 +62,12 @@ _GST = 0.18
 _IPFT = 0.0000001
 
 
-def _delivery_costs_pct(entry: float, exit_price: float, shares: int) -> float:
+def _delivery_costs_pct(entry: float, exit_price: float, shares: int,
+                        spread_per_side: float = _SPREAD_AVERAGE_BPS) -> float:
     """Return total round-trip Zerodha delivery costs as % of (exit_price * shares).
 
-    Phase F: spread drag (2 × _SPREAD_PER_SIDE) is now included explicitly,
-    and the residual slippage is reduced so net round-trip cost is comparable
-    to the old (overestimated flat slippage) figure.
+    spread_per_side defaults to the universe-median 7.5 bps; for accurate
+    backtesting, pass the per-symbol bucket spread from spread_pct_for_df().
     """
     if shares <= 0 or exit_price <= 0:
         return 0.0
@@ -54,7 +79,7 @@ def _delivery_costs_pct(entry: float, exit_price: float, shares: int) -> float:
     gst = txn * _GST
     dp = _DP_PER_SELL
     slip = (buy_turnover + sell_turnover) * _SLIPPAGE_ONE_WAY
-    spread = (buy_turnover + sell_turnover) * _SPREAD_PER_SIDE
+    spread = (buy_turnover + sell_turnover) * spread_per_side
     total = stt + stamp + txn + gst + dp + slip + spread
     return total / sell_turnover * 100
 
@@ -142,6 +167,7 @@ def simulate_trade(
     atr: float,
     future_data: pd.DataFrame,
     max_hold: int = 15,
+    spread_per_side: float = _SPREAD_AVERAGE_BPS,
 ) -> Optional[TradeOutcome]:
     """Simulate a single trade forward through `future_data` (which starts at entry bar).
 
@@ -177,7 +203,7 @@ def simulate_trade(
             reason = ExitReason.TRAIL_STOP if t1_hit else ExitReason.STOP_LOSS_GAP
             return _build_outcome(
                 symbol, entry_date, future_data.index[i], entry_price, exit_price,
-                i, reason, atr,
+                i, reason, atr, spread_per_side=spread_per_side,
             )
 
         if bar_open >= target_2:
@@ -187,7 +213,7 @@ def simulate_trade(
                 exit_price = partial_exit_price * 0.5 + bar_open * 0.5
             return _build_outcome(
                 symbol, entry_date, future_data.index[i], entry_price, exit_price,
-                i, ExitReason.TARGET_2_GAP, atr,
+                i, ExitReason.TARGET_2_GAP, atr, spread_per_side=spread_per_side,
             )
 
         if bar_high >= target_2:
@@ -196,17 +222,23 @@ def simulate_trade(
                 exit_price = partial_exit_price * 0.5 + target_2 * 0.5
             return _build_outcome(
                 symbol, entry_date, future_data.index[i], entry_price, exit_price,
-                i, ExitReason.TARGET_2, atr,
+                i, ExitReason.TARGET_2, atr, spread_per_side=spread_per_side,
             )
 
         if bar_low <= sl:
-            exit_price = sl
+            # T2.6 intraday SL whipsaw: when the bar OPEN was above SL but the
+            # low dipped to trigger it, Zerodha SL-M slips beyond the trigger
+            # in real life. Apply slippage = max(15 bps × sl, 0.1 × ATR).
+            # Note: the overnight gap-through case (bar_open <= sl) is handled
+            # earlier with bar_open as fill, which already captures that hit.
+            sl_slip = max(_INTRADAY_SL_SLIP_PCT * sl, _INTRADAY_SL_SLIP_ATR_FRAC * atr)
+            exit_price = max(0.01, sl - sl_slip)
             if t1_hit:
-                exit_price = partial_exit_price * 0.5 + sl * 0.5
+                exit_price = partial_exit_price * 0.5 + exit_price * 0.5
             reason = ExitReason.TRAIL_STOP if t1_hit else ExitReason.STOP_LOSS
             return _build_outcome(
                 symbol, entry_date, future_data.index[i], entry_price, exit_price,
-                i, reason, atr,
+                i, reason, atr, spread_per_side=spread_per_side,
             )
 
         swing_low = float(future_data["Low"].iloc[max(0, i - 5):i + 1].min())
@@ -229,13 +261,15 @@ def simulate_trade(
         symbol, entry_date,
         future_data.index[min(max_hold, len(future_data) - 1)],
         entry_price, exit_price, min(max_hold, len(future_data) - 1), reason, atr,
+        spread_per_side=spread_per_side,
     )
 
 
 def _build_outcome(symbol, entry_date, exit_date, entry, exit_price, bars,
-                   reason, atr) -> TradeOutcome:
+                   reason, atr, spread_per_side: float = _SPREAD_AVERAGE_BPS) -> TradeOutcome:
     gross = (exit_price / entry - 1) * 100 if entry > 0 else 0.0
-    costs_pct = _delivery_costs_pct(entry, exit_price, shares=100)
+    costs_pct = _delivery_costs_pct(entry, exit_price, shares=100,
+                                    spread_per_side=spread_per_side)
     net = gross - costs_pct
     return TradeOutcome(
         symbol=symbol, entry_date=entry_date, exit_date=exit_date,
@@ -297,11 +331,15 @@ def replay_picker(
 
                 atr_proxy = (setup.entry_price - setup.stop_loss) / 1.5
                 future = df.loc[d:]
+                # T2.5 liquidity bucket: bucket spread by 20d median turnover at
+                # entry. df_until is point-in-time clean — no look-ahead.
+                spread_per_side = spread_pct_for_df(df_until)
                 outcome = simulate_trade(
                     symbol=sym, entry_date=d,
                     entry_price=setup.entry_price, stop_loss=setup.stop_loss,
                     target_1=setup.target_1, target_2=setup.target_2,
                     atr=max(atr_proxy, 0.01), future_data=future, max_hold=max_hold,
+                    spread_per_side=spread_per_side,
                 )
                 if outcome is None:
                     continue

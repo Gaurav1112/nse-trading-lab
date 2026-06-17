@@ -50,12 +50,29 @@ def test_weekly_drawdown_triggers_cooling_off():
 
 
 def test_old_losses_outside_window_do_not_trigger_cooling_off():
-    """A loss from 30 days ago should not block trading today."""
+    """A small loss from 30 days ago should not trigger cooling-off (the
+    cooling-off window is 7d by default). Kept small enough to not also trip
+    the new portfolio kill switch (T2.2), which IS lifetime-cumulative."""
     old = (datetime.now() - timedelta(days=30)).date().isoformat()
-    journal = [{"closed_date": old, "pnl": -50_000}]  # huge loss but stale
+    # Pick a loss small enough that lifetime drawdown stays under the 8% kill
+    # switch threshold on ₹200k capital — 30 days inactivity should free
+    # the per-week governor, not the lifetime drawdown bar.
+    journal = [{"closed_date": old, "pnl": -8_000}]  # 4% lifetime DD, no kill
     v = assess(positions=[], journal=journal, capital=200_000)
     assert v.cooling_off_active is False
     assert v.can_trade is True
+
+
+def test_lifetime_drawdown_persists_beyond_weekly_window():
+    """Even with stale losses, a >8% lifetime drawdown from HWM should still
+    fire the portfolio kill switch (T2.2). This is intentional — recovery
+    means realising gains, not waiting out the calendar."""
+    old = (datetime.now() - timedelta(days=30)).date().isoformat()
+    journal = [{"closed_date": old, "pnl": -50_000}]  # 25% DD on ₹200k
+    v = assess(positions=[], journal=journal, capital=200_000)
+    assert v.cooling_off_active is False
+    assert v.flatten_all is True
+    assert v.can_trade is False
 
 
 def test_audit_log_appends_jsonl(tmp_path, monkeypatch):
