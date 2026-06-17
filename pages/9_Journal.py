@@ -99,14 +99,63 @@ if journal:
         mode_stats["PnL"] = mode_stats["PnL"].apply(lambda x: f"₹{x:,.0f}")
         st.dataframe(mode_stats, use_container_width=True, hide_index=True)
 
-    # Export and clear
-    ec1, ec2 = st.columns(2)
+    # ── Export options ──
+    st.markdown("### Exports")
+    ec1, ec2, ec3 = st.columns(3)
     with ec1:
-        st.download_button("📥 Export CSV", _safe_csv(jdf), "trade_journal.csv", "text/csv")
+        st.download_button(
+            "📥 CSV (raw journal)", _safe_csv(jdf),
+            "trade_journal.csv", "text/csv",
+            help="The full journal dataframe, useful for spreadsheets and ad-hoc analysis.",
+        )
     with ec2:
-        if st.button("🗑️ Clear All Trades"):
+        # ── ITR-2 / ITR-3 tax export (D3 — SEBI compliance audit) ──
+        from components.tax_export import to_itr_csv
+        # Normalise the journal to the buy/sell schema the export expects.
+        norm = []
+        for t in journal:
+            if t.get("buy_price") and t.get("sell_price"):
+                norm.append(t); continue
+            # Map "entry/exit" schema → "buy_price/sell_price"
+            norm.append({
+                **t,
+                "buy_price": float(t.get("entry") or 0),
+                "sell_price": float(t.get("exit") or 0),
+                "qty": int(t.get("qty") or 0),
+                "entry_date": str(t.get("date") or ""),
+                "closed_date": str(t.get("date") or ""),
+            })
+        itr_csv = to_itr_csv(norm)
+        st.download_button(
+            "📜 CA-ready CSV (ITR-2 Sched 112A/CG)", itr_csv,
+            "itr_schedule_cg.csv", "text/csv",
+            help=(
+                "Per-trade charges breakdown (STT, stamp, GST, exchange txn, "
+                "brokerage, DP) computed from Zerodha delivery cost model. "
+                "LTCG vs STCG tagged by holding period. Hand directly to your CA."
+            ),
+        )
+    with ec3:
+        if st.button("🗑️ Clear All Trades", use_container_width=True):
             st.session_state["journal"] = []
             state._save_journal_to_disk([])
             st.rerun()
+
+    # ── Audit log integrity check (D2 — SEBI Reg §25 5yr tamper-evidence) ──
+    st.markdown("---")
+    st.markdown("### 🔒 Audit log integrity")
+    if st.button("Verify audit log hash chain", help="Replays sha256 over every record in audit_log.jsonl."):
+        from components.risk_governor import verify_audit_log
+        ok, msg = verify_audit_log()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+    st.caption(
+        "Every verdict the engine emits is written to `audit_log.jsonl` as a "
+        "hash-chained record (prev_hash + self_hash). SEBI Research Analysts "
+        "Regulations 2014 §25 requires 5-year retention with integrity. A "
+        "broken chain means the log was edited after the fact."
+    )
 else:
     st.info("No trades recorded yet. Add your first trade above.")

@@ -279,14 +279,49 @@ def assess(positions: list[dict], journal: list[dict], capital: float,
     )
 
 
+def _hash_record(record: dict) -> str:
+    """Stable sha256 of a single record's canonical JSON encoding."""
+    import hashlib
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _last_audit_hash() -> str:
+    """Return the hash of the previous record in the audit log, or '' if empty.
+    Used to chain each new record to its predecessor (SEBI §25 5yr tamper-evidence).
+    """
+    if not _AUDIT_LOG_PATH.exists():
+        return ""
+    try:
+        with open(_AUDIT_LOG_PATH, "rb") as f:
+            try:
+                f.seek(-2048, 2)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", errors="ignore")
+        last_line = tail.strip().split("\n")[-1] if tail.strip() else ""
+        if not last_line:
+            return ""
+        try:
+            prev = json.loads(last_line)
+            return prev.get("self_hash", "") or _hash_record({k: v for k, v in prev.items() if k != "self_hash"})
+        except json.JSONDecodeError:
+            return ""
+    except OSError:
+        return ""
+
+
 def log_verdict(
     symbol: str, verdict: str, score: float, win_probability: float,
     tape_regime: str, engine: str = "v2",
 ) -> None:
-    """Append one line to audit_log.jsonl for every verdict the user sees.
+    """Append one tamper-evident JSONL record per verdict the user sees.
 
-    Used for post-mortem analysis: did the engine flag X on day Y? What did
-    the user do? Audit trail for compliance + behavioral review.
+    Each record includes prev_hash (chains to predecessor) + self_hash so an
+    auditor can verify integrity by replaying sha256(record_without_self_hash)
+    and checking prev_hash[i+1] == self_hash[i]. SEBI Reg §25 (Research
+    Analysts Regs 2014) requires 5-year record retention with integrity —
+    plain JSONL is editable in a text editor; the hash chain raises the bar.
     """
     record = {
         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -294,9 +329,43 @@ def log_verdict(
         "score": round(float(score), 2),
         "win_probability": round(float(win_probability), 2),
         "tape_regime": tape_regime, "engine": engine,
+        "prev_hash": _last_audit_hash(),
     }
+    record["self_hash"] = _hash_record(record)
     try:
         with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
     except OSError:
         pass  # Audit log failure must never break the user's trading flow.
+
+
+def verify_audit_log() -> tuple[bool, str]:
+    """Verify the hash chain integrity of audit_log.jsonl.
+    Returns (ok, message). False on the first broken link, or True when clean.
+    """
+    if not _AUDIT_LOG_PATH.exists():
+        return True, "Audit log is empty"
+    prev_hash = ""
+    try:
+        with open(_AUDIT_LOG_PATH, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    return False, f"Line {i}: malformed JSON"
+                if rec.get("prev_hash", "") != prev_hash:
+                    return False, (
+                        f"Line {i}: chain broken — prev_hash={rec.get('prev_hash', '')!r} "
+                        f"expected {prev_hash!r}"
+                    )
+                self_hash = rec.pop("self_hash", "")
+                computed = _hash_record(rec)
+                if computed != self_hash:
+                    return False, f"Line {i}: self_hash mismatch — record was tampered"
+                prev_hash = self_hash
+        return True, f"Audit log integrity verified across {i} records"
+    except OSError as e:
+        return False, f"Could not read audit log: {e}"

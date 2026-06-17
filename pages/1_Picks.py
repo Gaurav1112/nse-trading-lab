@@ -250,6 +250,46 @@ else:
         )
         if s.suggested_qty > 0:
             st.caption(f"Suggested: **{s.suggested_qty} shares** = ₹{s.position_value:,.0f} | Max loss ₹{s.max_loss:,.0f}")
+        # D5 — Disconfirming evidence (Behavioral audit #3: Confirmation bias).
+        # Shown BEFORE "Why this stock" so the user sees counter-arguments first.
+        with st.expander("⚠️ Why this might fail (disconfirming evidence)", expanded=False):
+            sub_scores = [
+                ("Trend", s.trend_score),
+                ("Momentum", s.momentum_score),
+                ("Volatility", s.volatility_score),
+                ("Volume", s.volume_score),
+                ("Backtest", s.backtest_score),
+                ("Risk", s.risk_score),
+            ]
+            weakest = sorted([(n, v) for n, v in sub_scores if v > 0], key=lambda x: x[1])[:2]
+            if weakest:
+                st.markdown("**Weakest sub-scores at entry:**")
+                for name, val in weakest:
+                    st.caption(f"• **{name}: {val:.0f}/100** — this is dragging the composite down; "
+                               f"if it's the dimension you'd normally rely on most, treat this pick as borderline.")
+            # Regime-specific failure mode
+            tape_failure = {
+                "HOSTILE": "HOSTILE tape: held-out 2026 expectancy is -1.71%/trade. Even high-score picks have historically lost money in this regime. The Save button is hard-blocked for a reason.",
+                "MIXED": "MIXED tape: walk-forward expectancy is +2%/trade with wide CI [+0.3%, +4.1%]. Half of MIXED-tape picks lose; only score ≥75 with R:R ≥2.5 has positive expected value.",
+                "TRENDING": "TRENDING tape: even here, ~25% of picks lose. The 'biggest losers' are typically setups where momentum_score is dragging — check your weakest sub-score above.",
+            }
+            if _tape is not None:
+                st.markdown(f"**Regime-specific failure mode ({_tape.regime}):**")
+                st.caption(tape_failure.get(_tape.regime, ""))
+            # Win-prob honesty
+            if s.win_probability < 60:
+                st.markdown("**Probability honesty:**")
+                st.caption(
+                    f"• Calibrated win prob is {s.win_probability:.0f}% — below 60%. "
+                    "Held-out IC monitor shows win_prob can be CONTRARIAN in HOSTILE "
+                    "tape (higher claimed odds → worse outcomes). Trust the score, "
+                    "not the percentage."
+                )
+            st.caption(
+                "_If after reading this you still want the trade, you've passed the "
+                "confirmation-bias check. If you'd hesitate, that hesitation is data._"
+            )
+
         with st.expander("📋 Why this stock?"):
             for r in s.reasons[:8]:
                 st.caption(f"• {r}")

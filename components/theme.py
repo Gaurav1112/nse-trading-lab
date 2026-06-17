@@ -205,5 +205,71 @@ hr { border-color: #1E3A5F !important; opacity: 0.5 !important; }
 
 /* ── Score bars (custom HTML) ─────────────────── */
 .score-bar-track { background: #1A2540 !important; }
+
+/* ───────────────────────────────────────────────────────────────────────
+   MOBILE / RESPONSIVE — audit gap (mobile 2/10 → 6/10)
+   The biggest mobile pain on Streamlit is st.columns(N) on narrow screens.
+   These rules force columns to stack vertically below 768px, enlarge tap
+   targets to 44px (Apple HIG minimum), scale fonts, and tighten padding.
+─────────────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    /* Force any st.columns container to stack vertically on phones. */
+    [data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+        gap: 8px !important;
+    }
+    [data-testid="stHorizontalBlock"] > div {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+    }
+
+    /* Smaller metrics + tighter padding on phones so the user sees more
+       at a glance without horizontal-scroll hell. */
+    [data-testid="stMetric"] { padding: 10px 12px !important; }
+    [data-testid="stMetricValue"] { font-size: 18px !important; }
+    [data-testid="stMetricLabel"] { font-size: 10px !important; }
+
+    /* Tap targets: Apple HIG recommends 44x44px minimum, Material 48x48.
+       Streamlit defaults are ~32px which fails both standards. */
+    [data-testid="stBaseButton-primary"] button,
+    [data-testid="stBaseButton-secondary"] button,
+    [kind="primary"], [kind="secondary"] {
+        min-height: 44px !important;
+        font-size: 15px !important;
+        padding: 8px 16px !important;
+    }
+
+    /* Reduce typography sizes — desktop H1/H2 are absurd on phones. */
+    h1 { font-size: 24px !important; line-height: 1.2 !important; }
+    h2 { font-size: 20px !important; }
+    h3 { font-size: 17px !important; }
+    .stMarkdown p { font-size: 14px !important; }
+
+    /* Tighten card padding so content doesn't waste vertical real estate. */
+    .verdict-go, .verdict-wait, .verdict-avoid {
+        padding: 14px 16px !important;
+        border-radius: 12px !important;
+    }
+    .steps {
+        padding: 14px 16px !important;
+        font-size: 13px !important;
+    }
+    .steps li { margin: 6px 0 !important; }
+
+    /* Sidebar: hide by default on mobile so the home view isn't blocked.
+       User can still tap the hamburger to open it. */
+    [data-testid="stSidebar"][aria-expanded="true"] {
+        width: 80vw !important;
+        max-width: 320px !important;
+    }
+}
+
+/* Extra-small phones (≤ 380px wide — older iPhone SE) */
+@media (max-width: 380px) {
+    [data-testid="stMetricValue"] { font-size: 15px !important; }
+    h1 { font-size: 20px !important; }
+    .stMarkdown p { font-size: 13px !important; }
+}
 </style>
 """

@@ -79,17 +79,40 @@ for v, pos in verdicts:
         f'<span style="font-size:14px;color:#7A93AA;margin-left:12px">'
         f'{v.action} · re-score {v.current_rescore:.0f}/100 · held {v.bars_held} bars</span>'
         f'</div>', unsafe_allow_html=True)
+    # D4 — Anchoring defense: lead with R-multiples (distance to stop/target
+    # measured in initial-risk units), demote raw entry price below an
+    # expander. Behavioural audit (Anchoring 3/10 → 7/10): the user's
+    # decision should be driven by R, not by "I paid ₹X for it."
+    initial_risk = max(0.01, v.entry_price - sl_old)
+    cur_R = (cur - v.entry_price) / initial_risk      # current P&L in R units
+    stop_R = (sl_old - v.entry_price) / initial_risk  # stop in R units (usually -1)
+    t1_R = (t1 - v.entry_price) / initial_risk if t1 > 0 else 0
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Entry", f"₹{v.entry_price:,.2f}")
-    m2.metric("Current", f"₹{cur:,.2f}", delta=f"{v.pnl_pct:+.1f}%",
+    m1.metric("Current (R)", f"{cur_R:+.2f}R",
+              help="Position P&L measured in units of initial risk (1R = the ₹ "
+                   "you risked from entry to your initial stop). +1R = doubled "
+                   "your risk in profit; -1R = stopped out.")
+    m2.metric("Current price", f"₹{cur:,.2f}",
+              delta=f"{v.pnl_pct:+.1f}%",
               delta_color="normal" if v.pnl_pct >= 0 else "inverse")
-    m3.metric("Stop now", f"₹{sl_old:,.2f}")
+    m3.metric("Stop (R)", f"{stop_R:+.1f}R", help=f"Stop at ₹{sl_old:,.2f}")
     if t1 > 0:
-        dist_t1 = (t1 - cur) / cur * 100
-        m4.metric("Target 1", f"₹{t1:,.2f}",
-                  delta=f"{dist_t1:+.2f}% away" if not t1_crossed else "✅ CROSSED")
+        m4.metric("Target 1 (R)", f"{t1_R:+.1f}R" if not t1_crossed else "✅ CROSSED",
+                  help=f"T1 at ₹{t1:,.2f}")
     else:
-        m4.metric("Target 1", "—")
+        m4.metric("Target 1 (R)", "—")
+
+    with st.expander("Raw entry/levels (for reference)"):
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.write(f"**Entry:** ₹{v.entry_price:,.2f}")
+        rc2.write(f"**SL:** ₹{sl_old:,.2f}")
+        rc3.write(f"**T1/T2:** ₹{t1:,.2f} / ₹{t2:,.2f}" if t1 > 0 else "—")
+        st.caption(
+            "Raw entry is hidden by default — anchoring research (Tversky/Kahneman) "
+            "shows traders fixate on the price they paid even when it's irrelevant. "
+            "The R-metric above is what should drive your decision."
+        )
 
     st.caption(f"💡 {v.reason}")
 
