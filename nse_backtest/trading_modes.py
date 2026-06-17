@@ -53,6 +53,13 @@ class TradeSetup:
     suggested_qty: int = 0
     position_value: float = 0
     max_loss: float = 0
+    # Per-dimension scorer breakdown — used by picker_replay and the IC monitor.
+    trend_score: float = 0
+    momentum_score: float = 0
+    volatility_score: float = 0
+    volume_score: float = 0
+    backtest_score: float = 0
+    risk_score: float = 0
 
 
 @dataclass
@@ -116,6 +123,12 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
         strategy_name="Multi-indicator swing",
         reasons=score.reasons[:10],
         warnings=score.warnings,
+        trend_score=score.trend_score,
+        momentum_score=score.momentum_score,
+        volatility_score=score.volatility_score,
+        volume_score=score.volume_score,
+        backtest_score=score.backtest_score,
+        risk_score=score.risk_score,
     )
     
     # Position sizing — Kelly when enabled (v2/v3), classic fixed-risk otherwise.

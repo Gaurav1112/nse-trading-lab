@@ -59,6 +59,10 @@ def main():
     trades = _load_trades()
     print(f"Loaded {len(trades)} trades across years {sorted(trades['year'].unique())}.")
 
+    DIMS = ["score", "win_prob", "trend", "momentum", "volatility", "volume", "backtest", "risk"]
+    available_dims = [d for d in DIMS if d in trades.columns]
+    header = "| Year | n | " + " | ".join(f"IC({d})" for d in available_dims) + " |"
+    sep = "|---" * (2 + len(available_dims)) + "|"
     lines = [
         "# IC monitor — alpha decay diagnostic",
         "",
@@ -71,15 +75,18 @@ def main():
         "",
         "## IC by signal × year",
         "",
-        "| Year | n | IC(score, net%) | IC(win_prob, net%) |",
-        "|---|---|---|---|",
+        header,
+        sep,
     ]
     for year in sorted(trades["year"].dropna().unique()):
         ydf = trades[trades["year"] == year]
-        ic_score = _spearman_ic(ydf["score"], ydf["net_%"])
-        ic_winp = _spearman_ic(ydf["win_prob"], ydf["net_%"])
-        lines.append(f"| {int(year)} | {len(ydf)} | {ic_score:+.3f} | {ic_winp:+.3f} |")
-        print(f"  {int(year)}: n={len(ydf)}, IC(score)={ic_score:+.3f}, IC(win_prob)={ic_winp:+.3f}")
+        cells = [f"| {int(year)} | {len(ydf)}"]
+        print(f"  {int(year)}: n={len(ydf)}")
+        for d in available_dims:
+            ic = _spearman_ic(ydf[d], ydf["net_%"])
+            cells.append(f"{ic:+.3f}")
+            print(f"    IC({d}) = {ic:+.3f}")
+        lines.append(" | ".join(cells) + " |")
 
     lines.extend([
         "",
@@ -90,18 +97,16 @@ def main():
         "- **−0.05 < IC < +0.05**: signal carries no information; trades fire on noise.",
         "- **IC < −0.05**: signal is contrarian — the engine is buying what loses.",
         "",
-        "## Known limitation",
+        "## What to look for",
         "",
-        "Current picker_replay CSVs only emit the aggregate `score` and `win_prob`",
-        "at entry, not the 6 per-dimension subscores (trend / momentum / volatility /",
-        "volume / backtest / risk). Until picker_replay is extended to dump the",
-        "dimension breakdown, this monitor cannot isolate which dimension is",
-        "decaying — it only tells you whether the aggregate score is still useful.",
+        "If `score` IC is still positive but `momentum` IC has collapsed, the engine",
+        "is mostly driven by trend/volatility/volume/risk while momentum has stopped",
+        "working — re-weight or re-engineer that dimension. Persistent negative IC on",
+        "any dimension is a strong signal that the feature is now contrarian.",
         "",
-        "The per-dimension monitor is a known follow-up. To enable it: extend",
-        "`nse_backtest/picker_replay.py simulate_trade()` to record",
-        "score.trend_score / momentum_score / etc. into TradeOutcome, regenerate",
-        "snapshots, and re-run this script.",
+        "The first time you regenerate snapshots after a picker_replay upgrade, the",
+        "per-dimension columns appear; older CSVs without these columns are silently",
+        "skipped by this script.",
     ])
 
     OUT_PATH.write_text("\n".join(lines))

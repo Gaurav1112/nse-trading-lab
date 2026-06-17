@@ -27,11 +27,15 @@ def test_today_during_market_hours_is_fresh(mock_now):
 
 
 @patch("components.data_freshness._ist_now")
-def test_yesterday_during_market_hours_is_stale(mock_now):
+def test_yesterday_during_market_hours_is_end_of_day(mock_now):
+    """R7: age=1 during market hours is END_OF_DAY (yfinance is an EOD feed,
+    not STALE). The honest message explains the limitation rather than
+    blaming the user for a feed they can't fix."""
     mock_now.return_value = datetime(2026, 6, 15, 11, 0, tzinfo=IST)
     df = _df_with_last("2026-06-12")  # Friday — 1 business day behind on Monday
     v = check_freshness(df)
-    assert v.status == FreshnessStatus.STALE
+    assert v.status == FreshnessStatus.END_OF_DAY
+    assert "EOD feed" in v.message or "market close" in v.message
 
 
 @patch("components.data_freshness._ist_now")

@@ -53,6 +53,8 @@ for t in journal:
             correct = "✅ engine right (AVOID → loss)"
         elif pred_score and pred_score < 45 and actual_ret > 0:
             correct = "⚠️ engine missed (AVOID → win)"
+    # R6 — engine-vs-user override tracking
+    overrode = bool(t.get("opened_against_engine"))
     rows.append({
         "Symbol": _f(t, "symbol", default="?"),
         "Entry date": str(_f(t, "entry_date", "date", default=""))[:10],
@@ -64,6 +66,7 @@ for t in journal:
         "Actual net%": f"{actual_ret:+.2f}%" if isinstance(actual_ret, (int, float)) else "—",
         "Exit reason": exit_reason,
         "Verdict": correct or "—",
+        "Overrode engine": "🛑 YES" if overrode else "—",
     })
 
 df = pd.DataFrame(rows)
@@ -86,3 +89,27 @@ if hits + misses > 0:
         "near-random in HOSTILE. Material deviation in either direction "
         "deserves investigation."
     )
+
+    # R6 — discipline scorecard: how often did the user override the engine?
+    overrides = [r for r in rows if r.get("Overrode engine", "") == "🛑 YES"]
+    if overrides:
+        st.markdown("### Discipline scorecard")
+        n_over = len(overrides)
+        override_rets = [
+            float(str(r["Actual net%"]).rstrip("%"))
+            for r in overrides
+            if str(r["Actual net%"]).rstrip("%").lstrip("+-").replace(".", "").isdigit()
+        ]
+        avg_over = sum(override_rets) / len(override_rets) if override_rets else 0.0
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Trades opened against engine", n_over,
+                  delta=f"{n_over/len(rows)*100:.0f}% of total")
+        d2.metric("Avg net % when overriding", f"{avg_over:+.2f}%")
+        d3.metric("Override-vs-engine delta",
+                  f"{avg_over - sum(float(str(r['Actual net%']).rstrip('%')) for r in rows if str(r['Actual net%']).rstrip('%').lstrip('+-').replace('.', '').isdigit())/max(1,len(rows)):+.2f}pp")
+        st.caption(
+            "When the engine downgrades a setup (HOSTILE override, sub-65 score, "
+            "etc.) and you trade anyway, the realized return on those trades is "
+            "your single best honesty signal. If it's persistently negative vs "
+            "your engine-aligned trades, the discipline gap is costing you."
+        )

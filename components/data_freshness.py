@@ -106,10 +106,21 @@ def check_freshness(df: Optional[pd.DataFrame]) -> FreshnessVerdict:
                 FreshnessStatus.FRESH, "#00FF87",
                 f"Data fresh as of {date_str} (market open)",
             )
+        elif age == 1:
+            # During market hours, age=1 (yesterday's EOD) is the normal
+            # behaviour for free EOD feeds — yfinance doesn't have today's
+            # intraday data. Tell the user honestly instead of suggesting
+            # they can "fix" it.
+            status, color, msg = (
+                FreshnessStatus.END_OF_DAY, "#FFB800",
+                f"Yesterday's close ({date_str}) shown — yfinance is an EOD feed and only "
+                f"updates after market close. Today's live CMP comes from NSE's quote API at save time.",
+            )
         else:
             status, color, msg = (
                 FreshnessStatus.STALE, "#FF4D4D",
-                f"Data is {age} business day(s) behind during market hours — refresh or fix feed",
+                f"Data is {age} business days behind during market hours — feed appears broken. "
+                f"Try refreshing the page; if it persists, yfinance may be rate-limiting.",
             )
     else:
         if age == 0:

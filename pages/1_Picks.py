@@ -247,6 +247,43 @@ else:
             )
             from components.risk_governor import can_open_in_sector
             _sector_ok, _sector_reason = can_open_in_sector(state.get_positions(), sym)
+
+            # ── Correlation-aware Kelly suggestion ────────────────────────────
+            # If positions are open, compute candidate vs open-book correlations
+            # and surface a recommended qty that accounts for portfolio overlap.
+            from components.correlations import book_correlations
+            from nse_backtest.features.kelly_sizing import kelly_size
+            _open_pos = [p for p in state.get_positions() if not p.get("closed_date")]
+            _kelly_hint = None
+            if _open_pos and not sym.startswith("DEMO"):
+                try:
+                    _open_dfs = {p["symbol"]: fetch_multiple([p["symbol"]], start="2024-01-01").get(p["symbol"])
+                                 for p in _open_pos if p.get("symbol")}
+                    _open_dfs = {k: v for k, v in _open_dfs.items() if v is not None}
+                    _cand_df = fetch_multiple([sym], start="2024-01-01").get(sym)
+                    if _cand_df is not None and _open_dfs:
+                        _rhos = book_correlations(_cand_df, _open_dfs)
+                        if _rhos:
+                            _ks = kelly_size(
+                                calibrated_win_prob_pct=s.win_probability,
+                                risk_reward=s.risk_reward,
+                                entry_price=bought_price,
+                                stop_loss=sl_set,
+                                capital=state.get_capital(),
+                                max_risk_pct=state.get_risk_pct(),
+                                open_book_correlations=_rhos,
+                            )
+                            avg_rho = sum(_rhos) / len(_rhos)
+                            st.caption(
+                                f"📊 Open-book correlation: ρ_avg={avg_rho:+.2f} across "
+                                f"{len(_rhos)} held position(s). "
+                                f"Kelly suggests **{_ks.suggested_qty} shares** "
+                                f"({_ks.risk_pct_of_capital:.2f}% risk after ρ-haircut) "
+                                f"vs your current input of {bought_qty}."
+                            )
+                            _kelly_hint = _ks
+                except Exception as _e:
+                    pass
             # ── HOSTILE hard-block with friction override ──────────────────────
             # Held-out 2026 YTD with v2+Wave A returned -1.61% expectancy. On
             # HOSTILE tape this is the dominant outcome. We disable Save unless
@@ -293,6 +330,12 @@ else:
                     "score_at_entry": float(sc),
                     "tape_at_entry": _tape.regime if _tape else "UNKNOWN",
                     "invested": bought_price * bought_qty,
+                    "win_prob_at_entry": float(s.win_probability),
+                    "rr_at_entry": float(s.risk_reward),
+                    # R6 — track that this trade was opened DESPITE the engine
+                    # explicitly downgrading via the HOSTILE override path.
+                    "opened_against_engine": bool(_hostile_block),
+                    "override_phrase_used": _override_text.strip() if _hostile_block else "",
                 })
                 st.success(f"✅ {sym} saved to positions. Will appear on Decay Watch next refresh.")
         st.markdown("---")

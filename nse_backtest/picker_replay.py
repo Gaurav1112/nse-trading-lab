@@ -98,6 +98,14 @@ class TradeOutcome:
     score_at_entry: float
     win_probability_at_entry: float
     reasons: list[str] = field(default_factory=list)
+    # Per-dimension scorer breakdown — enables per-dim IC monitor
+    # (Lopez de Prado ch. 8: which signal is decaying?).
+    trend_score_at_entry: float = 0.0
+    momentum_score_at_entry: float = 0.0
+    volatility_score_at_entry: float = 0.0
+    volume_score_at_entry: float = 0.0
+    backtest_score_at_entry: float = 0.0
+    risk_score_at_entry: float = 0.0
 
 
 @dataclass
@@ -152,6 +160,13 @@ class BacktestReport:
                 "exit_reason": t.exit_reason,
                 "score": round(t.score_at_entry, 1),
                 "win_prob": round(t.win_probability_at_entry, 1),
+                # R4: per-dimension scores for IC monitor
+                "trend": round(t.trend_score_at_entry, 1),
+                "momentum": round(t.momentum_score_at_entry, 1),
+                "volatility": round(t.volatility_score_at_entry, 1),
+                "volume": round(t.volume_score_at_entry, 1),
+                "backtest": round(t.backtest_score_at_entry, 1),
+                "risk": round(t.risk_score_at_entry, 1),
             })
         return pd.DataFrame(rows)
 
@@ -346,6 +361,13 @@ def replay_picker(
                 outcome.score_at_entry = setup.score
                 outcome.win_probability_at_entry = setup.win_probability
                 outcome.reasons = setup.reasons[:5]
+                # R4: capture per-dimension scores for IC monitor
+                outcome.trend_score_at_entry = setup.trend_score
+                outcome.momentum_score_at_entry = setup.momentum_score
+                outcome.volatility_score_at_entry = setup.volatility_score
+                outcome.volume_score_at_entry = setup.volume_score
+                outcome.backtest_score_at_entry = setup.backtest_score
+                outcome.risk_score_at_entry = setup.risk_score
                 report.trades.append(outcome)
                 open_until[sym] = outcome.exit_date
 
