@@ -326,6 +326,12 @@ def replay_picker(
 
         open_until: dict[str, pd.Timestamp] = {}
 
+        # Pre-build a daily cross-sectional ranking cache: every N business
+        # days, rank the universe by 12M-ex-1M return. Keyed on the rank-date.
+        # Cheap because momentum_score does O(1) lookups in the df closes.
+        from .features.cross_sectional import rank_universe as _xs_rank_universe
+        xsec_cache: dict[pd.Timestamp, dict[str, "MomentumScore"]] = {}
+
         for d in all_dates:
             for sym, df in symbol_data.items():
                 if one_position_per_symbol and open_until.get(sym, pd.Timestamp.min) >= d:
@@ -337,6 +343,18 @@ def replay_picker(
                 # regime_gate / rs_vs_nifty evaluate against future nifty data and the
                 # walk-forward becomes look-ahead biased.
                 nifty_until = nifty_df.loc[:d] if nifty_df is not None else None
+
+                # F4 — Attach cross-sectional rank as df attribute. Cache per-day
+                # so we only rebuild the universe ranking once per trading day.
+                if d not in xsec_cache:
+                    snap = {s: df_.loc[:d] for s, df_ in symbol_data.items()
+                            if len(df_.loc[:d]) >= 252}
+                    xsec_cache[d] = _xs_rank_universe(snap) if snap else {}
+                ranking = xsec_cache[d].get(sym)
+                if ranking is not None:
+                    df_until.attrs["xsec_quintile"] = ranking.quintile
+                    df_until.attrs["xsec_pct"] = ranking.percentile_rank
+
                 try:
                     setup = analyze_swing(df_until, sym, capital, risk_pct, nifty_df=nifty_until)
                 except Exception:

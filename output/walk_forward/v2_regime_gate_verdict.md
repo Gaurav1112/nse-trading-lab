@@ -30,13 +30,13 @@ rs_vs_nifty additive booster and regime_block defensive downgrade.
 
 Multiple-testing tally: tested ~40 variants (rs_vs_nifty thresholds + regime_gate MIXED thresholds). Bonferroni-corrected per-test α = 0.0013 (from family α=0.05).
 
-Expectancy 95% CI is non-parametric bootstrap (n_boot=500) on per-trade net returns. Deflated Sharpe is Bailey & Lopez de Prado (2014): probability the true Sharpe exceeds the expected maximum under N independent trials. Prob Sharpe>0 is the classic probabilistic Sharpe ratio.
+Expectancy 95% CI is **stationary block bootstrap** (Politis-Romano 1994, n_boot=500) which respects autocorrelation from overlapping holding periods. Wider — and therefore more honest — than the naive IID bootstrap. on per-trade net returns. Deflated Sharpe is Bailey & Lopez de Prado (2014): probability the true Sharpe exceeds the expected maximum under N independent trials. Prob Sharpe>0 is the classic probabilistic Sharpe ratio.
 
 | Window | Engine | Expectancy 95% CI (low / mid / high) | Deflated Sharpe | Prob Sharpe>0 |
 |---|---|---|---|---|
-| 2023 | v1 | +6.69% / +8.34% / +10.01% | 0.00 | 1.00 |
-| 2023 | v2 | +5.63% / +7.51% / +9.40% | 0.00 | 1.00 |
-| 2024 | v1 | +0.53% / +2.08% / +3.80% | 0.00 | 0.99 |
-| 2024 | v2 | +0.34% / +1.99% / +3.78% | 0.00 | 0.99 |
-| 2025_to_today | v1 | -2.03% / -0.64% / +1.00% | 0.00 | 0.19 |
-| 2025_to_today | v2 | -1.52% / +0.26% / +1.85% | 0.00 | 0.61 |
+| 2023 | v1 | +6.09% / +8.34% / +10.85% | 0.00 | 1.00 |
+| 2023 | v2 | +5.26% / +7.51% / +9.95% | 0.00 | 1.00 |
+| 2024 | v1 | -1.05% / +2.08% / +4.76% | 0.00 | 0.99 |
+| 2024 | v2 | -0.96% / +1.99% / +4.63% | 0.00 | 0.99 |
+| 2025_to_today | v1 | -2.20% / -0.64% / +1.05% | 0.00 | 0.19 |
+| 2025_to_today | v2 | -1.31% / +0.26% / +1.95% | 0.00 | 0.61 |

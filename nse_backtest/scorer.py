@@ -753,6 +753,40 @@ def analyze_stock(df: pd.DataFrame, symbol: str, run_backtests: bool = True, nif
                 result.final_score = min(result.final_score + rs_boost, 100)
             adv_reasons.append(rs_reason)
 
+        # F4 — Cross-sectional momentum ranking (Asness-Moskowitz 2013).
+        # Held-out 2026 found this added 7 bps of drag in HOSTILE tape
+        # (-1.71% → -1.78%) — likely because relative-momentum leaders in a
+        # bear market often have farther to fall. Opt-in via env var: set
+        # NSE_CROSS_SECTIONAL=1 to enable. Disabled by default until at
+        # least one MIXED/TRENDING walk-forward window confirms a lift.
+        if os.environ.get("NSE_CROSS_SECTIONAL") != "1":
+            xsec_q = None  # short-circuit the application path below
+        from .features.cross_sectional import cross_sectional_boost, momentum_score
+        try:
+            # Single-symbol path (Analyze page, picker_replay without context):
+            # compute the raw signal but do not boost without universe context.
+            ms = momentum_score(df, symbol=symbol)
+            if ms is not None:
+                adv_reasons.append(
+                    f"Momentum (12M ex-1M): {ms.return_12m_ex_1m_pct:+.1f}% "
+                    "— rank vs universe requires cross-sectional context (see Watchlist page)"
+                )
+            # Universe-context path: caller attached df.attrs["xsec_quintile"]
+            # and df.attrs["xsec_pct"] before passing in.
+            if os.environ.get("NSE_CROSS_SECTIONAL") == "1":
+                xsec_q = df.attrs.get("xsec_quintile") if hasattr(df, "attrs") else None
+            if xsec_q is not None:
+                synthetic = momentum_score(df, symbol=symbol)
+                if synthetic is not None:
+                    synthetic.quintile = int(xsec_q)
+                    synthetic.percentile_rank = float(df.attrs.get("xsec_pct", 0))
+                    delta, reason = cross_sectional_boost(synthetic)
+                    if delta != 0:
+                        result.final_score = max(0.0, min(100.0, result.final_score + delta))
+                    adv_reasons.append(reason)
+        except Exception as e:
+            _log.debug("cross-sectional boost failed: %s", e)
+
         from .features.regime_gate import regime_action
         if nifty_df is not None:
             downgrade, regime_reason = regime_action(nifty_df, final_score=result.final_score)

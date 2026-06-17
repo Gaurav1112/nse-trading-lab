@@ -132,9 +132,10 @@ def expectancy_ci_bootstrap(
     ci: float = 0.95,
     seed: int = 17,
 ) -> tuple[float, float, float]:
-    """Non-parametric 95% CI on the mean of per-trade returns via bootstrap.
+    """Naive bootstrap CI on the mean of per-trade returns.
 
-    Returns (low, mid, high) — mid is the point estimate (sample mean).
+    Kept for backward compatibility — for new time-series CIs prefer
+    `stationary_block_bootstrap` below which respects autocorrelation.
     """
     r = _to_array(per_trade_returns)
     if len(r) == 0:
@@ -150,6 +151,96 @@ def expectancy_ci_bootstrap(
     mid = float(r.mean())
     high = float(np.quantile(means, 1.0 - alpha))
     return (low, mid, high)
+
+
+def stationary_block_bootstrap(
+    per_trade_returns: Iterable[float],
+    n_boot: int = 1000,
+    ci: float = 0.95,
+    mean_block_size: int | None = None,
+    seed: int = 17,
+) -> tuple[float, float, float]:
+    """Politis-Romano stationary block bootstrap (1994). Preserves the local
+    autocorrelation structure of a time series by resampling random-length
+    blocks with geometric block lengths.
+
+    For our use case (consecutive per-trade returns where overlapping holding
+    periods and regime clustering induce autocorrelation), this gives wider —
+    more honest — CIs than the naive IID bootstrap above.
+
+    mean_block_size defaults to ~sqrt(n) which is the standard automatic
+    rule for moderate n. The geometric distribution has p = 1 / mean_block_size.
+    """
+    r = _to_array(per_trade_returns)
+    n = len(r)
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+    if mean_block_size is None:
+        mean_block_size = max(2, int(np.ceil(np.sqrt(n))))
+    p = 1.0 / mean_block_size
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        out = []
+        while len(out) < n:
+            # Random starting index; circular wrap to handle ends.
+            start = int(rng.integers(0, n))
+            # Geometric block length; +1 ensures min 1.
+            block_len = int(rng.geometric(p))
+            for j in range(block_len):
+                out.append(r[(start + j) % n])
+                if len(out) >= n:
+                    break
+        means[i] = float(np.mean(out[:n]))
+    alpha = (1.0 - ci) / 2.0
+    low = float(np.quantile(means, alpha))
+    mid = float(r.mean())
+    high = float(np.quantile(means, 1.0 - alpha))
+    return (low, mid, high)
+
+
+def purged_kfold_indices(
+    n: int,
+    n_splits: int = 5,
+    embargo: int = 15,
+    seed: int = 17,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Generate train/eval index pairs using purged k-fold with embargo.
+
+    Lopez de Prado (Advances in FML, ch.7): when sample observations overlap
+    in time (e.g. our overlapping holding-period trades), random k-fold
+    cross-validation leaks information from train to eval. Two corrections:
+
+      1. PURGE: drop training observations whose holding period overlaps an
+         eval observation's holding period.
+      2. EMBARGO: drop additional training observations within `embargo`
+         positions immediately after the eval block, to prevent leakage from
+         look-back features.
+
+    Returns a list of (train_idx, eval_idx) numpy arrays. Caller is
+    responsible for ordering the input data chronologically.
+    """
+    if n_splits < 2 or n < n_splits:
+        raise ValueError(f"Need n_splits >= 2 and n >= n_splits (got n={n}, k={n_splits})")
+    rng = np.random.default_rng(seed)
+    indices = np.arange(n)
+    fold_size = n // n_splits
+    folds: list[tuple[np.ndarray, np.ndarray]] = []
+    for i in range(n_splits):
+        eval_start = i * fold_size
+        eval_end = (i + 1) * fold_size if i < n_splits - 1 else n
+        eval_idx = indices[eval_start:eval_end]
+        # Purge + embargo: drop anything within `embargo` of the eval block.
+        purge_start = max(0, eval_start - embargo)
+        purge_end = min(n, eval_end + embargo)
+        train_mask = np.ones(n, dtype=bool)
+        train_mask[purge_start:purge_end] = False
+        train_idx = indices[train_mask]
+        # Shuffle only the training set; preserve eval ordering for
+        # downstream walk-forward semantics.
+        rng.shuffle(train_idx)
+        folds.append((train_idx, eval_idx))
+    return folds
 
 
 def bonferroni_alpha(n_trials: int, family_alpha: float = 0.05) -> float:

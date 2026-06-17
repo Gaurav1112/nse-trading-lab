@@ -39,6 +39,16 @@ def init_session() -> None:
     _migrate_legacy_files_at_repo_root()
     _load_journal_from_disk()
     _load_positions_from_disk()
+    # One-time audit-log hash-chain backfill — runs silently on first session,
+    # idempotent on subsequent sessions. Ensures verify_audit_log() never
+    # fails on records written before the D2 commit introduced the chain.
+    if not st.session_state.get("_audit_migrated"):
+        try:
+            from components.risk_governor import migrate_legacy_audit_log
+            migrate_legacy_audit_log()
+        except Exception:
+            pass
+        st.session_state["_audit_migrated"] = True
 
 
 def get_capital() -> float:

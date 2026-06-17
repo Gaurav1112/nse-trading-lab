@@ -339,6 +339,53 @@ def log_verdict(
         pass  # Audit log failure must never break the user's trading flow.
 
 
+def migrate_legacy_audit_log() -> tuple[bool, str]:
+    """One-time backfill: read existing audit_log.jsonl, rewrite each line with
+    a prev_hash + self_hash chain so legacy records (written before D2) pass
+    verify_audit_log(). Idempotent — running it on an already-chained log is
+    a no-op.
+    """
+    if not _AUDIT_LOG_PATH.exists():
+        return True, "No audit log to migrate"
+    try:
+        original = _AUDIT_LOG_PATH.read_text(encoding="utf-8").strip().split("\n")
+    except OSError as e:
+        return False, f"Cannot read audit log: {e}"
+
+    if not original or not original[0]:
+        return True, "Audit log is empty — nothing to migrate"
+
+    migrated_lines: list[str] = []
+    prev_hash = ""
+    changed = False
+    for line in original:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # silently skip malformed
+        # Strip any old hash fields so we re-canonicalise from scratch
+        rec.pop("self_hash", None)
+        rec["prev_hash"] = prev_hash
+        rec["self_hash"] = _hash_record({k: v for k, v in rec.items() if k != "self_hash"})
+        # Detect whether the record already matched the chain (no change needed)
+        canonical = json.dumps(rec, sort_keys=True, separators=(",", ":"))
+        if canonical != line:
+            changed = True
+        migrated_lines.append(canonical)
+        prev_hash = rec["self_hash"]
+
+    if changed:
+        try:
+            _AUDIT_LOG_PATH.write_text("\n".join(migrated_lines) + "\n", encoding="utf-8")
+        except OSError as e:
+            return False, f"Cannot write migrated audit log: {e}"
+        return True, f"Migrated {len(migrated_lines)} record(s) — chain now verifiable"
+    return True, f"Audit log already chained ({len(migrated_lines)} records, no change)"
+
+
 def verify_audit_log() -> tuple[bool, str]:
     """Verify the hash chain integrity of audit_log.jsonl.
     Returns (ok, message). False on the first broken link, or True when clean.

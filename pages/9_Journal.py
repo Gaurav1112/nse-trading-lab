@@ -144,18 +144,29 @@ if journal:
     # ── Audit log integrity check (D2 — SEBI Reg §25 5yr tamper-evidence) ──
     st.markdown("---")
     st.markdown("### 🔒 Audit log integrity")
-    if st.button("Verify audit log hash chain", help="Replays sha256 over every record in audit_log.jsonl."):
+    ai1, ai2 = st.columns(2)
+    if ai1.button("Verify audit log hash chain",
+                  help="Replays sha256 over every record in audit_log.jsonl.",
+                  use_container_width=True):
         from components.risk_governor import verify_audit_log
         ok, msg = verify_audit_log()
         if ok:
             st.success(msg)
         else:
             st.error(msg)
+    if ai2.button("Migrate legacy entries (one-time)",
+                  help="Backfills prev_hash/self_hash on records written before tonight's commit.",
+                  use_container_width=True):
+        from components.risk_governor import migrate_legacy_audit_log
+        ok, msg = migrate_legacy_audit_log()
+        (st.success if ok else st.error)(msg)
     st.caption(
         "Every verdict the engine emits is written to `audit_log.jsonl` as a "
         "hash-chained record (prev_hash + self_hash). SEBI Research Analysts "
         "Regulations 2014 §25 requires 5-year retention with integrity. A "
-        "broken chain means the log was edited after the fact."
+        "broken chain means the log was edited after the fact. The migration "
+        "button is a one-time backfill for records written before the hash "
+        "chain was introduced — safe to re-run (idempotent)."
     )
 else:
     st.info("No trades recorded yet. Add your first trade above.")

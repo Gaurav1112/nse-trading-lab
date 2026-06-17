@@ -157,7 +157,24 @@ if st.button("🔍  Find Today's Best Stocks", type="primary", use_container_wid
             cap, risk = state.get_capital(), state.get_risk_pct()
             # v2 engine: thread Nifty data so regime_gate + rs_vs_nifty can fire.
             nifty_for_engine = _cached_nifty() if "Demo" not in scan_univ else None
+
+            # F4 — Cross-sectional momentum ranking across the scan universe.
+            # Compute once before the per-symbol loop so each analyze_swing
+            # call gets the rank context for free via df.attrs.
+            xsec_ranking = {}
+            if "Demo" not in scan_univ:
+                try:
+                    from nse_backtest.features.cross_sectional import rank_universe as _xs_rank
+                    xsec_ranking = _xs_rank(raw)
+                except Exception:
+                    xsec_ranking = {}
+
             for sym, sdf in raw.items():
+                # Attach the cross-sectional rank to the dataframe so the
+                # scorer can apply the top/bottom-quintile boost.
+                if sym in xsec_ranking:
+                    sdf.attrs["xsec_quintile"] = xsec_ranking[sym].quintile
+                    sdf.attrs["xsec_pct"] = xsec_ranking[sym].percentile_rank
                 if len(sdf) < 60:
                     continue
                 avg_vol = sdf["Volume"].rolling(20).mean().iloc[-1]

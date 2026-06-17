@@ -60,6 +60,42 @@ def correlation_haircut(correlations: list[float]) -> float:
     return 1.0 / denom if denom > 0 else 1.0
 
 
+def atr_vol_adjustment(
+    atr: float | None,
+    entry_price: float,
+    *,
+    target_vol_pct: float = 2.0,
+) -> float:
+    """Carver-style volatility targeting multiplier.
+
+    target_vol_pct is the *daily* vol we want each position to contribute,
+    expressed as % of entry_price. We compare the stock's actual ATR/price
+    to this target and return a multiplier in [0.25, 4.0] that the caller
+    applies to the Kelly suggested size:
+
+        actual_vol_pct = ATR(14) / entry_price * 100
+        multiplier = target_vol_pct / actual_vol_pct
+
+    A high-vol stock (actual > target) gets DOWN-sized; a low-vol stock
+    gets up-sized (capped). When ATR is unavailable or invalid, returns 1.0
+    (no adjustment).
+
+    NSE_BACKTEST_MODE=1 disables this in picker_replay because the gates
+    already capture per-trade ATR implicitly via the SL distance.
+    """
+    import os
+    if os.environ.get("NSE_BACKTEST_MODE") == "1":
+        return 1.0
+    if atr is None or atr <= 0 or entry_price <= 0:
+        return 1.0
+    actual_vol_pct = atr / entry_price * 100
+    if actual_vol_pct <= 0:
+        return 1.0
+    mult = target_vol_pct / actual_vol_pct
+    # Cap to a sensible range: ATR can be wild on illiquid names
+    return max(0.25, min(4.0, mult))
+
+
 def kelly_size(
     *,
     calibrated_win_prob_pct: float,
@@ -70,6 +106,7 @@ def kelly_size(
     max_risk_pct: float = 2.0,
     fraction: float = _DEFAULT_KELLY_FRACTION,
     open_book_correlations: list[float] | None = None,
+    atr: float | None = None,
 ) -> KellySizing:
     """Return KellySizing for the given setup. Never returns negative qty.
 
@@ -116,7 +153,10 @@ def kelly_size(
     # Correlation haircut — shrink Kelly when the candidate correlates with
     # existing open book. Carver-style: 1 / sqrt(1 + Σmax(0,ρ)).
     haircut = correlation_haircut(open_book_correlations or [])
-    fractional_after_haircut = fractional * haircut
+    # ATR-based vol targeting — high-vol stocks get smaller positions for the
+    # same nominal risk; portfolio targets constant daily vol.
+    vol_mult = atr_vol_adjustment(atr, entry_price)
+    fractional_after_haircut = fractional * haircut * vol_mult
     risk_pct = fractional_after_haircut * 100    # as percent of capital
     risk_pct = max(_MIN_RISK_PCT, min(risk_pct, max_risk_pct))
     risk_inr = capital * risk_pct / 100
@@ -128,6 +168,8 @@ def kelly_size(
     )
     if open_book_correlations:
         rationale += f", ρ-haircut={haircut:.3f}"
+    if vol_mult != 1.0:
+        rationale += f", ATR-vol={vol_mult:.2f}×"
     rationale += (
         f" → sized at {risk_pct:.2f}% of capital "
         f"({qty} shares risking ₹{qty * risk_per_share:,.0f})"

@@ -139,6 +139,15 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
         use_kelly = os.environ.get("NSE_POSITION_SIZER", "kelly").lower() == "kelly"
         if use_kelly and setup.signal == "BUY":
             from .features.vix_sizing import vix_size_multiplier
+            # F5 — Compute ATR(14) so Kelly can apply Carver-style vol targeting.
+            try:
+                from ta import volatility as _tavol
+                _atr = _tavol.AverageTrueRange(
+                    df["High"], df["Low"], df["Close"], 14
+                ).average_true_range().iloc[-1]
+                _atr = float(_atr) if _atr and float(_atr) > 0 else None
+            except Exception:
+                _atr = None
             ks = kelly_size(
                 calibrated_win_prob_pct=setup.win_probability,
                 risk_reward=setup.risk_reward,
@@ -146,6 +155,7 @@ def analyze_swing(df: pd.DataFrame, symbol: str, capital: float = 100000,
                 stop_loss=setup.stop_loss,
                 capital=capital,
                 max_risk_pct=risk_pct,
+                atr=_atr,
             )
             vix_mult, vix_reason = vix_size_multiplier()
             if ks.suggested_qty > 0:

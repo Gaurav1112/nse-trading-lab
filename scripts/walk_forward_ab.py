@@ -11,6 +11,7 @@ from nse_backtest.data import fetch_multiple, fetch_nifty50, NIFTY50_SYMBOLS
 from nse_backtest.picker_replay import replay_picker
 from nse_backtest.stats import (
     bonferroni_alpha, deflated_sharpe, expectancy_ci_bootstrap,
+    stationary_block_bootstrap,
 )
 
 OUT_DIR = Path("output/walk_forward")
@@ -39,7 +40,10 @@ def _stats_row(report):
     if len(rets) < 2:
         return {"ci_low": 0.0, "ci_mid": 0.0, "ci_high": 0.0,
                 "defl_sharpe": 0.0, "prob_sharpe": 0.0}
-    low, mid, high = expectancy_ci_bootstrap(rets, n_boot=500)
+    # Stationary block bootstrap (Politis-Romano 1994) — respects the
+    # autocorrelation induced by overlapping holding periods + regime
+    # clustering. Wider CIs than the naive IID bootstrap, but honest.
+    low, mid, high = stationary_block_bootstrap(rets, n_boot=500)
     ds = deflated_sharpe(rets, n_trials_tested=N_TRIALS_PHASE_2)
     return {
         "ci_low": low, "ci_mid": mid, "ci_high": high,
@@ -124,7 +128,10 @@ def main():
         f"Bonferroni-corrected per-test α = "
         f"{bonferroni_alpha(N_TRIALS_PHASE_2):.4f} (from family α=0.05).\n"
     )
-    lines.append("Expectancy 95% CI is non-parametric bootstrap (n_boot=500) "
+    lines.append("Expectancy 95% CI is **stationary block bootstrap** (Politis-Romano "
+                 "1994, n_boot=500) which respects autocorrelation from "
+                 "overlapping holding periods. Wider — and therefore more honest — "
+                 "than the naive IID bootstrap. "
                  "on per-trade net returns. Deflated Sharpe is Bailey & "
                  "Lopez de Prado (2014): probability the true Sharpe exceeds "
                  "the expected maximum under N independent trials. "

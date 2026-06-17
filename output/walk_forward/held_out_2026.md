@@ -21,7 +21,7 @@ Reproduce: `PYTHONPATH=. python3 scripts/validate_held_out_2026.py`
 | Engine | Trades | Win rate | Expectancy | Avg win | Avg loss |
 |---|---|---|---|---|---|
 | v1 | 181 | 36.5% | -0.983% | +4.24% | -3.98% |
-| v2 | 64 | 28.1% | -1.713% | +4.60% | -4.18% |
+| v2 | 70 | 28.6% | -1.777% | +4.89% | -4.44% |
 
 ## Interpretation guide
 

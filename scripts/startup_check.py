@@ -62,6 +62,23 @@ def check_tape_regime() -> tuple[bool, str]:
         return False, f"Tape check failed: {e}"
 
 
+def check_survivorship_bias() -> tuple[bool, str]:
+    """Always-on warning: NIFTY50_SYMBOLS is the CURRENT Nifty 50 roster.
+    Replaying it back to 2023 silently excludes names that got booted from
+    the index (often poor performers — survivorship bias UPWARD biases
+    backtests). Honest workaround would be historical index composition
+    from NSE Archives or a paid feed — neither is in free-tier scope.
+    """
+    return True, (
+        "ℹ️ Survivorship bias active: backtests use the 2026 Nifty 50 roster. "
+        "Names booted from the index pre-2026 are invisible — published "
+        "expectancy is biased upward by an unknown but non-zero amount. "
+        "Lopez de Prado ch.11 calls this the most overlooked bias in retail "
+        "quant. Fix requires historical NSE index composition (out of "
+        "free-tier scope; see docs/RESIDUAL_GAPS.md)."
+    )
+
+
 def check_bonus_adjustment_warning() -> tuple[bool, str]:
     """Indian compliance audit: yfinance MISSES Indian bonus-issue adjustments
     for ~48hrs post ex-date (RELIANCE/INFY have done this). Warn if any Nifty
@@ -99,6 +116,7 @@ def main():
         ("yfinance fetch", check_yfinance),
         ("Tape regime",    check_tape_regime),
         ("Bonus/split adj", check_bonus_adjustment_warning),
+        ("Survivorship",   check_survivorship_bias),
     ]
     all_ok = True
     print("=" * 60)
