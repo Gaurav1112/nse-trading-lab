@@ -94,6 +94,75 @@ def remove_position(i: int) -> None:
 def get_journal() -> list[dict]:
     return list(st.session_state.get("journal", []))
 
+
+def close_position(index: int, sell_price: float, sell_date: str | None = None,
+                   exit_reason: str = "", lesson: str = "") -> bool:
+    """Atomically move a position from positions[] → journal[] with the
+    realised exit price and computed P&L. The pre-mortem/post-mortem flow
+    (Track Record, Tear Sheet, Trade Replay, Discipline) depends on this.
+
+    Returns True on success, False if the index is invalid.
+    """
+    from datetime import datetime as _dt
+    positions = get_positions()
+    if index < 0 or index >= len(positions):
+        return False
+    p = positions[index]
+    if sell_price <= 0:
+        return False
+    sell_date = sell_date or _dt.now().strftime("%Y-%m-%d")
+    buy_price = float(p.get("buy_price", 0) or 0)
+    qty = int(p.get("qty", 0) or 0)
+    gross = (sell_price - buy_price) * qty
+    # Charges via the existing Zerodha cost model
+    try:
+        from components.tax_export import compute_charges
+        charges = compute_charges(buy_price, sell_price, qty)
+        net = gross - charges["total"]
+        charges_breakdown = charges
+    except Exception:
+        net = gross
+        charges_breakdown = {}
+    net_return_pct = (sell_price - buy_price) / buy_price * 100 if buy_price else 0.0
+
+    closed_trade = {
+        # Schema used by every consumer (track_record, trade_replay, etc.)
+        "symbol": p.get("symbol", ""),
+        "buy_price": buy_price,
+        "sell_price": float(sell_price),
+        "qty": qty,
+        "entry_date": str(p.get("entry_date") or p.get("date") or ""),
+        "closed_date": sell_date,
+        "exit_date": sell_date,
+        "exit_reason": exit_reason or "MANUAL_CLOSE",
+        "pnl": round(net, 2),
+        "gross_pnl": round(gross, 2),
+        "net_return_pct": round(net_return_pct, 3),
+        "charges_breakdown": charges_breakdown,
+        # Preserve every piece of pre-trade context for honest post-mortem
+        "score_at_entry": p.get("score_at_entry"),
+        "win_prob_at_entry": p.get("win_prob_at_entry"),
+        "rr_at_entry": p.get("rr_at_entry"),
+        "tape_at_entry": p.get("tape_at_entry"),
+        "thesis": p.get("thesis", ""),
+        "opened_against_engine": p.get("opened_against_engine", False),
+        "override_phrase_used": p.get("override_phrase_used", ""),
+        "lesson": lesson,
+        # Legacy "date" key (some older readers expect it)
+        "date": sell_date,
+        "status": "CLOSED",
+    }
+    # Atomic: remove from positions, append to journal
+    new_positions = positions[:index] + positions[index + 1:]
+    st.session_state["positions"] = new_positions
+    _save_positions_to_disk(new_positions)
+    journal = get_journal()
+    journal.append(closed_trade)
+    st.session_state["journal"] = journal
+    _save_journal_to_disk(journal)
+    return True
+
+
 def set_positions(positions: list[dict]) -> None:
     """Replace the positions list wholesale and persist to disk.
     Used by the Cloud restore flow — Streamlit Cloud's container filesystem

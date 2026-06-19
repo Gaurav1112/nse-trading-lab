@@ -183,4 +183,67 @@ for v, pos in verdicts:
         )
     # HOLD with no T-crossings: no extra card — the caption already says it.
 
+    # ── Close-position form: bridges positions[] → journal[] ────────────────
+    # Without this, the user has no UI to record the exit price. Track Record,
+    # Tear Sheet, Trade Replay, Discipline Scorecard all read from journal[]
+    # so a closed-in-Kite-but-not-recorded-here trade is invisible to the
+    # entire post-mortem ecosystem.
+    pos_index = next(
+        (i for i, p in enumerate(state.get_positions()) if p.get("symbol") == v.symbol),
+        None,
+    )
+    with st.expander(f"✅ I sold {v.symbol} on Kite — record the close"):
+        cf1, cf2, cf3 = st.columns(3)
+        actual_sell = cf1.number_input(
+            "Actual sell price ₹", value=float(cur),
+            min_value=0.01, format="%.2f", key=f"close_px_{v.symbol}",
+            help="The price you actually got on Kite (not the engine's target).",
+        )
+        sell_date = cf2.date_input("Sell date", key=f"close_date_{v.symbol}")
+        exit_reason = cf3.selectbox(
+            "Exit reason",
+            ["TARGET_1", "TARGET_2", "STOP_LOSS", "TRAIL_STOP",
+             "TIME_STOP", "SCORE_DECAY", "MANUAL_OVERRIDE", "TAPE_CHANGE"],
+            key=f"close_reason_{v.symbol}",
+        )
+        lesson = st.text_area(
+            "Lesson learned (optional but valuable)",
+            key=f"close_lesson_{v.symbol}", height=60,
+            placeholder=(
+                "e.g., 'panicked out before T1 hit because of HOSTILE tape, "
+                "should have stuck to plan'"
+            ),
+        )
+        # Preview the realised P&L before they confirm
+        _qty = int(pos_for_close.get("qty", 0) if (pos_for_close := state.get_positions()[pos_index]) else 0) if pos_index is not None else qty_held
+        _buy = float(pos_for_close.get("buy_price", v.entry_price)) if pos_index is not None else v.entry_price
+        _gross = (actual_sell - _buy) * _qty
+        try:
+            from components.tax_export import compute_charges
+            _ch = compute_charges(_buy, actual_sell, _qty)
+            _net = _gross - _ch["total"]
+            st.caption(
+                f"Preview: Gross ₹{_gross:+,.0f} — Charges ₹{_ch['total']:,.0f} = "
+                f"**Realised ₹{_net:+,.0f}**  ({((actual_sell - _buy) / _buy * 100):+.2f}% gross)"
+            )
+        except Exception:
+            st.caption(f"Preview: Gross ₹{_gross:+,.0f}")
+        if st.button(f"💾 Record close for {v.symbol}",
+                     type="primary", key=f"close_btn_{v.symbol}",
+                     use_container_width=True,
+                     disabled=(pos_index is None or actual_sell <= 0)):
+            ok = state.close_position(
+                pos_index, actual_sell,
+                sell_date=str(sell_date), exit_reason=exit_reason,
+                lesson=lesson.strip(),
+            )
+            if ok:
+                st.success(
+                    f"✅ {v.symbol} moved to journal. View it on Track Record, "
+                    "Tear Sheet, and Trade Replay."
+                )
+                st.rerun()
+            else:
+                st.error("Could not record close. Sell price must be > 0.")
+
     st.markdown("---")
