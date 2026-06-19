@@ -47,6 +47,7 @@ with st.sidebar:
         st.page_link("pages/3_Analyze.py", label="Analyze Symbol")
         st.page_link("pages/4_Screener.py", label="Screener")
         st.page_link("pages/16_Watchlist.py", label="Watchlist (always-on)")
+        st.page_link("pages/17_Intraday_Scanner.py", label="⚡ Intraday RSI Scanner")
 
     with st.expander("💼  Manage", expanded=False):
         st.page_link("pages/7_Positions.py", label="Positions")
