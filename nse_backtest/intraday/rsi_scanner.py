@@ -33,10 +33,17 @@ class IntradayHit:
     symbol: str
     current_price: float
     rsi: float
+    rsi_prev: float                  # prior bar's RSI — must be lower for "turning up"
     volume: int
+    volume_ratio: float              # vs 20-bar avg
     change_pct_today: float          # vs today's open
+    vwap: float                      # true session VWAP
     last_bar_ts: pd.Timestamp
     bars_in_session: int             # how many 15m bars used
+    # Gates output
+    passed_all_gates: bool
+    failed_gates: list[str]
+    sector_capitulation_warning: str = ""
 
 
 def _wilders_rsi(closes: pd.Series, period: int = 14) -> Optional[float]:
@@ -98,32 +105,58 @@ def _series_for(df, sym: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def _session_vwap(today_sub: pd.DataFrame) -> float:
+    """True session VWAP = Σ(typical × volume) / Σ(volume), reset each session.
+
+    Replaces the (H+L+C)/3-of-last-daily-bar 'fake VWAP' used in
+    analyze_intraday which was numerically meaningless.
+    """
+    if today_sub is None or len(today_sub) == 0:
+        return 0.0
+    if not all(c in today_sub.columns for c in ("High", "Low", "Close", "Volume")):
+        return 0.0
+    typical = (today_sub["High"] + today_sub["Low"] + today_sub["Close"]) / 3
+    vol_sum = today_sub["Volume"].sum()
+    if vol_sum <= 0:
+        return float(today_sub["Close"].iloc[-1])
+    return float((typical * today_sub["Volume"]).sum() / vol_sum)
+
+
 def scan_rsi(
     symbols: list[str],
     *,
     rsi_threshold: float = 15.0,
     rsi_period: int = 14,
     fetch_period: str = "5d",
+    apply_safety_gates: bool = True,
 ) -> list[IntradayHit]:
     """Scan `symbols` for 15-min RSI below `rsi_threshold`.
 
-    Returns the hits sorted by RSI ascending (most oversold first).
+    When apply_safety_gates=True (default), every hit is also evaluated by:
+    reversal candle, volume confirmation, bar freshness, time-of-day, and
+    sector-capitulation breadth. Hits that fail any gate are still returned
+    with failed_gates populated so the UI can show them DOWN-ranked rather
+    than hidden — transparency is the point.
     """
+    from .safety_gates import (
+        confirm_intraday_long, detect_sector_capitulation,
+    )
     df = _batch_fetch_15m(symbols, period=fetch_period)
     if df is None:
         return []
-    hits: list[IntradayHit] = []
+    # First pass: collect oversold candidates
+    candidates: list[tuple[IntradayHit, pd.DataFrame]] = []
     for sym in symbols:
         sub = _series_for(df, sym)
-        if sub is None or len(sub) < rsi_period + 1:
+        if sub is None or len(sub) < rsi_period + 2:  # +2 for rsi_prev
             continue
         closes = sub["Close"]
         rsi = _wilders_rsi(closes, period=rsi_period)
+        rsi_prev = _wilders_rsi(closes.iloc[:-1], period=rsi_period)
         if rsi is None or rsi >= rsi_threshold:
             continue
         last_close = float(closes.iloc[-1])
         last_ts = sub.index[-1]
-        # Today's session: bars from today (in IST)
         today_ist = datetime.now(tz=IST).date()
         try:
             today_idx = sub.index.tz_convert(IST).date if sub.index.tz else sub.index.date
@@ -139,10 +172,44 @@ def scan_rsi(
             change_pct = 0.0
             bars_today = 0
         volume = int(sub["Volume"].tail(1).iloc[0]) if "Volume" in sub.columns else 0
-        hits.append(IntradayHit(
-            symbol=sym, current_price=last_close, rsi=float(rsi),
-            volume=volume, change_pct_today=float(change_pct),
+        # Volume ratio for transparency
+        if len(sub) >= 21 and "Volume" in sub.columns:
+            avg20 = float(sub["Volume"].tail(21).iloc[:-1].mean())
+            vol_ratio = volume / avg20 if avg20 > 0 else 0
+        else:
+            vol_ratio = 0
+        vwap = _session_vwap(today_sub) if bars_today > 0 else float(closes.iloc[-1])
+        hit = IntradayHit(
+            symbol=sym, current_price=last_close,
+            rsi=float(rsi),
+            rsi_prev=float(rsi_prev) if rsi_prev is not None else float(rsi),
+            volume=volume, volume_ratio=round(vol_ratio, 2),
+            change_pct_today=float(change_pct), vwap=vwap,
             last_bar_ts=last_ts, bars_in_session=bars_today,
-        ))
-    hits.sort(key=lambda h: h.rsi)
+            passed_all_gates=False, failed_gates=[],
+        )
+        candidates.append((hit, sub))
+
+    # Second pass: sector capitulation across the hit set
+    capit_warnings = (
+        detect_sector_capitulation([h.symbol for h, _ in candidates])
+        if apply_safety_gates else {}
+    )
+
+    # Third pass: per-hit safety gates
+    hits: list[IntradayHit] = []
+    for h, sub in candidates:
+        if apply_safety_gates:
+            verdict = confirm_intraday_long(
+                sub, h.last_bar_ts,
+                in_sector_capitulation=(h.symbol in capit_warnings),
+            )
+            h.passed_all_gates = verdict.passed_all
+            h.failed_gates = verdict.failed_gates
+            h.sector_capitulation_warning = capit_warnings.get(h.symbol, "")
+        else:
+            h.passed_all_gates = True
+        hits.append(h)
+    # Sort: passed-gates first, then by RSI ascending
+    hits.sort(key=lambda h: (not h.passed_all_gates, h.rsi))
     return hits

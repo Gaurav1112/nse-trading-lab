@@ -63,14 +63,58 @@ def warning_card(text: str) -> str:
     )
 
 
-def zerodha_steps(sym: str, entry: float, sl: float, shares: int,
-                  target_1: float = 0, target_2: float = 0) -> str:
-    """Complete BUY workflow: limit-buy, SL-M, T1 partial GTT (50%), T2 GTT.
-
-    Renders the four GTT/order placements as numbered steps so the user can
-    set everything in Kite in 60 seconds. If target_1/target_2 not provided,
-    falls back to the original 4-step (no GTT) version for backward compat.
+def zerodha_steps_intraday(sym: str, entry: float, sl: float, shares: int,
+                            target: float = 0) -> str:
+    """Intraday-specific Zerodha workflow: MIS product (intraday margin,
+    auto-square-off at 15:15 IST) + Cover Order (CO) or SL-Limit so SL is
+    placed atomically with entry. CRITICAL: do NOT use CNC for intraday —
+    CNC means delivery (full cash, T+1 settlement, NO auto-square-off, you'd
+    be holding overnight with gap risk).
     """
+    rr_text = f" → target ₹{target:,.2f}" if target > 0 else ""
+    return (
+        f'<div class="steps" style="border-left:4px solid #00D4FF;'
+        f'background:#0a1a2a;padding:14px 18px;border-radius:10px">'
+        f'<b>⚡ Intraday on Zerodha Kite (MIS + Cover Order)</b>'
+        f'<div style="font-size:12px;color:#8DD7FF;margin:6px 0">'
+        f'<b>Product = MIS</b> (intraday margin, auto-squareoff 15:15 IST). '
+        f'<b>Cover Order</b> places SL atomically with entry — Kite\'s safest '
+        f'intraday wrapper.'
+        f'</div>'
+        f'<ol>'
+        f'<li>Open Kite → Search <b>{sym}</b></li>'
+        f'<li>Tap <b>B</b> → Product: <b>MIS</b> → Type: <b>CO</b> (Cover Order)</li>'
+        f'<li>Buy price: <b>LIMIT ₹{entry:,.2f}</b> · Qty: <b>{shares}</b></li>'
+        f'<li>SL trigger: <b>₹{sl:,.2f}</b>{rr_text}</li>'
+        f'<li>Submit. CO places both legs atomically.</li>'
+        '</ol>'
+        '<span style="color:#FF9050;font-size:13px">'
+        '⚠️ MIS auto-squares-off at 15:15 IST. Close manually before that '
+        '(or your position fills at the worst price of the day). '
+        'For target: place a separate LIMIT sell order after fill.</span>'
+        '</div>'
+    )
+
+
+def zerodha_steps(sym: str, entry: float, sl: float, shares: int,
+                  target_1: float = 0, target_2: float = 0,
+                  mode: str = "SWING") -> str:
+    """Complete BUY workflow. Branches by mode:
+
+      - SWING / POSITIONAL / LONGTERM → CNC + LIMIT + SL-M + T1/T2 GTT.
+        Holds overnight (delivery). T+1 settlement. STT 0.1% sell-only.
+
+      - INTRADAY → MIS + CO (Cover Order). Auto-squared at 15:15 IST.
+        STT 0.025%. Intraday margin (5x). No T1/T2 GTT — book targets manually
+        because CO already binds the SL atomically.
+
+    The CNC default existed for swing trades. Calling this with mode="INTRADAY"
+    on an intraday signal previously emitted CNC steps — that bug forced the
+    user to hold an intraday loss overnight as a delivery position. This
+    function now refuses to be misused.
+    """
+    if mode.upper() == "INTRADAY":
+        return zerodha_steps_intraday(sym, entry, sl, shares, target=target_1)
     half = max(1, shares // 2)
     rest = max(1, shares - half)
     base = (
