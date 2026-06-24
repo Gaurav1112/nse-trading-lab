@@ -137,10 +137,25 @@ def _cached_scan(universe_key: tuple[str, ...], threshold: float, period: int):
     return scan_rsi(list(universe_key), rsi_threshold=threshold, rsi_period=period)
 
 
-# ── 5. SCAN BUTTON (gated by tape + time-of-day) ───────────────────────
-scan_disabled = (not _override_ok) or (not _tod_ok)
-if st.button("🔍 Scan now", type="primary", use_container_width=True,
-             disabled=scan_disabled):
+# ── 5. SCAN BUTTON ─────────────────────────────────────────────────────
+# Design principle: SCANNING is information-gathering and should always be
+# allowed (you may want to scan at 09:25 to be ready for 09:30). What we
+# gate hard is ACTION: the order-steps card at the bottom only renders for
+# the top candidate when both time-of-day AND tape allow entry.
+# Previously the Scan button was disabled in any block — that broke the
+# user's workflow ("unable to scan"). Now: scan freely, act carefully.
+scan_blocked_reasons = []
+if _hostile and not _override_ok:
+    scan_blocked_reasons.append("HOSTILE tape — type override phrase above to enable order placement")
+if not _tod_ok:
+    scan_blocked_reasons.append(f"Time-of-day: {_tod_msg}")
+if scan_blocked_reasons:
+    st.info(
+        "ℹ️ **Scan is enabled** — you can see oversold candidates. "
+        "Order placement is blocked: " + " · ".join(scan_blocked_reasons) + ". "
+        "Use the scan to build your watchlist; act only when both blocks clear."
+    )
+if st.button("🔍 Scan now", type="primary", use_container_width=True):
     if universe_label == "Nifty 50":
         syms = NIFTY50_SYMBOLS
     elif universe_label == "Nifty 100":
@@ -217,22 +232,34 @@ elif hits:
         capit = {h.symbol: h.sector_capitulation_warning for h in passed if h.sector_capitulation_warning}
         for sym, warn in capit.items():
             st.warning(f"**{sym}**: {warn}")
-        # MIS+CO order steps for the FIRST passed hit
+        # MIS+CO order steps for the FIRST passed hit — gated by tape +
+        # time-of-day. If either blocker is active, show why action is
+        # blocked instead of rendering the order card.
         top = passed[0]
         st.markdown("---")
-        st.markdown("### 📋 Suggested order (top candidate)")
-        # Tight intraday SL: 0.75x of typical bar range as a placeholder
-        intraday_sl = round(top.current_price * 0.992, 2)  # ~0.8% stop floor
-        intraday_target = round(top.current_price * 1.015, 2)  # ~1.5% target
-        # Sensible default quantity (caller can override on Kite)
-        default_qty = max(1, int(state.get_capital() * 0.005 / max(0.01, top.current_price - intraday_sl)))
-        st.markdown(
-            cards.zerodha_steps_intraday(
-                top.symbol, top.current_price, intraday_sl,
-                default_qty, target=intraday_target,
-            ),
-            unsafe_allow_html=True,
-        )
+        if scan_blocked_reasons:
+            st.error(
+                "📋 **Order placement blocked.** Top candidate is "
+                f"**{top.symbol}** (RSI {top.rsi:.1f}, CMP ₹{top.current_price:,.2f}) "
+                "but action is gated: " + " · ".join(scan_blocked_reasons)
+                + ". Add this to your watchlist for when the blocks clear."
+            )
+        else:
+            st.markdown("### 📋 Suggested order (top candidate)")
+            # Tight intraday SL: 0.75x of typical bar range as a placeholder
+            intraday_sl = round(top.current_price * 0.992, 2)  # ~0.8% stop floor
+            intraday_target = round(top.current_price * 1.015, 2)  # ~1.5% target
+            default_qty = max(
+                1,
+                int(state.get_capital() * 0.005 / max(0.01, top.current_price - intraday_sl))
+            )
+            st.markdown(
+                cards.zerodha_steps_intraday(
+                    top.symbol, top.current_price, intraday_sl,
+                    default_qty, target=intraday_target,
+                ),
+                unsafe_allow_html=True,
+            )
 
     if failed and show_failed:
         _render_hits(failed, title=f"❌ Failed gates ({len(failed)} hidden — visible because toggle on)")
