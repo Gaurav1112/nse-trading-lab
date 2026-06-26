@@ -34,8 +34,12 @@ st.divider()
 
 if snap.cumulative_returns_pct:
     st.markdown("### Cumulative %  (trade-by-trade)")
-    df = pd.DataFrame({"cumulative_%": snap.cumulative_returns_pct})
-    st.line_chart(df)
+    df = pd.DataFrame({"Cumulative return (%)": snap.cumulative_returns_pct})
+    df.index.name = "Trade index"
+    st.line_chart(
+        df, x_label="Trade index (chronological)", y_label="Cumulative return (%)",
+        height=380,
+    )
 else:
     st.info("📊 Your P&L curve will appear here after your first closed trade.")
 
@@ -77,9 +81,15 @@ if ts.n_closed > 0:
 
     # Equity curve (PnL %, trade by trade)
     if ts.equity_curve:
-        st.markdown("### Equity curve (trade index → cumulative %)")
-        df_eq = pd.DataFrame(ts.equity_curve, columns=["date", "cumulative_%"])
-        st.line_chart(df_eq.set_index("date"))
+        st.markdown("### Equity curve (cumulative % over time)")
+        df_eq = pd.DataFrame(
+            ts.equity_curve, columns=["Trade close date", "Cumulative return (%)"],
+        )
+        st.line_chart(
+            df_eq.set_index("Trade close date"),
+            x_label="Trade close date", y_label="Cumulative return (%)",
+            height=380,
+        )
 
     if ts.notes:
         st.markdown("### Tear-sheet notes")

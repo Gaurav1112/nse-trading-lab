@@ -11,8 +11,15 @@ def make_candlestick(df: pd.DataFrame, score=None, title: str = "", period: int 
     e50 = close.ewm(span=50, adjust=False).mean()
     e200 = close.ewm(span=200, adjust=False).mean()
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                        row_heights=[0.6, 0.2, 0.2])
+    # Subplot row titles — without these, the 3 panels (Price / RSI / Volume)
+    # rendered as anonymous strips with no indication of what each one shows.
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        row_heights=[0.6, 0.2, 0.2],
+        subplot_titles=("Price (₹) · EMA 20/50/200 · Bollinger 20,2",
+                        "RSI (14) · OB > 70, OS < 30",
+                        "Volume (green = close ≥ open)"),
+    )
 
     fig.add_trace(go.Candlestick(x=d.index, open=d["Open"], high=d["High"], low=d["Low"],
                                   close=close, name="Price",
@@ -54,13 +61,24 @@ def make_candlestick(df: pd.DataFrame, score=None, title: str = "", period: int 
     vol_colors = ["#00FF87" if c >= o else "#FF3355" for c, o in zip(d["Close"], d["Open"])]
     fig.add_trace(go.Bar(x=d.index, y=d["Volume"], marker_color=vol_colors, showlegend=False), row=3, col=1)
 
-    fig.update_layout(template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
-                      title=dict(text=title, font=dict(color="#E8EDF5", size=14)),
-                      margin=dict(l=10, r=10, t=40, b=10), height=720,
-                      xaxis_rangeslider_visible=False, hovermode="x unified",
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    fig.update_yaxes(gridcolor="#1A2540", zerolinecolor="#1E3A5F")
-    fig.update_xaxes(gridcolor="#1A2540", rangebreaks=[dict(bounds=["sat","mon"])])
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
+        title=dict(text=title, font=dict(color="#E8EDF5", size=14)),
+        margin=dict(l=60, r=10, t=70, b=50), height=760,
+        xaxis_rangeslider_visible=False, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
+    )
+    # Per-row axis labels — each y-axis gets its own descriptor.
+    fig.update_yaxes(title_text="Price (₹)", gridcolor="#1A2540", zerolinecolor="#1E3A5F",
+                     row=1, col=1, tickprefix="₹")
+    fig.update_yaxes(title_text="RSI", gridcolor="#1A2540", row=2, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="Volume", gridcolor="#1A2540", row=3, col=1,
+                     tickformat=".2s")  # 1.2M, 800k etc.
+    fig.update_xaxes(gridcolor="#1A2540", rangebreaks=[dict(bounds=["sat", "mon"])])
+    fig.update_xaxes(title_text="Date", row=3, col=1)
+    # Style subplot annotations
+    for ann in fig["layout"]["annotations"]:
+        ann["font"] = dict(color="#C9D5E0", size=12)
     return fig
 
 
@@ -81,11 +99,15 @@ def make_equity_curve(results_list: list[dict], labels: list[str] | None = None)
         if bh is not None and not (hasattr(bh, "empty") and bh.empty):
             fig.add_trace(go.Scatter(x=bh.index, y=bh.values,
                                       line=dict(color="#64748b", width=1, dash="dot"), name="Buy & Hold"))
-    fig.update_layout(template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
-                      title=dict(text="Strategy Equity Curves", font=dict(color="#E8EDF5")),
-                      margin=dict(l=10,r=10,t=40,b=10), height=450, hovermode="x unified")
-    fig.update_yaxes(gridcolor="#1A2540", tickprefix="₹")
-    fig.update_xaxes(gridcolor="#1A2540")
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
+        title=dict(text="Strategy equity curves vs Buy & Hold",
+                   font=dict(color="#E8EDF5")),
+        margin=dict(l=70, r=10, t=50, b=50), height=470, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_yaxes(title_text="Equity (₹)", gridcolor="#1A2540", tickprefix="₹")
+    fig.update_xaxes(title_text="Date", gridcolor="#1A2540")
     return fig
 
 
@@ -97,10 +119,19 @@ def make_sector_heat(sector_data: dict[str, float | None]) -> go.Figure:
     fig = go.Figure(go.Bar(x=names, y=values, marker_color=colors,
                             text=text, textposition="outside",
                             textfont=dict(color="#E8EDF5", size=11)))
-    fig.update_layout(template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
-                      title=dict(text="NSE Sector Performance (Today)", font=dict(color="#E8EDF5", size=13)),
-                      margin=dict(l=10,r=10,t=40,b=80), height=320, showlegend=False,
-                      yaxis=dict(ticksuffix="%", gridcolor="#1A2540", zerolinecolor="#475569"),
-                      xaxis=dict(tickangle=-20, gridcolor="#1A2540"))
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#050A14", plot_bgcolor="#050A14",
+        title=dict(text="NSE Sector Performance — daily % change",
+                   font=dict(color="#E8EDF5", size=13)),
+        margin=dict(l=70, r=10, t=50, b=110), height=360, showlegend=False,
+        yaxis=dict(
+            title=dict(text="Daily change (%)", font=dict(color="#C9D5E0", size=12)),
+            ticksuffix="%", gridcolor="#1A2540", zerolinecolor="#475569",
+        ),
+        xaxis=dict(
+            title=dict(text="Sector", font=dict(color="#C9D5E0", size=12)),
+            tickangle=-25, gridcolor="#1A2540",
+        ),
+    )
     fig.add_hline(y=0, line=dict(color="#475569", width=1))
     return fig

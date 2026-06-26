@@ -66,7 +66,17 @@ st.markdown("## Nifty 50 — last 250 sessions")
 chart_df = nifty.tail(250)[["Close"]].copy()
 chart_df["50 EMA"] = chart_df["Close"].ewm(span=50, adjust=False).mean()
 chart_df["200 EMA"] = chart_df["Close"].ewm(span=200, adjust=False).mean()
-st.line_chart(chart_df)
+chart_df.index.name = "Date"
+chart_df = chart_df.rename(columns={"Close": "Nifty 50 close (₹)"})
+st.line_chart(
+    chart_df, x_label="Date", y_label="Nifty 50 close (₹)",
+    height=420,
+)
+st.caption(
+    "Lines: actual close (blue), 50-day EMA (orange), 200-day EMA (red). "
+    "The regime classifier above is computed from the gap between these "
+    "EMAs and the slope of the 200-EMA."
+)
 
 st.markdown("---")
 st.markdown("## 🎯 Win-probability calibration")
