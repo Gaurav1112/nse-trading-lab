@@ -74,8 +74,13 @@ if ts.n_closed > 0:
             if val > 0: return "background-color:#16361f;color:#A0FFC8"
             if val > -1: return "background-color:#3a1f1f;color:#FFB0B0"
             return "background-color:#4d0a0a;color:#FF5050"
+        # pandas 2.2 renamed Styler.applymap → Styler.map (DataFrame.applymap
+        # → DataFrame.map). Use map for forward compat with the version on
+        # Streamlit Cloud; fall back to applymap if running an older pandas.
+        styler = df_m.style
+        _styler_apply = getattr(styler, "map", None) or getattr(styler, "applymap")
         st.dataframe(
-            df_m.style.applymap(_hl, subset=["Net %"]).format({"Net %": "{:+.2f}"}),
+            _styler_apply(_hl, subset=["Net %"]).format({"Net %": "{:+.2f}"}),
             use_container_width=True, hide_index=True,
         )
 

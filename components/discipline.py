@@ -168,6 +168,14 @@ def post_mortem(trade: dict) -> list[str]:
         out.append("🛑 You opened this against the engine's downgrade. "
                    "Track override-vs-engine ROI on Trade Replay to see if your judgment overlay is adding value.")
 
+    # Thesis vs invalidation (AITrader-style discipline review)
+    invalidation = trade.get("invalidation", "")
+    if invalidation:
+        out.append(f"❌ Pre-committed invalidation: \"{invalidation[:120]}\". "
+                   "Honest review: did this condition trigger BEFORE the SL fired? If yes, "
+                   "and you didn't exit early, that's an emotional override — log it in "
+                   "the lesson field and adjust your discipline for next time.")
+
     # Time-on-trade context
     if held_d is not None:
         if ret < 0 and held_d > 12:

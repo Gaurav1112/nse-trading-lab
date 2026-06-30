@@ -324,6 +324,26 @@ else:
                 placeholder="e.g. score 78, breakout above 200EMA on 2x volume, tape MIXED, willing to risk ₹2k for ₹6k target",
                 height=80,
             )
+            # ── Invalidation: borrowed from AITrader CONSTITUTION §2 ──
+            # "Every published idea must state what would prove the thesis
+            # wrong, not just where the price stop sits." Discipline lift:
+            # forces the user to pre-commit an exit condition independent of
+            # price — e.g., "if Nifty closes below 23,500 my thesis is gone"
+            # vs the mechanical SL at ₹X. Post-mortem on Trade Replay will
+            # surface whether the invalidation condition triggered before the SL.
+            invalidation = st.text_area(
+                "❌ Invalidation — what would prove this thesis WRONG? (min 20 chars)",
+                key=f"inv_{sym}_{rank}",
+                placeholder="e.g. close below 200-EMA, Nifty breaks 23,500, sector index goes red, broader market gap-down >2%",
+                height=80,
+                help=(
+                    "Separate from the price stop-loss. The thesis can be "
+                    "invalidated even before price hits SL — e.g., a regime "
+                    "shift, sector breakdown, or news event. Writing this "
+                    "BEFORE entry forces System-2 thinking and pre-commits an "
+                    "exit condition you can honor unemotionally later."
+                ),
+            )
             from components.risk_governor import can_open_in_sector
             _sector_ok, _sector_reason = can_open_in_sector(state.get_positions(), sym)
 
@@ -399,6 +419,7 @@ else:
             if st.button(f"💾 Save {sym}", key=f"save_{sym}_{rank}", use_container_width=True,
                          disabled=(not _risk.can_trade) or (not _sector_ok)
                                   or len(thesis.strip()) < 20
+                                  or len(invalidation.strip()) < 20
                                   or (not _override_ok)
                                   or (not _confirm)):
                 state.add_position({
@@ -410,6 +431,7 @@ else:
                     "target_2": float(s.target_2),
                     "entry_date": datetime.now().strftime("%Y-%m-%d"),
                     "thesis": thesis.strip(),
+                    "invalidation": invalidation.strip(),
                     "score_at_entry": float(sc),
                     "tape_at_entry": _tape.regime if _tape else "UNKNOWN",
                     "invested": bought_price * bought_qty,
