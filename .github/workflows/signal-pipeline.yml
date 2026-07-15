@@ -1,0 +1,52 @@
+name: signal-pipeline
+on:
+  schedule:
+    # NSE 09:15–15:30 IST = 03:45–10:00 UTC, Mon–Fri
+    - cron: '*/5 3-10 * * 1-5'
+  workflow_dispatch: {}
+
+concurrency:
+  group: signal-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Checkout code repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Setup SSH for signals repo
+        env:
+          DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/signals_key
+          chmod 600 ~/.ssh/signals_key
+          echo "Host github-signals" >> ~/.ssh/config
+          echo "  HostName github.com" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/signals_key" >> ~/.ssh/config
+          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
+
+      - name: Clone signals repo
+        env:
+          SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
+        run: |
+          # Rewrite SSH host to use our aliased key
+          SIGNALS_SSH="${SIGNALS_REPO_URL/git@github.com/git@github-signals}"
+          git clone "$SIGNALS_SSH" /tmp/signals
+
+      - name: Hello world
+        run: |
+          echo "Pipeline hello — $(date -u +%FT%TZ)"
+          ls -la /tmp/signals/state
