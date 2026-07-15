@@ -4,9 +4,11 @@ from components import theme, state
 from components.state_reader import read_latest, read_health
 from components.regime_cockpit import render_cockpit
 from components.trust_badge import render_badge
+from components.pwa_setup import inject_pwa
 
 st.set_page_config(page_title="Today | Trading Lab", page_icon="🎯", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
+inject_pwa()
 state.init_session()
 
 st.markdown("# 🎯 Today")
