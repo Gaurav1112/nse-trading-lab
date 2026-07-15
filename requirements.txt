@@ -11,3 +11,5 @@ requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 scikit-learn>=1.4,<2
 fyers-apiv3>=3.1.7
+pywebpush>=1.14.0
+py-vapid>=1.9.0
