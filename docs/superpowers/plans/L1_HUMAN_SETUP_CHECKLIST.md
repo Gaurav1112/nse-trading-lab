@@ -118,6 +118,23 @@ gh secret list | grep VAPID_
 
 ---
 
+## Setup Step 4 — Deploy-time PWA static base (T1.14 in plan)
+
+Estimated time: 2 min. Configure Streamlit host environment.
+
+On your Streamlit Cloud (or self-hosted) instance, set the following environment variable:
+
+```bash
+PWA_STATIC_BASE=https://raw.githubusercontent.com/<your-github-username>/nse-trading-lab/main/static
+```
+
+Replace `<your-github-username>` with your actual GitHub username (e.g., `gauge123`). This tells the PWA loader where to find service-worker.js and manifest.json at deploy time.
+
+**Verification:**
+Check Streamlit deployment settings → Environment variables → confirm `PWA_STATIC_BASE` is set correctly.
+
+---
+
 ## When done: come back and say "L1 setup done"
 
 I'll then:

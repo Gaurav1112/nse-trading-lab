@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import sys
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,21 @@ def main() -> int:
         log.info("Regime: %s · %d signals", batch.regime, len(batch.swing_signals))
 
         persist_batch(batch, signals_path, push=True)
+        if batch.swing_signals:
+            subs_path = signals_path / "state" / "push_subscriptions.json"
+            if subs_path.exists():
+                subs = json.loads(subs_path.read_text())
+                from pipeline.push import send_push
+                for sig in batch.swing_signals:
+                    payload = {
+                        "title": f"{sig.mode} · {sig.action} {sig.symbol}",
+                        "body": f"Entry ₹{sig.entry:.2f} · SL {sig.stop_loss:.2f} · Tgt {sig.target:.2f}",
+                        "tag": sig.signal_id,
+                        "data": {"url": f"https://kite.zerodha.com/chart/web/ciq/NSE/{sig.symbol}/day"},
+                    }
+                    failed = send_push(payload, subs)
+                    if failed:
+                        errors.append(f"push_failed: {len(failed)} endpoints")
         write_health(health_path, "healthy" if not errors else "degraded", errors, now)
         persist_health_only(signals_path)
         return 0

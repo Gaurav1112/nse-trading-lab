@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import streamlit as st
 
 
@@ -17,6 +17,8 @@ def classify(health: dict, now: datetime) -> tuple[str, str]:
     if ts_str is None:
         return "dead", "Pipeline has never run"
     last = datetime.fromisoformat(ts_str)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
     age = now - last
     if age > timedelta(minutes=30):
         return "dead", f"Last run {int(age.total_seconds()/60)} min ago — DO NOT TRADE off cached signals"
