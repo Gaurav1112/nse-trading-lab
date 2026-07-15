@@ -1,0 +1,66 @@
+name: heartbeat
+on:
+  schedule:
+    # Every 15 min during market hours + 30 min buffer
+    - cron: '*/15 3-11 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pywebpush
+        run: pip install pywebpush py-vapid requests
+      - name: Setup SSH for signals repo
+        env:
+          DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/signals_key
+          chmod 600 ~/.ssh/signals_key
+          printf "Host github-signals\n  HostName github.com\n  IdentityFile ~/.ssh/signals_key\n  StrictHostKeyChecking no\n" >> ~/.ssh/config
+      - name: Clone signals repo
+        env:
+          SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
+        run: |
+          SSH_URL="${SIGNALS_REPO_URL/git@github.com/git@github-signals}"
+          git clone "$SSH_URL" /tmp/signals
+      - name: Check + alert
+        env:
+          VAPID_PRIVATE_KEY_PEM: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_CONTACT: ${{ secrets.VAPID_CONTACT }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, sys
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+          from pywebpush import webpush
+
+          h = json.loads(Path("/tmp/signals/state/pipeline_health.json").read_text())
+          ts = h.get("last_run_ts")
+          if ts is None:
+              sys.exit(0)
+          last = datetime.fromisoformat(ts)
+          age = datetime.now(timezone.utc) - last
+          if age <= timedelta(minutes=15):
+              print(f"OK — last run {age.total_seconds()/60:.1f} min ago")
+              sys.exit(0)
+          subs_path = Path("/tmp/signals/state/push_subscriptions.json")
+          if not subs_path.exists():
+              print("Pipeline dead but no push subscribers")
+              sys.exit(1)
+          subs = json.loads(subs_path.read_text())
+          payload = json.dumps({"title": "🛑 Pipeline dead", "body": f"Last run {int(age.total_seconds()/60)} min ago"})
+          for s in subs:
+              try:
+                  webpush(subscription_info=s, data=payload,
+                          vapid_private_key=os.environ["VAPID_PRIVATE_KEY_PEM"],
+                          vapid_claims={"sub": os.environ["VAPID_CONTACT"]})
+              except Exception as e:
+                  print(f"push failed: {e}")
+          PYEOF

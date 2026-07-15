@@ -31,3 +31,6 @@ st.markdown(f"Signals in this batch: **{len(latest.get('signals', []))}**")
 
 for s in latest.get("signals", []):
     st.markdown(f"- **{s['symbol']}** · {s['action']} @ ₹{s['entry']:.2f} · SL {s['stop_loss']:.2f} · Tgt {s['target']:.2f}")
+
+st.markdown("---")
+st.caption("🔧 Advanced pages (Dashboard, Learn, Settings) are hidden from main nav. Access via URL: `?page=Advanced/2_Dashboard` etc.")
