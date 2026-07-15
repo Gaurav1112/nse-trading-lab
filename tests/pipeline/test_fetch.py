@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pipeline.fetch import fetch_fyers_ltp, fetch_yfinance_ltp, fetch_ltp_with_fallback, LTPQuote, FyersAuthError
 
