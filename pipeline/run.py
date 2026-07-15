@@ -41,7 +41,7 @@ def main() -> int:
         log.info("Fetching Nifty daily bars for regime…")
         nifty_df = fetch_nifty50(start="2022-01-01")
 
-        batch = compute_signal_batch(fresh, nifty_df)
+        batch = compute_signal_batch(fresh, nifty_df, quote_source=source)
         log.info("Regime: %s · %d signals", batch.regime, len(batch.swing_signals))
 
         persist_batch(batch, signals_path, push=True)

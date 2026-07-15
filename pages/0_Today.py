@@ -1,7 +1,9 @@
 import streamlit as st
+from datetime import datetime, timezone
 from components import theme, state
 from components.state_reader import read_latest, read_health
 from components.regime_cockpit import render_cockpit
+from components.trust_badge import render_badge
 
 st.set_page_config(page_title="Today | Trading Lab", page_icon="🎯", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
@@ -19,7 +21,8 @@ if latest is None:
     st.warning("Pipeline hasn't produced its first batch yet.")
     st.stop()
 
-st.caption(f"Pipeline status: **{health.get('status')}** · Last run: `{health.get('last_run_ts')}`")
+render_badge(health, datetime.now(timezone.utc),
+             source_label=latest.get("regime_conditions", {}).get("quote_source", "yfinance"))
 render_cockpit(latest)
 st.markdown("---")
 st.markdown(f"Signals in this batch: **{len(latest.get('signals', []))}**")

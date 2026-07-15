@@ -49,6 +49,7 @@ def _analyze_symbol(symbol: str, ltp: float, tape) -> Optional[Signal]:
 def compute_signal_batch(
     ltps: dict[str, LTPQuote],
     nifty_df: pd.DataFrame,
+    quote_source: str = "yfinance",
 ) -> SignalBatch:
     tape = assess_tape(nifty_df)
     signals: list[Signal] = []
@@ -60,6 +61,7 @@ def compute_signal_batch(
         "nifty_close": tape.nifty_close,
         "return_60d_pct": tape.return_60d_pct,
         "ema_200_slope_pct_20d": tape.ema_200_slope_pct_20d,
+        "quote_source": quote_source,
     }
     return SignalBatch(
         generated_at=datetime.now(timezone.utc),

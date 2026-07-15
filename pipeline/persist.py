@@ -21,6 +21,7 @@ def _batch_to_dict(batch: SignalBatch) -> dict:
         "regime": batch.regime,
         "regime_conditions": batch.regime_conditions,
         "signals": [_signal_to_dict(s) for s in batch.swing_signals],
+        "quote_source": batch.regime_conditions.get("quote_source", "unknown"),
     }
 
 
