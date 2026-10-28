@@ -42,7 +42,36 @@ Kite-ready order ticket the user types in by hand.
 | `nsepython`, `NseIndiaApi` (GPL-3) | Not imported | Repo is public MIT; we fetch the NSE files ourselves. |
 | TradingAgents, FinRobot | Skip | LLM in the signal path, non-reproducible. Breaks the deterministic-engine rule. |
 | OpenAlgo (AGPL) | Idea only | Paper ledger + approval queue pattern (already in our ledger direction). |
+| Jesse (crypto-only) | Idea only | Monte Carlo trade-shuffle + candle-noise robustness → Time Machine §3.3 step 3 |
+| day-trader-skill `trader-news`, `trader-analyst` | Vendor as Claude skills for US, only if the security audit passes | SEC 8-K + headlines, XBRL earnings, used in Claude sessions — never inside a verdict |
 | ECC (`affaan-m/ECC`, MIT) | Vendored review agents | `python-reviewer`, `security-reviewer`, `silent-failure-hunter` in `.claude/agents/` (pin b92f181b) review every slice. |
+
+## 2a. Two markets (user trades both NSE and US)
+
+The desk core is market-agnostic. A frozen `MarketProfile` carries everything market-specific, and every
+function that needs one takes it explicitly (no globals):
+
+| Field | NSE | US |
+|---|---|---|
+| `code` | `NSE` | `US` |
+| `currency` | `₹` | `$` |
+| `tz` | `Asia/Kolkata` | `America/New_York` |
+| session open / close | 09:15 / 15:30 | 09:30 / 16:00 |
+| intraday no-new-entry before / after | 09:30 / 14:30 | 09:45 / 15:00 |
+| intraday flat-by | 15:15 | 15:55 |
+| regime index (yfinance) | `^NSEI` | `^GSPC` |
+| yfinance suffix | `.NS` | none |
+| round-trip cost, swing | Zerodha CNC model (`picker_replay._delivery_costs_pct`) | 0.02% fees + spread |
+| round-trip cost, intraday | Zerodha MIS: brokerage min(₹20, 0.03%)/side + 0.025% STT sell + fees + spread | 0.02% fees + spread |
+| tradeable-list check | F&O ban list | none |
+| min liquidity (20d median turnover) | ₹5 Cr | $20 M |
+| ticket format | Kite: `CNC/MIS LIMIT` + `GTT OCO` | broker-neutral bracket: `BUY qty SYM LIMIT x, stop-loss y, take-profit z, DAY/GTC` |
+
+Capital and limits are stored per market (`limits_nse`, `limits_us`); amounts never mix currencies.
+US PDT guard: optional setting `pdt_guard` (off by default; brokers may still apply the old rule) — when
+on, ≥3 day trades in the last 5 sessions BLOCKs a new intraday trade.
+Holidays: v1 uses weekday calendars; the stale-data check tolerates up to 3 calendar days for swing so
+a holiday never falsely BLOCKs (documented limitation).
 
 ## 3. Architecture
 
@@ -51,6 +80,8 @@ core (data is passed in). One file per concern:
 
 ```
 desk/
+  markets.py      MarketProfile + NSE, US profiles; universe lists (Nifty 50 / US large-cap 50)
+  costs.py        round_trip_cost_pct(profile, mode, entry, exit, qty, df) -> float
   models.py       TradePlan, Sizing, Check, Odds, DeskVerdict dataclasses; Status enum PASS/WARN/BLOCK
   plan.py         build_plan(df, symbol, mode, entry=None, stop=None, target=None) -> TradePlan
   sizing.py       size_position(plan, limits) -> Sizing   (binding limit named)
@@ -92,10 +123,16 @@ Costs: Zerodha CNC/MIS round-trip estimate included in max-loss.
    (swing) / 60 days (intraday ORB days) where the same entry condition held. Swing entry condition:
    close > EMA50 > EMA200 (trend setup). Non-overlapping: after a trade, skip to its exit bar.
    Output: n, win %, expectancy R. n < 20 → reported as "too few samples" (WARN).
+3. **Robustness (Jesse-style)**, on the setup-history trades:
+   - *Trade shuffle*: 2,000 random reorderings of the historical R sequence → 5th/50th/95th percentile of
+     max drawdown in R, and P(5 losses in a row). Tells the user how bad a normal losing streak gets.
+   - *Candle noise*: re-run setup history 20 times with each bar's OHLC jittered by ±0.25×(High−Low)
+     (seeded, bar-consistent); report the expectancy range. If expectancy turns negative in > 25% of
+     jittered runs → WARN "edge is fragile".
 The odds are a reality check, not a forecast; the UI says so.
 
 ### 3.4 Checks (`checks.py`) — each returns PASS / WARN / BLOCK with a one-line reason
-BLOCK: regime HOSTILE for swing longs; R:R to T1 < 1.5; qty < 1; risk governor says cannot trade
+BLOCK: regime HOSTILE for swing longs (US uses the same classifier on ^GSPC); R:R to T1 < 1.5; qty < 1; risk governor says cannot trade
 (max positions, cooling off, weekly kill switch, sector cap, aggregate risk); daily realised loss ≥
 `daily_loss_limit_pct` (default 2%); symbol in F&O ban list; Monte Carlo expectancy < 0R; stale data
 (last bar older than 1 trading day swing / 30 min intraday); intraday after 14:30 IST or before 09:30;
@@ -109,7 +146,7 @@ Otherwise TAKE. Ticket text: `BUY <qty> <SYMBOL> CNC LIMIT <entry>` + `GTT OCO: 
 (MIS + SL-M for intraday). The verdict carries a SHA-256 of its inputs and is appended to the audit log.
 
 ### 3.6 Daily plan, positions, intraday
-- Daily: assess tape → run plan+checks for every Nifty-50 stock with fresh data → TAKE (best 3 by MC
+- Daily: per market, assess tape on the profile's regime index → run plan+checks for every universe stock with fresh data → TAKE (best 3 by MC
   expectancy) / WATCH (WAIT verdicts sorted by distance to trigger, top 5) / regime-flip conditions from
   `TapeAssessment` (e.g. "Nifty needs to close above 50-EMA at X").
 - Positions: wraps `position_monitor.daily_check` + `exits.update_trail_stop`, adds R-so-far.
@@ -128,5 +165,5 @@ deterministic under the seed; NSE fetch mocked. Streamlit AppTest smoke test for
 Fix the stale `2_Dashboard.py` smoke test. Gate: `python3.13 -m pytest` green.
 
 ## 6. Non-goals
-Order placement of any kind; LLM text in verdicts; options; universe beyond Nifty 50 for the daily
-scan (Check a Trade accepts any NSE symbol); 1-minute bars.
+Order placement of any kind; LLM text in verdicts; options; daily-scan universe beyond Nifty 50 / US
+large-cap 50 (Check a Trade accepts any symbol); 1-minute bars; exchange holiday calendars; FX conversion.
