@@ -32,7 +32,7 @@ dev = ["pytest>=8.0,<9", "pytest-cov>=5.0,<6"]
 nse-lab = "app:main"
 
 [tool.setuptools]
-packages = ["nse_backtest", "nse_backtest.intraday", "nse_backtest.features", "nse_backtest.model", "pipeline"]
+packages = ["nse_backtest", "nse_backtest.intraday", "nse_backtest.features", "nse_backtest.model", "nse_backtest.desk", "pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -61,8 +61,8 @@ function that needs one takes it explicitly (no globals):
 | intraday flat-by | 15:15 | 15:55 |
 | regime index (yfinance) | `^NSEI` | `^GSPC` |
 | yfinance suffix | `.NS` | none |
-| round-trip cost, swing | Zerodha CNC model (`picker_replay._delivery_costs_pct`) | 0.02% fees + spread |
-| round-trip cost, intraday | Zerodha MIS: brokerage min(₹20, 0.03%)/side + 0.025% STT sell + fees + spread | 0.02% fees + spread |
+| round-trip cost, swing | Zerodha CNC model (`picker_replay._delivery_costs_pct`) | SEC fee 0.00278% of sell + FINRA TAF $0.000166/share (max $8.30) + spread |
+| round-trip cost, intraday | Zerodha MIS: brokerage min(₹20, 0.03%)/side + 0.025% STT sell + fees + spread | SEC fee 0.00278% of sell + FINRA TAF $0.000166/share (max $8.30) + spread |
 | tradeable-list check | F&O ban list | none |
 | min liquidity (20d median turnover) | ₹5 Cr | $20 M |
 | ticket format | Kite: `CNC/MIS LIMIT` + `GTT OCO` | broker-neutral bracket: `BUY qty SYM LIMIT x, stop-loss y, take-profit z, DAY/GTC` |
