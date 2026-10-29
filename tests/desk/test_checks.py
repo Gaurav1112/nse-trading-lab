@@ -677,3 +677,115 @@ def test_h3_fix2_ban_list_warns_an_intraday_long_too():
     c = _c("ban_list", p=_intra(), ban=b)
     assert c.status is Status.WARN
     assert c.reason.startswith("ABC is in the F&O ban — derivatives only; cash")
+
+
+# ---- H5a: short checks ----
+from nse_backtest.desk.checks import SHORT_EDGE_UNPROVEN, short_edge_check  # noqa: E402
+from nse_backtest.desk.models import Side  # noqa: E402
+
+FNO = frozenset({"ABC", "XYZ"})
+
+
+def splan(market="NSE", t1=97.0):
+    return TradePlan("ABC", market, Mode.INTRADAY, 100.0, 102.0, t1, 94.0, 2, 15, 100.0, "2026-10-29T09:45:00+05:30",
+                     "opening-range mid", 99.5, Side.SHORT)
+
+
+def sctx(**kw):
+    base = dict(regime="HOSTILE", fno=FNO, or_rel_volume=2.0, price_is_live=True, quote_as_of=NOW,
+                ban=BanList(frozenset(), "ok", "2026-10-29", ""))
+    base.update(kw)
+    return ctx(**base)
+
+
+def sby(cs):
+    return {c.name: c for c in cs}
+
+
+def test_short_checks_baseline():
+    cs = run_checks(splan(), SIZE, None, sctx(), current_price=100.0)
+    names = [c.name for c in cs]
+    assert len(cs) == 17
+    for gone in ("monte_carlo", "setup_history", "robustness"):  # long-only odds: replaced by short_edge
+        assert gone not in names
+    assert {"short_edge", "short_eligibility", "relative_volume"} <= set(names)
+    bad = [c for c in cs if c.status is not Status.PASS]
+    assert [c.name for c in bad] == ["short_edge"]  # every short is capped until the edge is proven
+    assert bad[0].status is Status.WARN and bad[0].reason == SHORT_EDGE_UNPROVEN
+    assert SHORT_EDGE_UNPROVEN == "edge not proven on the desk's own history yet (gate arrives with the short history)"
+    assert sby(cs)["reward_risk"].reason == "Reward:risk 1:1.50 meets minimum 1:1.50"
+    assert sby(cs)["regime"].status is Status.PASS
+
+
+def test_short_edge_hook_is_a_warn_until_the_gate_lands():
+    c = short_edge_check(sctx())
+    assert (c.name, c.status, c.reason) == ("short_edge", Status.WARN, SHORT_EDGE_UNPROVEN)
+
+
+@pytest.mark.parametrize("override, reason", [
+    (dict(regime="TRENDING"), "ORB shorts are for HOSTILE days only (regime TRENDING)"),
+    (dict(regime="MIXED"), "ORB shorts are for HOSTILE days only (regime MIXED)"),
+    (dict(regime=None), "ORB shorts are for HOSTILE days only (regime unknown)"),
+    (dict(fno=None), "could not verify F&O eligibility"),
+    (dict(fno=frozenset({"XYZ"})), "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
+])
+def test_short_eligibility_blocks(override, reason):
+    c = sby(run_checks(splan(), SIZE, None, sctx(**override), current_price=100.0))["short_eligibility"]
+    assert c.status is Status.BLOCK and c.reason == reason
+
+
+def test_short_eligibility_is_nse_only():
+    c = sby(run_checks(splan(market="US"), SIZE, None, sctx(profile=US), current_price=100.0))["short_eligibility"]
+    assert c.status is Status.BLOCK and c.reason == "Shorts are NSE only"
+
+
+def test_short_eligibility_pass_reason_and_symbol_suffix():
+    c = sby(run_checks(replace(splan(), symbol="ABC.NS"), SIZE, None, sctx(), current_price=100.0))
+    assert c["short_eligibility"].status is Status.PASS
+    assert c["short_eligibility"].reason == "ABC is an F&O stock on a HOSTILE NSE day"
+
+
+@pytest.mark.parametrize("ban, status, reason", [
+    (BanList(frozenset({"ABC"}), "ok", "2026-10-29", ""), Status.BLOCK,
+     "ABC is in the F&O ban — no intraday shorts"),
+    (None, Status.BLOCK, "Could not verify the F&O ban list — no intraday shorts without it"),
+    (BanList(frozenset(), "unavailable", None, ""), Status.BLOCK,
+     "Could not verify the F&O ban list — no intraday shorts without it"),
+    (BanList(frozenset(), "stale", "2026-10-28", ""), Status.BLOCK,
+     "F&O ban list is stale (last fetched 2026-10-28) — no intraday shorts without today's list"),
+    (BanList(frozenset(), "cached", "2026-10-29", ""), Status.PASS, "ABC is not in the F&O ban list"),
+])
+def test_short_ban_list_fails_closed(ban, status, reason):
+    c = sby(run_checks(splan(), SIZE, None, sctx(ban=ban), current_price=100.0))["ban_list"]
+    assert (c.status, c.reason) == (status, reason)
+
+
+@pytest.mark.parametrize("ratio, status, reason", [
+    (2.0, Status.PASS, "Opening bar volume is 2.00× its 20-session median (at least 1.5×)"),
+    (1.5, Status.PASS, "Opening bar volume is 1.50× its 20-session median (at least 1.5×)"),
+    (1.49, Status.WARN, "Opening bar volume is only 1.49× its 20-session median (want at least 1.5×)"),
+    (None, Status.WARN, "Relative volume of the opening bar could not be measured (need 20 earlier sessions)"),
+    (float("nan"), Status.WARN, "Relative volume of the opening bar could not be measured (need 20 earlier sessions)"),
+])
+def test_short_relative_volume(ratio, status, reason):
+    c = sby(run_checks(splan(), SIZE, None, sctx(or_rel_volume=ratio), current_price=100.0))["relative_volume"]
+    assert (c.status, c.reason) == (status, reason)
+
+
+def test_short_live_price_at_or_above_the_stop_blocks():
+    c = sby(run_checks(splan(), SIZE, None, sctx(), current_price=102.0))["live_price"]
+    assert c.status is Status.BLOCK and c.reason == "Price ₹102.00 is already at or above the stop ₹102.00"
+    assert sby(run_checks(splan(), SIZE, None, sctx(), current_price=101.9))["live_price"].status is Status.PASS
+
+
+def test_short_reward_risk_is_mirrored():
+    c = sby(run_checks(splan(t1=98.0), SIZE, None, sctx(), current_price=100.0))["reward_risk"]
+    assert c.status is Status.BLOCK and c.reason == "Reward:risk 1:1.00 is below minimum 1:1.50"
+
+
+def test_long_intraday_checks_unchanged_by_the_short_fields():
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T09:45:00+05:30")
+    a = run_checks(p, SIZE, ODDS, ctx(price_is_live=True, quote_as_of=NOW), current_price=100.0)
+    b = run_checks(p, SIZE, ODDS, ctx(price_is_live=True, quote_as_of=NOW, fno=None, or_rel_volume=0.1),
+                   current_price=100.0)
+    assert a == b and len(a) == 17

@@ -135,3 +135,58 @@ def test_lr_default_fetcher_raises_when_body_exceeds_cap(monkeypatch):
         nse_lists._default_fetcher(nse_lists.FNO_BAN_URL)
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10: R(nse_lists._MAX_BYTES))
     assert len(nse_lists._default_fetcher(nse_lists.FNO_BAN_URL)) == nse_lists._MAX_BYTES
+
+
+# ---- H5a: the F&O underlyings list (fo_mktlots.csv), fail-closed ----
+from pathlib import Path  # noqa: E402
+
+from nse_backtest.desk.nse_lists import FNO_LOTS_URL, fetch_fno_underlyings, parse_fno_underlyings  # noqa: E402
+
+LOTS = (Path(__file__).parent / "fixtures" / "fo_mktlots_sample.csv").read_text()
+
+
+def test_parse_underlyings_reads_the_symbol_column_and_skips_section_headers():
+    assert parse_fno_underlyings(LOTS) == frozenset({"NIFTY", "BANKNIFTY", "ALPHA", "BETA&SONS", "GAMMA-RE"})
+
+
+@pytest.mark.parametrize("text", ["", "<html>blocked</html>", "UNDERLYING,LOT\nX,1\n", "UNDERLYING,SYMBOL\n",
+                                  "UNDERLYING,SYMBOL\nBAD ROW,not a symbol!\n"])
+def test_parse_underlyings_rejects_anything_unexpected(text):
+    with pytest.raises(ValueError):
+        parse_fno_underlyings(text)
+
+
+def test_fetch_underlyings_ok_writes_the_cache_atomically(tmp_path):
+    seen = []
+    got = fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=lambda u: seen.append(u) or LOTS)
+    assert seen == [FNO_LOTS_URL] and FNO_LOTS_URL == "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
+    assert "ALPHA" in got
+    assert (tmp_path / "fo_mktlots.csv").read_text() == LOTS
+    assert (tmp_path / "fo_mktlots.date").read_text() == "2026-10-29"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_fetch_underlyings_falls_back_to_a_recent_cache_then_fails_closed(tmp_path):
+    fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=lambda u: LOTS)
+
+    def boom(u): raise OSError("down")
+    assert "ALPHA" in fetch_fno_underlyings(tmp_path, date(2026, 11, 2), fetch=boom)  # 4 days old: still used
+    assert fetch_fno_underlyings(tmp_path, date(2026, 11, 6), fetch=boom) is None   # 8 days old: unverified
+
+
+def test_fetch_underlyings_unavailable_is_none_never_raises(tmp_path):
+    def boom(u): raise OSError("down")
+    assert fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=boom) is None
+    assert fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=lambda u: "<html/>") is None
+    (tmp_path / "fo_mktlots.csv").write_text("garbage")
+    (tmp_path / "fo_mktlots.date").write_text("2026-10-29")
+    assert fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=boom) is None  # corrupt cache: None
+    (tmp_path / "fo_mktlots.csv").write_text(LOTS)
+    (tmp_path / "fo_mktlots.date").write_text("not a date")
+    assert fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=boom) is None  # unreadable date: None
+
+
+def test_fetch_underlyings_cache_write_failure_still_returns_the_live_list(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    assert "ALPHA" in fetch_fno_underlyings(blocker / "sub", date(2026, 10, 29), fetch=lambda u: LOTS)

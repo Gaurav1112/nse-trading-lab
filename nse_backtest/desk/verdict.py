@@ -16,7 +16,7 @@ from . import calendars as cal
 from . import fills
 from . import models
 from . import plan as plan_mod
-from .checks import REGIME_HELD_OUT_PCT, signed_pct
+from .checks import REGIME_HELD_OUT_PCT, SHORT_EDGE_UNPROVEN, signed_pct
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Mode, Odds, Side, Sizing, Status, TradePlan, summary_fields
 from .sizing import loss_at_stop
@@ -114,6 +114,8 @@ CHECK_GROUPS: dict[str, str] = {
     "freshness": "data", "live_price": "data", "gap": "data",
     "size": "limits", "risk_governor": "limits", "daily_loss": "limits", "pdt": "limits", "ban_list": "limits",
     "stoploss_streak": "limits", "liquidity": "limits", "entry_window": "limits", "reward_risk": "limits",
+    # shorts: the edge gate and the volume behind the breakdown are advice; who may be shorted is the exchange's rule
+    "short_edge": "odds", "relative_volume": "odds", "short_eligibility": "limits",
 }
 GROUPS = ("market", "odds", "data", "limits")
 ADVICE_GROUPS = frozenset({"market", "odds"})
@@ -188,6 +190,36 @@ def input_hash(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, curre
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def short_edge_cap(plan: TradePlan, checks) -> str | None:
+    """Why a short verdict is held at WAIT, or None when its short_edge check PASSes; always None for a long. HOOK for H5b: the cap follows the short_edge check, so H5b's gate (checks.short_edge_check)
+    lifts it for a proven edge without touching decide. A short with no short_edge result is not proven."""
+    if plan.side is not Side.SHORT:
+        return None
+    edge = [c for c in checks if c.name == "short_edge"]
+    if edge and all(c.status is Status.PASS for c in edge):
+        return None
+    return edge[0].reason if edge and edge[0].reason else SHORT_EDGE_UNPROVEN
+
+
+def _decide_short(plan: TradePlan, sizing: Sizing, checks: tuple, profile: MarketProfile, current_price: float,
+                  lines: tuple[str, ...]) -> tuple[Action, str, tuple[str, ...], float | None]:
+    """(action, headline, ticket, trigger) for a short with a valid price and no BLOCK: the mirror of the long
+    rules (sell only at or below the trigger, never below the sell limit), capped at WAIT by short_edge_cap."""
+    m, sym = profile.money, plan.symbol
+    cap = short_edge_cap(plan, checks)
+    if cap is not None:
+        return Action.WAIT, f"WAIT {sym} — SHORT: {cap}", (), None
+    if current_price > plan.entry * (1 + 0.001):
+        return (Action.WAIT, f"WAIT {sym} — sell short only below {m(plan.entry)} (now {m(current_price)})",
+                ("IF TRIGGERED:",) + lines, plan.entry)
+    if current_price < (limit := stop_limit(plan, profile)):
+        return (Action.WAIT, f"WAIT {sym} — Price {m(current_price)} is below the stop-limit's limit {m(limit)} — "
+                "the order would not fill", ("IF TRIGGERED:",) + lines, plan.entry)
+    loss = loss_at_stop(plan, profile, sizing.qty, spread_per_side=sizing.spread_per_side)  # == card max loss
+    return (Action.TAKE, f"TAKE {sym} — SELL SHORT {sizing.qty} @ {m(plan.entry)}, loss at stop ≈ {m(loss)} "
+            "(a gap can lose more)", lines, None)
+
+
 def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: MarketProfile,
            current_price: float, now: datetime) -> DeskVerdict:
     checks = tuple(checks)
@@ -204,6 +236,8 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
     elif blocks:
         action = Action.SKIP
         headline = f"SKIP {sym} — blocked by: {', '.join(blocks)}"
+    elif plan.side is Side.SHORT:
+        action, headline, ticket, trigger = _decide_short(plan, sizing, checks, profile, current_price, lines)
     elif current_price < plan.entry * (1 - 0.001):
         action, trigger = Action.WAIT, plan.entry
         ticket = ("IF TRIGGERED:",) + lines

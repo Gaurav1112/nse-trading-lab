@@ -1,4 +1,5 @@
-"""NSE F&O security-in-ban list: fetch, parse, cache. Never raises from fetch."""
+"""NSE F&O lists: the security-in-ban list and the F&O underlyings (market lots) list. Fetch, parse, cache.
+Never raises from fetch."""
 from __future__ import annotations
 
 import os
@@ -7,11 +8,12 @@ import tempfile
 import urllib.request
 from urllib.parse import urlparse
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
 
 FNO_BAN_URL = "https://nsearchives.nseindia.com/content/fo/fo_secban.csv"
+FNO_LOTS_URL = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
 _ROW = re.compile(r"^\s*\d+\s*,\s*([A-Z0-9&\-]+)\s*$")
 
 
@@ -50,14 +52,15 @@ _ALLOWED_HOST = "nsearchives.nseindia.com"
 
 
 def _default_fetcher(url: str) -> str:
+    what = "F&O list" if url == FNO_LOTS_URL else "ban list"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         final = urlparse(resp.geturl())
         if final.scheme != "https" or final.hostname != _ALLOWED_HOST:
-            raise ValueError(f"ban list fetch ended off NSE ({final.scheme}://{final.hostname})")
+            raise ValueError(f"{what} fetch ended off NSE ({final.scheme}://{final.hostname})")
         body = resp.read(_MAX_BYTES + 1)
         if len(body) > _MAX_BYTES:
-            raise ValueError(f"ban list response too large (over {_MAX_BYTES} bytes): refusing a truncated list")
+            raise ValueError(f"{what} response too large (over {_MAX_BYTES} bytes): refusing a truncated list")
         return body.decode("utf-8")
 
 
@@ -100,3 +103,63 @@ def fetch_fno_ban(cache_dir: Path, today: date,
                            f"Live fetch failed ({err}); using list cached on {cached_date}")
         except Exception:  # noqa: BLE001
             return BanList(frozenset(), "unavailable", None, str(err))
+
+
+# ---------------------------------------------------------------- F&O underlyings (who may be shorted intraday)
+
+_SYMBOL = re.compile(r"^[A-Z0-9&\-]+$")
+FNO_LOTS_MAX_AGE = timedelta(days=7)  # the list changes rarely; an older cached copy is not trusted
+
+
+def parse_fno_underlyings(text: str) -> frozenset[str]:
+    """The SYMBOL column of NSE's fo_mktlots.csv (index and stock underlyings). Repeated section headers
+    ("Derivatives on Individual Securities, Symbol, ...") are skipped. Anything unexpected raises ValueError."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("empty F&O list")
+    header = [c.strip().upper() for c in lines[0].split(",")]
+    if "SYMBOL" not in header:
+        raise ValueError("unexpected F&O list format (no SYMBOL column)")
+    col = header.index("SYMBOL")
+    out = set()
+    for ln in lines[1:]:
+        cells = [c.strip() for c in ln.split(",")]
+        if len(cells) <= col:
+            raise ValueError(f"unexpected F&O list row: {ln!r}")
+        sym = cells[col].upper()
+        if sym == "SYMBOL":  # a section header row
+            continue
+        if not _SYMBOL.match(sym):
+            raise ValueError(f"unexpected F&O list row: {ln!r}")
+        out.add(sym)
+    if not out:
+        raise ValueError("F&O list has no symbols")
+    return frozenset(out)
+
+
+def fetch_fno_underlyings(cache_dir: Path, today: date,
+                          fetch: Callable[[str], str] | None = None) -> frozenset[str] | None:
+    """The F&O underlyings, live from NSE (cached atomically); on a failed fetch the cached copy if it is at most
+    FNO_LOTS_MAX_AGE old. None when neither is available: the caller must treat F&O eligibility as unverified
+    (fail closed). Never raises."""
+    cache_dir = Path(cache_dir)
+    fetch = fetch or _default_fetcher
+    try:
+        text = fetch(FNO_LOTS_URL)
+        symbols = parse_fno_underlyings(text)
+    except Exception:  # noqa: BLE001 - never raises by contract
+        try:
+            cached = (cache_dir / "fo_mktlots.csv").read_text(encoding="utf-8")
+            as_of = date.fromisoformat((cache_dir / "fo_mktlots.date").read_text(encoding="utf-8").strip())
+            if not (timedelta(0) <= today - as_of <= FNO_LOTS_MAX_AGE):
+                return None
+            return parse_fno_underlyings(cached)
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(cache_dir / "fo_mktlots.csv", text)
+        _atomic_write(cache_dir / "fo_mktlots.date", today.isoformat())
+    except OSError:
+        pass  # the live list is still good; the next failed fetch just has no cache
+    return symbols

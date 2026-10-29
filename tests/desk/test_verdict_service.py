@@ -302,19 +302,21 @@ def _emitted_names() -> set[str]:
             ctx = CheckContext(prof, Limits(capital=1_000_000), NOW)
             for o in (None, odds):
                 names |= {c.name for c in run_checks(p, S, o, ctx, 100.0)}
+    names |= {c.name for c in run_checks(_short_plan(), S, None, CheckContext(NSE, Limits(capital=1_000_000), NOW),
+                                         100.0)}
     return names
 
 
 def test_h3_every_check_name_is_mapped_to_exactly_one_group():
     names = _emitted_names()
-    assert len(names) == 17
+    assert len(names) == 20  # the 17 long checks + the short-only short_edge, short_eligibility, relative_volume
     assert set(_verdict.CHECK_GROUPS) == names  # mapped explicitly, nothing left to the "limits" default
     assert set(_verdict.CHECK_GROUPS.values()) == {"market", "odds", "data", "limits"}
     assert _verdict.CHECK_GROUPS["regime"] == "market"
     assert {n for n, g in _verdict.CHECK_GROUPS.items() if g == "data"} == {"freshness", "live_price", "gap"}
-    for n in ("monte_carlo", "setup_history", "robustness"):
+    for n in ("monte_carlo", "setup_history", "robustness", "short_edge", "relative_volume"):
         assert _verdict.CHECK_GROUPS[n] == "odds"
-    for n in ("size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
+    for n in ("short_eligibility", "size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
               "entry_window", "reward_risk"):
         assert _verdict.CHECK_GROUPS[n] == "limits"
 
@@ -456,3 +458,52 @@ def test_h5a_long_tickets_unchanged():
     assert ticket_lines(pi, S, NSE, current_price=99.0, day=date(2026, 10, 29)) == (
         "BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "Cancel the entry if not filled by 14:45 IST",
         "SL-M SELL 250 ABC trigger 98.00", "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")
+
+
+# ---- H5a: short verdicts are capped at WAIT until the edge gate lands ----
+from nse_backtest.desk.checks import SHORT_EDGE_UNPROVEN  # noqa: E402
+
+EDGE_WARN = (Check("short_edge", Status.WARN, SHORT_EDGE_UNPROVEN),)
+EDGE_PASS = (Check("short_edge", Status.PASS, "proven (H5b)"),)  # what the H5b gate will emit when proven
+
+
+@pytest.mark.parametrize("cp", [99.8, 100.0, 100.5, 99.0])
+def test_h5a_every_short_verdict_is_capped_at_wait(cp):
+    v = decide(_short_plan(), S, None, EDGE_WARN, NSE, cp, NOW)
+    assert v.action is Action.WAIT and v.ticket == () and v.trigger is None
+    assert v.headline == f"WAIT ABC — SHORT: {SHORT_EDGE_UNPROVEN}"
+    assert _verdict.short_edge_cap(v.plan, v.checks) == SHORT_EDGE_UNPROVEN
+
+
+def test_h5a_short_cap_never_lifts_a_block_or_a_missing_price():
+    blocked = decide(_short_plan(), S, None, EDGE_WARN + (Check("ban_list", Status.BLOCK, "b"),), NSE, 99.8, NOW)
+    assert blocked.action is Action.SKIP and blocked.headline == "SKIP ABC — blocked by: ban_list"
+    assert decide(_short_plan(), S, None, EDGE_WARN, NSE, float("nan"), NOW).action is Action.SKIP
+
+
+def test_h5a_a_short_without_an_edge_check_is_capped_too():
+    """Fail closed: a short whose checks carry no short_edge result is not proven either."""
+    v = decide(_short_plan(), S, None, OK, NSE, 99.8, NOW)
+    assert v.action is Action.WAIT and SHORT_EDGE_UNPROVEN in v.headline
+
+
+def test_h5a_long_verdicts_ignore_the_cap():
+    assert _verdict.short_edge_cap(P, OK) is None and _verdict.short_edge_cap(P, EDGE_WARN) is None
+    assert decide(P, S, None, OK, NSE, 100.0, NOW).action is Action.TAKE
+
+
+def test_h5a_short_price_branches_once_the_edge_is_proven():
+    from nse_backtest.desk.sizing import loss_at_stop
+    above = decide(_short_plan(), S, None, EDGE_PASS, NSE, 100.2, NOW)
+    assert above.action is Action.WAIT and above.trigger == 100.0
+    assert above.headline == "WAIT ABC — sell short only below ₹100.00 (now ₹100.20)"
+    assert above.ticket[:2] == ("IF TRIGGERED:", "SELL 250 ABC MIS SL trigger 100.00 limit 99.50")
+    below = decide(_short_plan(), S, None, EDGE_PASS, NSE, 99.4, NOW)
+    assert below.action is Action.WAIT and below.headline == (
+        "WAIT ABC — Price ₹99.40 is below the stop-limit's limit ₹99.50 — the order would not fill")
+    take = decide(_short_plan(), S, None, EDGE_PASS, NSE, 99.8, NOW)
+    loss = loss_at_stop(_short_plan(), NSE, 250)
+    assert loss == pytest.approx(250 * 2.5 + 250 * 0.25771432, abs=0.01)  # sell 99.50, buy back 102
+    assert take.action is Action.TAKE and take.ticket[0] == "SELL 250 ABC MIS LIMIT 99.50"
+    assert take.headline == f"TAKE ABC — SELL SHORT 250 @ ₹100.00, loss at stop ≈ {NSE.money(loss)} (a gap can lose more)"
+    assert decide(_short_plan(), S, None, EDGE_PASS, NSE, 100.1, NOW).action is Action.TAKE  # inside the 0.1% band

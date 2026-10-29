@@ -156,3 +156,21 @@ def _short_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfil
                      target_1=float(t1), target_2=float(t2), atr=a, max_hold_bars=hold,
                      last_close=last_close, last_bar=last_ts.isoformat(), stop_basis=basis,
                      entry_limit=fills.entry_limit_short(float(e), float(s), profile.tick), side=Side.SHORT)
+
+
+OR_VOLUME_SESSIONS = 20
+
+
+def or_relative_volume(df: pd.DataFrame, sessions: int = OR_VOLUME_SESSIONS) -> float | None:
+    """The last session's opening (first) bar volume over the median opening-bar volume of the ``sessions``
+    sessions before it; None when there is no Volume, fewer earlier sessions, or a non-positive median."""
+    if "Volume" not in df.columns or len(df) == 0:
+        return None
+    first = df.groupby(df.index.normalize(), sort=True)["Volume"].first()
+    if len(first) < sessions + 1:
+        return None
+    today, prior = float(first.iloc[-1]), first.iloc[-(sessions + 1):-1].astype(float)
+    med = float(prior.median())
+    if not (math.isfinite(today) and math.isfinite(med) and med > 0 and today >= 0):
+        return None
+    return today / med

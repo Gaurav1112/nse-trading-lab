@@ -243,3 +243,18 @@ def test_short_trade_plan_geometry_properties():
     assert p.risk_per_share == 2.0 and p.rr_t1 == 1.5
     q = TradePlan("X", "NSE", Mode.INTRADAY, 100.0, 98.0, 103.0, 106.0, 1.0, 10, 100.0, "x", "user")
     assert q.side is Side.LONG and q.risk_per_share == 2.0 and q.rr_t1 == 1.5
+
+
+def test_or_relative_volume():
+    from nse_backtest.desk.plan import or_relative_volume
+    df = sessions15(n_days=25)
+    assert or_relative_volume(df) == pytest.approx(1.0)  # every opening bar trades 3e5
+    first_today = df.index[df.index.normalize() == df.index[-1].normalize()][0]
+    df.loc[first_today, "Volume"] = 6e5
+    assert or_relative_volume(df) == pytest.approx(2.0)
+    assert or_relative_volume(sessions15(n_days=20)) is None  # 19 earlier sessions: not a 20-session median
+    assert or_relative_volume(sessions15(n_days=21)) == pytest.approx(1.0)
+    assert or_relative_volume(df.drop(columns=["Volume"])) is None
+    zero = sessions15(n_days=25)
+    zero["Volume"] = 0.0
+    assert or_relative_volume(zero) is None
