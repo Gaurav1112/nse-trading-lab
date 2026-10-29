@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from . import loaders, session
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Mode
+from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 
@@ -26,7 +26,7 @@ PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
 def to_jsonable(x):
     """Dataclasses, enums, dates, numpy scalars and non-finite floats to JSON-safe values."""
     if dataclasses.is_dataclass(x) and not isinstance(x, type):
-        return {f.name: to_jsonable(getattr(x, f.name)) for f in dataclasses.fields(x)}
+        return {k: to_jsonable(v) for k, v in summary_fields(x).items()}  # bulky fields (Odds.mc_rs) left out
     if isinstance(x, Enum):
         return to_jsonable(x.value)
     if isinstance(x, dict):

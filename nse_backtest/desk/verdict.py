@@ -13,7 +13,7 @@ from enum import Enum
 
 from . import fills
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan
+from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan, summary_fields
 
 
 def stop_limit(plan: TradePlan, profile: MarketProfile) -> float:
@@ -57,7 +57,7 @@ def input_hash(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, curre
     payload = {
         "plan": asdict(plan),
         "sizing": asdict(sizing),
-        "odds": asdict(odds) if odds is not None else None,
+        "odds": summary_fields(odds) if odds is not None else None,  # flat dataclass; mc_rs left out
         "checks": [asdict(c) for c in checks],
         "current_price": current_price,
     }

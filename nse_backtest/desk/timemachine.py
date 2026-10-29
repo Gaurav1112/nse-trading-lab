@@ -19,6 +19,7 @@ from nse_backtest.desk.models import Mode, Odds, TradePlan
 from nse_backtest.desk.plan import atr_series, swing_stop
 
 _INTRADAY_LOOKBACK_BARS = 40 * 25  # ~40 sessions of 15-minute bars (25 per NSE session)
+MC_RS_CAP = 10_000  # most per-replay R values kept on Odds.mc_rs
 
 
 def bar_ratios(df: pd.DataFrame, mode: Mode, profile=None) -> np.ndarray:
@@ -43,6 +44,13 @@ def bar_ratios(df: pd.DataFrame, mode: Mode, profile=None) -> np.ndarray:
 def monte_carlo(ratios, entry, stop, target, max_bars, *, cost_per_share=0.0,
                 replays=10_000, seed=19, block=5) -> tuple[float, float, float, float]:
     """Block-bootstrap the stock's own bar ratios; returns (p_target, p_stop, p_time, expectancy_r)."""
+    return monte_carlo_rs(ratios, entry, stop, target, max_bars, cost_per_share=cost_per_share,
+                          replays=replays, seed=seed, block=block)[:4]
+
+
+def monte_carlo_rs(ratios, entry, stop, target, max_bars, *, cost_per_share=0.0, replays=10_000, seed=19,
+                   block=5) -> tuple[float, float, float, float, np.ndarray]:
+    """``monte_carlo`` plus the per-replay R array (net of ``cost_per_share``), shape (replays,)."""
     if not all(math.isfinite(x) for x in (entry, stop, target, cost_per_share)):
         raise ValueError("entry, stop, target and cost_per_share must be finite")
     if not entry > stop:
@@ -90,7 +98,7 @@ def monte_carlo(ratios, entry, stop, target, max_bars, *, cost_per_share=0.0,
     risk = entry - stop
     rs = (exit_px - entry - cost_per_share) / risk
     return (float((outcome == 1).mean()), float((outcome == -1).mean()),
-            float((outcome == 0).mean()), float(rs.mean()))
+            float((outcome == 0).mean()), float(rs.mean()), rs)
 
 
 def _walk(op, hi, lo, cl, start, end, stop, target):
@@ -243,9 +251,9 @@ def odds(df, plan: TradePlan, *, cost_per_share=0.0, replays=10_000, seed=19, bl
          lookback=250, robustness=True) -> Odds:
     window = df.tail(lookback + 1) if plan.mode is Mode.SWING else df.tail(_INTRADAY_LOOKBACK_BARS)
     ratios = bar_ratios(window, plan.mode, profile=get_profile(plan.market))
-    p_t, p_s, p_x, mc_exp = monte_carlo(ratios, plan.entry, plan.stop, plan.target_1,
-                                        plan.max_hold_bars, cost_per_share=cost_per_share,
-                                        replays=replays, seed=seed, block=block)
+    p_t, p_s, p_x, mc_exp, mc_rs = monte_carlo_rs(ratios, plan.entry, plan.stop, plan.target_1,
+                                                  plan.max_hold_bars, cost_per_share=cost_per_share,
+                                                  replays=replays, seed=seed, block=block)
     rs = setup_history(df, plan, cost_per_share=cost_per_share)
     dd = (None, None, None, None)
     nmin = nmax = nneg = None
@@ -262,4 +270,5 @@ def odds(df, plan: TradePlan, *, cost_per_share=0.0, replays=10_000, seed=19, bl
         history_expectancy_r=float(np.mean(rs)) if rs else None,
         history_rs=tuple(float(r) for r in rs),
         dd_p5_r=dd[0], dd_p50_r=dd[1], dd_p95_r=dd[2], p_5_loss_streak=dd[3],
-        noise_expectancy_min=nmin, noise_expectancy_max=nmax, noise_negative_frac=nneg)
+        noise_expectancy_min=nmin, noise_expectancy_max=nmax, noise_negative_frac=nneg,
+        mc_rs=tuple(mc_rs[:MC_RS_CAP].tolist()))

@@ -1,7 +1,7 @@
 """Desk data models and enums."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 
@@ -89,6 +89,14 @@ class Odds:
     noise_expectancy_min: float | None
     noise_expectancy_max: float | None
     noise_negative_frac: float | None
+    # Per-replay R of the Monte Carlo (capped at timemachine.MC_RS_CAP). Bulky and derived: kept out of the
+    # input hash, the audit row and --json output (see summary_fields).
+    mc_rs: tuple[float, ...] = field(default=(), metadata={"serialize": False})
+
+
+def summary_fields(x) -> dict:
+    """A dataclass's fields as a shallow dict, without those marked ``metadata={"serialize": False}``."""
+    return {f.name: getattr(x, f.name) for f in fields(x) if f.metadata.get("serialize", True)}
 
 
 @dataclass(frozen=True)
