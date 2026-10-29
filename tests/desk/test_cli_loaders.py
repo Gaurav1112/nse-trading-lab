@@ -98,7 +98,7 @@ def test_h2_plan_all_prints_the_ranked_table_with_a_check_hint_per_row(capsys, m
     assert "Your call" in out
     table = out.split("Your call", 1)[1]
     for s in syms:
-        assert f"check {s} --choose --entry " in table
+        assert f"check {s} --choose --desk-entry" in table
     rows = [ln for ln in table.splitlines() if ln.strip().startswith(("TAKE", "WAIT", "SKIP"))]
     assert len(rows) == 5 and all("exp " in r and "max loss" in r for r in rows)
 
@@ -108,3 +108,62 @@ def test_h2_plan_without_all_names_the_others(capsys, monkeypatch):
     assert cli.main(["plan", "--market", "NSE"]) == 0
     out = capsys.readouterr().out
     assert "Also checked, not on today's lists: 2" in out and "plan --all" in out
+
+
+# ---------------------------------------------------------------- H2 fix round 1
+
+def test_h2f_plan_json_quick_verdicts_carry_no_ticket(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 5)
+    assert cli.main(["plan", "--market", "NSE", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    quick = [v for v in d["others"] if v["first_pass"]]
+    assert quick and all(v["ticket"] == [] for v in quick)
+    assert all(v["ticket"] for v in d["take"])  # full-check TAKEs keep theirs
+
+
+def _fake_plan(monkeypatch, skipped, take=()):
+    from nse_backtest.desk import session
+    from nse_backtest.desk.daily import DailyPlan
+    plan = DailyPlan("NSE", "HOSTILE", "Regime HOSTILE", (), tuple(take), (), tuple(skipped), (), ())
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+
+
+def test_h2f_plain_plan_prints_skipped_reasons_grouped_and_counted(capsys, monkeypatch):
+    from tests.desk.test_choose import v
+    _fake_plan(monkeypatch, [("A", "ValueError: need bars"), ("B", "ValueError: need bars"),
+                             ("C", "RuntimeError: boom")], take=[v("T1")])
+    assert cli.main(["plan", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out
+    assert "Skipped 3 symbols:" in out
+    assert "2 × ValueError: need bars (A, B)" in out and "1 × RuntimeError: boom (C)" in out
+    assert "PLAN FAILED" not in out
+
+
+def test_h2f_plan_failed_for_every_symbol_is_loud_and_non_zero(capsys, monkeypatch):
+    _fake_plan(monkeypatch, [("A", "RuntimeError: boom"), ("B", "TypeError: bad")])
+    assert cli.main(["plan", "--market", "NSE"]) != 0
+    cap = capsys.readouterr()
+    assert "PLAN FAILED for every symbol: RuntimeError: boom" in cap.out + cap.err
+    assert cli.main(["plan", "--market", "NSE", "--json"]) != 0
+    assert "PLAN FAILED for every symbol" in capsys.readouterr().err
+
+
+def test_h2f_value_errors_alone_are_not_a_plan_failure(capsys, monkeypatch):
+    _fake_plan(monkeypatch, [("A", "ValueError: need bars")])
+    assert cli.main(["plan", "--market", "NSE"]) == 0
+    assert "PLAN FAILED" not in capsys.readouterr().out
+
+
+def test_h2f_check_desk_entry_flag_and_entry_help(capsys, monkeypatch):
+    from nse_backtest.desk import session
+    seen = []
+    real = session.run_check
+    monkeypatch.setattr(session, "run_check", lambda *a, **k: seen.append(k) or real(*a, **k))
+    assert cli.main(["check", "ABC", "--desk-entry"]) == 0
+    assert seen[-1]["desk_entry"] is True and seen[-1]["entry"] is None
+    assert cli.main(["check", "ABC"]) == 0
+    assert seen[-1]["desk_entry"] is False
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        cli.main(["check", "--help"])
+    assert "last close" in capsys.readouterr().out

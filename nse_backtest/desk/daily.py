@@ -182,7 +182,7 @@ def _first_pass(profile, frames: dict[str, pd.DataFrame], ctx: CheckContext, lim
         except Exception as err:  # noqa: BLE001 - one symbol never stops the plan
             out.skipped.append((sym, _err(err)))
             continue
-        v = replace(v, first_pass=True)
+        v = replace(v, first_pass=True, ticket=())  # quick: no ticket until a full check (not hashed)
         if kind == "far":
             out.others.append(v)
             continue
@@ -242,8 +242,10 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
                earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None,
                quote_lookup: Callable[[str], LiveQuote | None] | None = None,
                regime=_UNSET, tape=None) -> DailyPlan:
-    """Pass 1 ranks every symbol on its last close. Pass 2 re-checks only the TAKE/WATCH candidates
-    with the live quote, earnings date and robustness. Every other verdict is kept in `others`.
+    """Pass 1 checks every symbol without a live quote, at the plan's own entry (the close at the 20-day high,
+    else the breakout trigger). Pass 2 re-checks only the top TAKE/WATCH candidates with the live quote,
+    earnings date and robustness. Every other verdict is kept in `others`; a symbol with no verdict is in
+    `skipped` with its reason.
     `regime`/`tape`, when given, are used as-is (so the page header and the plan agree) and the tape is
     not re-assessed."""
     if regime is _UNSET:

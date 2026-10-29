@@ -656,7 +656,8 @@ with tab_choose:
                "TAKE / WAIT / SKIP is advice: you choose.")
     st.caption("Your call — ranked by the desk's own odds: TAKE, then WAIT, then SKIPs blocked only by the market or "
                "the odds, then the rest; within each, the highest Monte Carlo expectancy (Exp R) first. A SKIP "
-               "stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing.")
+               "stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing. A top "
+               "TAKE that the full check demoted is not replaced by the next quick one: open that one yourself.")
     pstate, istate = st.session_state.get(PLAN_KEY), st.session_state.get(SCAN_KEY)
     have_plan, have_scan = bool(pstate and "ok" in pstate), bool(istate and "ok" in istate)
     if st.button("Load candidates", key="desk_choose_load"):

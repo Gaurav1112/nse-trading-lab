@@ -19,7 +19,9 @@ Run from the repo root with `python3.13 -m nse_backtest.desk <command>`:
     check INFY --mode intraday                      # opening-range breakout (stop-limit entry)
     check RELIANCE --qty 20                         # money for the user's own quantity
     check RELIANCE --choose                         # user takes a WAIT/SKIP anyway; logged as an override
-    plan --market NSE                               # today's plan: regime, TAKE, WATCH
+    check RELIANCE --desk-entry                     # swing at the plan's own entry (breakout above the 20-day high)
+    plan --market NSE                               # today's plan: regime, TAKE, WATCH, why symbols were skipped
+    plan --market NSE --all                         # plus every other candidate, ranked, with the money
     positions --market US
     intraday --market NSE
     settings --market NSE --capital 750000 --risk-pct 1
@@ -50,6 +52,8 @@ Rules for Claude:
 - Never place, modify or cancel an order, and never call a broker order tool. The user types the
   ticket into Kite or their US broker themselves.
 - Lead with expectancy in R, not win rate.
+- Quick verdicts in `plan --all`/`--json` (first_pass) need `check SYM --entry X` before relaying anything.
+- If `plan` prints "PLAN FAILED for every symbol", say the desk is broken today, not that there is no trade.
 - If the user asks for portfolio context and the `kite` MCP server is connected, use its read-only
   holdings/positions tools only.
 - Not financial advice; the odds are a reality check from the stock's own history, not a forecast.

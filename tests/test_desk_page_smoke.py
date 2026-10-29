@@ -908,6 +908,7 @@ def test_h2_choose_table_has_numbers_for_others_and_the_new_columns(monkeypatch,
     assert osk["To entry %"] == pytest.approx(5.0, abs=0.01)
     assert df[df["Symbol"] == "OTK"].iloc[0]["Desk says"] == "TAKE"
     assert "quick" in df[df["Symbol"] == "OTK"].iloc[0]["Checked"]
+    assert "is not replaced by the next quick one" in _texts(at.caption)
 
 
 def test_h2_quick_card_has_no_ticket_and_no_override_until_full_check(monkeypatch, tmp_path):

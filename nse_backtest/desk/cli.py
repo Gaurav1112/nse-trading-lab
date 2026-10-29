@@ -15,10 +15,10 @@ from . import audit, loaders, session
 from . import calendars as cal
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, summary_fields
-from .verdict import is_quick
 from .positions import review_positions
-from .tradecard import DAILY_LOSS_NOTE, build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
+from .tradecard import DAILY_LOSS_NOTE, build_card
+from .verdict import is_quick
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -153,7 +153,7 @@ def cmd_check(a, profile) -> int:
     if a.qty is not None and a.qty < 1:
         raise ValueError(f"qty must be a whole number of at least 1, got {a.qty}")
     v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
-                          target=a.target, on_warning=_stderr_warn)
+                          target=a.target, on_warning=_stderr_warn, desk_entry=bool(a.desk_entry))
     taken = v.action is Action.TAKE
     choose = bool(a.choose) and not taken
     refused = None
@@ -214,9 +214,12 @@ def cmd_plan(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = universe(profile)[:PLAN_UNIVERSE_LIMIT]
     plan = session.run_daily_plan(profile, limits, syms, _stderr_warn)
+    failed = _plan_failed(plan)
     if a.json:
+        if failed:
+            print(failed, file=sys.stderr)
         _emit_json(plan)
-        return 0
+        return 1 if failed else 0
     lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
@@ -232,8 +235,36 @@ def cmd_plan(a, profile) -> int:
         if plan.others:
             lines += ["", f"Also checked, not on today's lists: {len(plan.others)} "
                           "(plan --all ranks them with the money)."]
-        lines += ["", f"Skipped {len(plan.skipped)} symbols."]
+        lines += [""] + _skipped_summary(plan.skipped)
+    if failed:
+        lines = [failed, ""] + lines
+        print(failed, file=sys.stderr)
+        _finish(lines)
+        return 1
     return _finish(lines)
+
+
+def _plan_failed(plan) -> str | None:
+    """A loud message when no symbol got a verdict and every skip is an unexpected error (not a ValueError, the
+    desk's own "unusable data" signal): a code bug must never look like a quiet day."""
+    if plan.take or plan.watch or plan.others or not plan.skipped:
+        return None
+    if any(why.startswith("ValueError") for _, why in plan.skipped):
+        return None
+    return f"PLAN FAILED for every symbol: {plan.skipped[0][1]}"
+
+
+def _skipped_summary(skipped) -> list[str]:
+    """Skipped symbols grouped by reason, most common first: "2 × ValueError: … (A, B)"."""
+    if not skipped:
+        return ["Skipped 0 symbols."]
+    groups: dict[str, list[str]] = {}
+    for sym, why in skipped:
+        groups.setdefault(why, []).append(sym)
+    lines = [f"Skipped {len(skipped)} symbols:"]
+    for why, syms in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        lines.append(f"  {len(syms)} × {why} ({', '.join(syms)})")
+    return lines
 
 
 def _your_call_row(v: DeskVerdict, profile, limits) -> list[str]:
@@ -254,19 +285,20 @@ def _your_call_row(v: DeskVerdict, profile, limits) -> list[str]:
     return [f"  {v.action.value:<4} {p.symbol:<12} {p.mode.value:<8} entry {m(p.entry)} ({to_entry} away)  "
             f"stop {m(p.stop)}  T1 {m(p.target_1)}  qty {qty}  max loss {loss}  exp {_r(e)}  EV {ev}  "
             f"[{checked}]{why}",
-            f"       -> check {p.symbol} --choose --entry {p.entry:.2f}"
-            + (" --mode intraday" if p.mode is Mode.INTRADAY else "")]
+            f"       -> check {p.symbol} --choose "
+            + ("--mode intraday" if p.mode is Mode.INTRADAY else "--desk-entry")]
 
 
 def _your_call(plan, profile, limits) -> list[str]:
     """Every verdict the plan computed, ranked (session.candidate_rank), with the money and a check hint."""
     lines = ["Your call — every candidate the desk checked, ranked by its own odds (TAKE, WAIT, SKIP blocked only "
              "by the market or the odds, then the rest). A SKIP stays a SKIP: --choose logs it as your override; "
-             "a quick check has no live price, earnings or robustness run, so run the check before choosing."]
+             "a quick check has no live price, earnings or robustness run, so run the check before choosing.",
+             "A top TAKE that the full check demoted is not replaced by the next quick one: check that one yourself."]
     for v in session.merge_candidates(plan, (), include_others=True):
         lines += _your_call_row(v, profile, limits)
-    for sym, why in plan.skipped:
-        lines.append(f"  ---- {sym:<12} no verdict: {why}")
+    if plan.skipped:
+        lines += ["No verdict:"] + _skipped_summary(plan.skipped)[1:]
     return lines
 
 
@@ -449,7 +481,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("symbol")
     common(c)
     c.add_argument("--mode", choices=["swing", "intraday"], default="swing")
-    c.add_argument("--entry", type=float)
+    c.add_argument("--entry", type=float, help="your entry price (default: the last close)")
+    c.add_argument("--desk-entry", action="store_true",
+                   help="swing: use the daily plan's own entry (the breakout above the 20-day high; the close "
+                        "when already at it), as the dashboard does")
     c.add_argument("--stop", type=float)
     c.add_argument("--target", type=float)
     c.add_argument("--qty", type=int, help="your quantity instead of the desk's size (limit breaches are listed)")
