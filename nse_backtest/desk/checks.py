@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import Check, Limits, Mode, Odds, Sizing, Status, TradePlan
 from nse_backtest.desk.nse_lists import BanList
@@ -60,6 +62,14 @@ def realised_today(journal, market: str, today: date) -> float:
     return sum(p for d, p in _market_entries(journal, market) if d == today)
 
 
+def _num(x) -> float | None:
+    """Finite float, or None for non-numbers, bools, NaN and infinity."""
+    if isinstance(x, bool) or not isinstance(x, (int, float, np.integer, np.floating)):
+        return None
+    v = float(x)
+    return v if math.isfinite(v) else None
+
+
 def _ck(name: str, status: Status, reason: str) -> Check:
     return Check(name, status, reason)
 
@@ -83,35 +93,45 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     P, W, B = Status.PASS, Status.WARN, Status.BLOCK
 
     # 1 regime
+    r = (ctx.regime or "").strip().upper() if isinstance(ctx.regime, (str, type(None))) else ""
+    unknown = "Regime unknown: could not classify the market, "
     if swing:
-        if ctx.regime == "HOSTILE":
+        if r == "HOSTILE":
             out.append(_ck("regime", B, "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"))
-        elif ctx.regime == "MIXED":
+        elif r == "MIXED":
             out.append(_ck("regime", W, "Market regime MIXED: swing edge is weaker, take smaller or wait"))
-        elif ctx.regime == "TRENDING":
+        elif r == "TRENDING":
             out.append(_ck("regime", P, "Market regime TRENDING: swing longs have historically worked here"))
         else:
-            out.append(_ck("regime", W, "Regime unknown: could not classify the market, treat swing edge as unconfirmed"))
+            out.append(_ck("regime", W, unknown + "treat swing edge as unconfirmed"))
     else:
-        if ctx.regime == "HOSTILE":
+        if r == "HOSTILE":
             out.append(_ck("regime", W, "Market regime HOSTILE: intraday longs face a falling market, be selective"))
-        elif ctx.regime is None:
-            out.append(_ck("regime", W, "Regime unknown: could not classify the market, be selective"))
+        elif r in ("TRENDING", "MIXED"):
+            out.append(_ck("regime", P, f"Market regime {r} does not restrict intraday longs"))
         else:
-            out.append(_ck("regime", P, f"Market regime {ctx.regime} does not restrict intraday longs"))
+            out.append(_ck("regime", W, unknown + "be selective"))
 
     # 2 reward_risk
     try:
         rr = p.rr_t1
     except ZeroDivisionError:
         rr = float("nan")
+    d = 2
+    if abs(rr - lim.min_rr) < 0.005:  # widen until the two numbers visibly differ
+        d = 3
+        while d < 9 and f"{rr:.{d}f}" == f"{lim.min_rr:.{d}f}":
+            d += 1
     if not (rr >= lim.min_rr):
-        out.append(_ck("reward_risk", B, f"Reward:risk 1:{rr:.2f} is below minimum 1:{lim.min_rr:.2f}"))
+        out.append(_ck("reward_risk", B, f"Reward:risk 1:{rr:.{d}f} is below minimum 1:{lim.min_rr:.{d}f}"))
     else:
-        out.append(_ck("reward_risk", P, f"Reward:risk 1:{rr:.2f} meets minimum 1:{lim.min_rr:.2f}"))
+        out.append(_ck("reward_risk", P, f"Reward:risk 1:{rr:.{d}f} meets minimum 1:{lim.min_rr:.{d}f}"))
 
     # 3 size
-    if sizing.qty < 1:
+    qty = _num(sizing.qty)
+    if qty is None:
+        out.append(_ck("size", B, "Position size is not a valid number"))
+    elif qty < 1:
         out.append(_ck("size", B, f"Position size is zero: {sizing.note}" if sizing.note else "Position size is zero shares"))
     else:
         out.append(_ck("size", P, f"Size {sizing.qty} shares, limited by {sizing.binding_limit}"))
@@ -128,13 +148,15 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 5 daily_loss
     lost = -realised_today(ctx.journal, prof.code, now.date())
     cap = lim.capital * lim.daily_loss_limit_pct / 100
-    if lost >= cap:
+    if not (math.isfinite(cap) and cap > 0):
+        out.append(_ck("daily_loss", B, "Daily loss limit is not configured"))
+    elif lost >= cap:
         out.append(_ck("daily_loss", B, f"Daily loss limit hit: lost {prof.money(lost)} today against a limit of {prof.money(cap)}"))
     else:
         out.append(_ck("daily_loss", P, f"Daily loss {prof.money(max(lost, 0.0))} is within the limit of {prof.money(cap)}"))
 
     # 6 ban_list
-    sym = p.symbol.upper()
+    sym = str(p.symbol).strip().upper()
     if sym.endswith("." + prof.exchange) and prof.exchange:
         sym = sym[: -len(prof.exchange) - 1]
     if not prof.has_ban_list:
@@ -151,14 +173,14 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 7 monte_carlo
     if odds is None:
         out.append(_ck("monte_carlo", W, "Monte Carlo odds unavailable: no simulated expectancy to check"))
-    elif not math.isfinite(odds.mc_expectancy_r):
+    elif (mc := _num(odds.mc_expectancy_r)) is None:
         out.append(_ck("monte_carlo", W, "Monte Carlo expectancy is not a number — odds unavailable"))
-    elif odds.mc_expectancy_r < 0:
-        out.append(_ck("monte_carlo", B, f"Simulated expectancy {odds.mc_expectancy_r:+.2f}R is negative"))
-    elif odds.mc_expectancy_r < 0.1:
-        out.append(_ck("monte_carlo", W, f"Simulated expectancy {odds.mc_expectancy_r:+.2f}R is thin (under +0.10R)"))
+    elif mc < 0:
+        out.append(_ck("monte_carlo", B, f"Simulated expectancy {mc:+.2f}R is negative"))
+    elif mc < 0.1:
+        out.append(_ck("monte_carlo", W, f"Simulated expectancy {mc:+.2f}R is thin (under +0.10R)"))
     else:
-        out.append(_ck("monte_carlo", P, f"Simulated expectancy {odds.mc_expectancy_r:+.2f}R is healthy"))
+        out.append(_ck("monte_carlo", P, f"Simulated expectancy {mc:+.2f}R is healthy"))
 
     # 8 freshness
     tz = ZoneInfo(prof.tz)
@@ -188,7 +210,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     if swing:
         out.append(_ck("entry_window", P, "Swing entries have no time-of-day window"))
     elif naive:
-        out.append(_ck("entry_window", B, "Clock has no timezone — cannot verify the entry window"))
+        out.append(_ck("entry_window", B, "Clock has no timezone — cannot verify freshness"))
     elif now.weekday() >= 5:
         out.append(_ck("entry_window", B, f"Market is closed: {now:%A} is a weekend"))
     elif not (prof.no_entry_before <= now.time() <= prof.no_entry_after):
@@ -197,12 +219,13 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("entry_window", P, f"{now:%H:%M} is inside the entry window {prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"))
 
     # 10 liquidity
-    if ctx.turnover_20d is None or not math.isfinite(ctx.turnover_20d):
+    turn = _num(ctx.turnover_20d)
+    if turn is None:
         out.append(_ck("liquidity", W, "Liquidity unavailable: 20-day turnover could not be computed"))
-    elif ctx.turnover_20d < prof.min_turnover:
-        out.append(_ck("liquidity", B, f"20-day turnover {prof.money(ctx.turnover_20d)} is below the minimum {prof.money(prof.min_turnover)}"))
+    elif turn < prof.min_turnover:
+        out.append(_ck("liquidity", B, f"20-day turnover {prof.money(turn)} is below the minimum {prof.money(prof.min_turnover)}"))
     else:
-        out.append(_ck("liquidity", P, f"20-day turnover {prof.money(ctx.turnover_20d)} meets the minimum {prof.money(prof.min_turnover)}"))
+        out.append(_ck("liquidity", P, f"20-day turnover {prof.money(turn)} meets the minimum {prof.money(prof.min_turnover)}"))
 
     # 11 earnings
     if not ctx.earnings_checked:
@@ -214,7 +237,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         if swing:
             window = math.ceil(p.max_hold_bars * 7 / 5)
             if days < 0:
-                out.append(_ck("earnings", W, f"Earnings date {ctx.next_earnings} is in the past: the date looks stale"))
+                out.append(_ck("earnings", W, f"Earnings date looks stale: {ctx.next_earnings} is in the past"))
             elif days <= window:
                 out.append(_ck("earnings", W, f"Earnings on {ctx.next_earnings} are {days} days away, inside the {window}-day hold window"))
             else:
@@ -228,21 +251,20 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     if odds is None:
         out.append(_ck("setup_history", W, "Setup history unavailable: no past trades of this setup to check"))
     else:
-        n, exp = odds.history_n, odds.history_expectancy_r
-        if exp is not None and not math.isfinite(exp):
-            exp = None
+        n, exp = _num(odds.history_n), _num(odds.history_expectancy_r)
         if not swing:
-            if n < 20 or exp is None or exp < 0.2:
+            if n is None or not (n >= 20) or exp is None or exp < 0.2:
                 out.append(_ck("setup_history", B, "Research only: this setup hasn't earned +0.2R over ≥20 past sessions on this stock"))
             else:
-                out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n} past sessions on this stock"))
-        elif n < 20:
-            out.append(_ck("setup_history", W, f"Only {n} past samples of this setup (need 20): too few samples to trust"))
+                out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n:.0f} past sessions on this stock"))
+        elif n is None or not (n >= 20):
+            shown = "an unknown number of" if n is None else f"{n:.0f}"
+            out.append(_ck("setup_history", W, f"Only {shown} past samples of this setup (need 20): too few samples to trust"))
         elif exp is None or exp < 0:
             shown = "unknown" if exp is None else f"{exp:+.2f}R"
-            out.append(_ck("setup_history", W, f"Setup history expectancy is {shown} over {n} samples"))
+            out.append(_ck("setup_history", W, f"Setup history expectancy is {shown} over {n:.0f} samples"))
         else:
-            out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n} past samples"))
+            out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n:.0f} past samples"))
 
     # 13 stoploss_streak
     if stoploss_streak(ctx.journal, prof.code):
@@ -251,8 +273,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("stoploss_streak", P, f"No run of 3 straight losses in the {prof.code} journal"))
 
     # 14 gap
-    g = ctx.today_gap_pct
-    if g is None or not math.isfinite(g):
+    g = _num(ctx.today_gap_pct)
+    if g is None:
         out.append(_ck("gap", W, "Today's gap could not be measured: entry price may be off"))
     elif abs(g) > 2:
         out.append(_ck("gap", W, f"Today's gap of {g:+.1f}% is larger than 2%: entry price may be off"))
@@ -260,13 +282,14 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("gap", P, f"Today's gap of {g:+.1f}% is within 2%"))
 
     # 15 robustness
-    nf = odds.noise_negative_frac if odds is not None else None
-    if nf is None:
-        out.append(_ck("robustness", P, "Noise robustness test not run"))
-    elif not math.isfinite(nf):
+    raw_nf = odds.noise_negative_frac if odds is not None else None
+    nf = _num(raw_nf)
+    if raw_nf is None:
+        out.append(_ck("robustness", P, "Robustness not run: noise robustness test was not performed"))
+    elif nf is None:
         out.append(_ck("robustness", W, "Noise robustness result is not a number: fragility unknown"))
     elif nf > 0.25:
-        out.append(_ck("robustness", W, f"Edge is fragile: {nf:.0%} of noisy replays lose money (limit 25%)"))
+        out.append(_ck("robustness", W, f"Noise test: edge is fragile, {nf:.0%} of noisy replays lose money (limit 25%)"))
     else:
         out.append(_ck("robustness", P, f"Only {nf:.0%} of noisy replays lose money (limit 25%)"))
 

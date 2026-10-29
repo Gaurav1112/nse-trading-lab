@@ -220,3 +220,99 @@ def test_streak_date_ties_use_journal_order():
     # loss listed last on the tie date with two earlier losses -> streak
     m = [j[0], j[3], j[1], j[2]]
     assert stoploss_streak(m + [{"pnl": -1, "closed_date": "2026-10-22"}], "NSE") is False
+
+
+# ---- Fix round 2 ----
+def _c(name, p=None, s=SIZE, o=ODDS, **kw):
+    return [c for c in run_checks(p or plan(), s, o, ctx(**kw)) if c.name == name][0]
+
+
+def _intra():
+    return plan(mode=Mode.INTRADAY, last_bar="2026-10-29T09:45:00")
+
+
+@pytest.mark.parametrize("reg", ["garbage", "", "   "])
+def test_intraday_unknown_regime_warns(reg):
+    c = _c("regime", p=_intra(), regime=reg)
+    assert c.status is Status.WARN and "Regime unknown" in c.reason
+
+
+@pytest.mark.parametrize("reg", ["hostile", " Hostile "])
+def test_swing_hostile_case_insensitive_blocks(reg):
+    assert _c("regime", regime=reg).status is Status.BLOCK
+
+
+def test_swing_garbage_regime_warns():
+    assert _c("regime", regime="garbage").status is Status.WARN
+
+
+def test_intraday_hostile_lowercase_warns():
+    assert _c("regime", p=_intra(), regime="hostile").status is Status.WARN
+    assert _c("regime", p=_intra(), regime="trending").status is Status.PASS
+
+
+J2 = tuple({"pnl": -1500, "closed_date": "2026-10-29"} for _ in range(2))
+
+
+@pytest.mark.parametrize("lim", [
+    Limits(capital=NAN), Limits(capital=100_000, daily_loss_limit_pct=NAN),
+    Limits(capital=100_000, daily_loss_limit_pct=0), Limits(capital=0)])
+def test_unconfigured_loss_limit_blocks(lim):
+    c = _c("daily_loss", limits=lim)
+    assert c.status is Status.BLOCK and "Daily loss limit is not configured" in c.reason
+
+
+def test_nan_qty_blocks():
+    assert _c("size", s=replace(SIZE, qty=NAN)).status is Status.BLOCK
+
+
+@pytest.mark.parametrize("mode_p,st", [(None, Status.WARN), ("i", Status.BLOCK)])
+def test_nan_history_n_missing(mode_p, st):
+    p = _intra() if mode_p else plan()
+    assert _c("setup_history", p=p, o=replace(ODDS, history_n=NAN)).status is st
+
+
+def test_ban_symbol_whitespace_and_ns_suffix():
+    b = BanList(frozenset({"ABC"}), "ok", None, "")
+    assert _c("ban_list", p=replace(plan(), symbol=" ABC"), ban=b).status is Status.BLOCK
+    assert _c("ban_list", p=replace(plan(), symbol="abc.ns "), ban=b).status is Status.BLOCK
+
+
+def test_exact_reason_wording():
+    assert "edge is fragile" in _c("robustness", o=replace(ODDS, noise_negative_frac=0.5)).reason
+    assert "Earnings date looks stale" in _c("earnings", next_earnings=date(2026, 10, 1)).reason
+    assert "Robustness not run" in _c("robustness", o=replace(ODDS, noise_negative_frac=None)).reason
+    naive = datetime(2026, 10, 29, 10, 0)
+    assert _c("entry_window", p=_intra(), now=naive).reason == "Clock has no timezone — cannot verify freshness"
+    assert _c("freshness", p=_intra(), now=naive).reason == "Clock has no timezone — cannot verify freshness"
+
+
+def test_reward_risk_reason_shows_distinct_numbers_near_min():
+    c = _c("reward_risk", p=plan(t1=100 + 2 * Limits(capital=1).min_rr - 1e-6))
+    assert c.status is Status.BLOCK
+    import re
+    a, b = re.findall(r"1:(\d+\.\d+)", c.reason)
+    assert a != b
+    c2 = _c("reward_risk", p=plan(t1=101))
+    assert re.findall(r"1:(\d+\.\d+)", c2.reason) == ["0.50", "%.2f" % Limits(capital=1).min_rr]
+
+
+def test_streak_tie_order_decides_result():
+    L = lambda d: {"pnl": -1, "closed_date": f"2026-10-{d}"}
+    W = lambda d: {"pnl": 5, "closed_date": f"2026-10-{d}"}
+    # stable sort: L20, L21, W22, L22 -> last three L21, W22, L22 -> no streak
+    assert stoploss_streak([L(20), W(22), L(21), L(22)], "NSE") is False
+    # stable sort: L21, W22, L22, L22 -> last three W22, L22, L22 -> no streak
+    assert stoploss_streak([W(22), L(21), L(22), L(22)], "NSE") is False
+    # stable sort: W22 kept first among ties, then L22, L22, L22 -> last three all losses
+    assert stoploss_streak([W(22), L(22), L(22), L(22)], "NSE") is True
+    # same entries, win listed last on the tie date -> streak broken
+    assert stoploss_streak([L(22), L(22), L(22), W(22)], "NSE") is False
+
+
+def test_string_numerics_never_raise():
+    assert _c("liquidity", turnover_20d="1e9").status is Status.WARN
+    assert _c("gap", today_gap_pct="x").status is Status.WARN
+    assert _c("monte_carlo", o=replace(ODDS, mc_expectancy_r="1")).status is Status.WARN
+    assert _c("setup_history", o=replace(ODDS, history_expectancy_r="x")).status is Status.WARN
+    assert _c("robustness", o=replace(ODDS, noise_negative_frac="x")).status is Status.WARN
