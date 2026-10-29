@@ -269,3 +269,13 @@ def test_i4_cli_money_block_labels_expected_value():
     v = replace(decide(p, s, None, OK, NSE, 999.5, _NOW), odds=ODDS)
     text = "\n".join(format_money(build_card(v, NSE, lim), NSE))
     assert "expected value" in text and "assumes a fill at the trigger; up to" in text
+
+
+def test_me_cli_profit_line_carries_the_trigger_fill_note():
+    from nse_backtest.desk.cli import format_money
+    p = _probe_plan(Mode.INTRADAY)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    lines = format_money(build_card(decide(p, s, None, OK, NSE, 999.5, _NOW), NSE, lim), NSE)
+    (profit,) = [x for x in lines if "profit at T1" in x]
+    assert "(assumes a fill at the trigger; up to" in profit

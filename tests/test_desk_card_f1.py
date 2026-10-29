@@ -309,3 +309,28 @@ def test_ma_card_blocks_an_intraday_override_before_the_window_opens(monkeypatch
     at, _ = _card_page(monkeypatch, tmp_path, v)
     assert "I choose this anyway" not in _boxes(at)
     assert "before the entry window opens (09:30)" in _texts(at.warning)
+
+
+def test_mc_intraday_tab_table_and_headline_say_stale_then_show_the_recheck(monkeypatch, tmp_path):
+    _clock(monkeypatch, T)
+    base = _intraday(_base(monkeypatch, tmp_path))
+    old = replace(_at(base, T, 20), headline="TAKE ABC — BUY 50 @ old")
+    fresh = replace(_at(base, T, 0), headline="TAKE ABC — BUY 50 @ fresh")
+    at, _ = _intraday_tab(monkeypatch, tmp_path, old, fresh)
+    tab = at.tabs[4]
+    df = next(d.value for d in tab.dataframe if "Headline" in d.value.columns)
+    assert df["Headline"].iloc[0] == "TAKE ABC (stale — re-check)"
+    assert "BUY 50 @ old" not in _texts(tab.markdown)
+    next(b for b in tab.button if b.label == "Re-check").click().run()
+    tab = at.tabs[4]
+    df = next(d.value for d in tab.dataframe if "Headline" in d.value.columns)
+    assert df["Headline"].iloc[0] == "TAKE ABC — BUY 50 @ fresh"
+    assert "BUY 50 @ fresh" in _texts(tab.markdown)
+
+
+def test_me_profit_lines_carry_the_trigger_fill_note(monkeypatch, tmp_path):
+    _clock(monkeypatch, T)
+    v = replace(_at(_intraday(_base(monkeypatch, tmp_path)), T, 1), current_price=None)
+    v = replace(v, current_price=v.plan.entry - 0.01)
+    at, _ = _card_page(monkeypatch, tmp_path, v)
+    assert "Profit at T1 and T2 assumes a fill at the trigger; up to" in _texts(at.caption)

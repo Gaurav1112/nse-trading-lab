@@ -206,6 +206,8 @@ def _money(card, profile) -> None:
     cols[2].metric("Profit at T2", m(card.profit_t2))
     cols[3].metric("Risk:Reward", f"1:{card.rr_t1:.2f}")
     cols[4].metric("Expected value", "n/a (no odds)" if card.expected_value is None else m(card.expected_value))
+    if card.fill_note:
+        st.caption(f"Profit at T1 and T2 {card.fill_note}.")
     if card.fill_note and card.expected_value is not None:
         st.caption(f"Expected value {card.fill_note}.")
     st.caption(f"{card.qty} shares{' (your quantity)' if card.qty_is_override else ''} · notional "

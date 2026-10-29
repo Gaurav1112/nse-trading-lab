@@ -9,7 +9,7 @@ import hashlib
 import html
 import json
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -403,19 +403,25 @@ with tab_intra:
         if not verdicts:
             st.info("No setups scanned.")
         else:
+            now_m = desk_card.market_now(profile)
+            rows = []  # (verdict now: a Re-check replaces a stale one, as displayed, stale reason)
+            for v in verdicts:
+                cur = desk_card.current_verdict(v, "intra")
+                stale = desk_card.stale_reason(cur, profile, now_m)
+                shown_v = (replace(cur, headline=f"{cur.action.value} {cur.plan.symbol} (stale — re-check)")
+                           if stale is not None else cur)
+                rows.append((cur, shown_v, stale))
             st.dataframe(pd.DataFrame([{
-                "Symbol": v.plan.symbol, "Action": v.action.value, "Headline": v.headline,
-                "MC R": _r(v.odds.mc_expectancy_r if v.odds is not None else None)} for v in verdicts]),
+                "Symbol": sv.plan.symbol, "Action": sv.action.value, "Headline": sv.headline,
+                "MC R": _r(sv.odds.mc_expectancy_r if sv.odds is not None else None)} for _, sv, _ in rows]),
                 hide_index=True, width="stretch")
-            for i, v in enumerate(verdicts):
-                if v.action is Action.SKIP:
+            for i, (cur, shown_v, stale) in enumerate(rows):
+                if cur.action is Action.SKIP:
                     continue
-                with st.expander(f"{v.action.value} — {v.plan.symbol}", expanded=v.action is Action.TAKE):
-                    v = desk_card.current_verdict(v, "intra")  # a Re-check below replaces a stale verdict
-                    stale = desk_card.stale_reason(v, profile, desk_card.market_now(profile))
-                    render_verdict(v, profile, f"intra_{i}", at=istate["at"], show_ticket=stale is None)
-                    if stale is not None:  # never a stale ticket: re-check first
-                        desk_card.recheck_prompt(v, profile, limits, "intra", f"intra_{i}_{v.input_hash[:12]}",
+                with st.expander(f"{cur.action.value} — {cur.plan.symbol}", expanded=cur.action is Action.TAKE):
+                    render_verdict(shown_v, profile, f"intra_{i}", at=istate["at"], show_ticket=stale is None)
+                    if stale is not None:  # never a stale ticket or headline: re-check first
+                        desk_card.recheck_prompt(cur, profile, limits, "intra", f"intra_{i}_{cur.input_hash[:12]}",
                                                  stale)
         if failures:
             with st.expander(f"Not scanned ({len(failures)})"):
