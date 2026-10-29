@@ -52,14 +52,33 @@ picks). It does nothing for a TAKE. Intraday tickets are stop-limit orders (a pl
 when the price is already at or above the trigger) with a "cancel the entry if not filled by" time; relay
 that line.
 
+`plan --all` ranks every checked candidate ("your call"): TAKE, WAIT, advice-only SKIPs (market regime or odds),
+then data/limit SKIPs, with entry, stop, targets, quantity, max loss and expected value. `plan` also prints a HOLDING
+UP list: stocks above their 50-EMA beating the index, a watchlist for when the regime turns, never a trade
+(`plan --json`: `holding_up: {"note", "stocks": [{"symbol", "vs_index_pts"}], "unavailable"}`). `check SYM --desk-entry`
+prices a swing at the plan's own entry. `scoreboard` has a third record, "Desk sat out (market regime)": what
+sitting out would have done; report it apart from the other two.
+
+Advice versus blocks: a market-regime or odds BLOCK is advice the user may overrule with `--choose` (the override
+header states the regime's held-out cost in money, NSE HOSTILE only). Broken data (freshness, live price, gap) is
+not overridable: `--choose` refuses, re-check first. A short on a non-F&O or F&O-banned stock is never takeable.
+A long in the F&O ban is only a WARN (derivatives only; cash allowed).
+
 Rules for Claude:
-- When presenting a trade, give the money first: max loss, then profit at T1 and T2 (and say a gap can
+- Never present an unproven short as a desk pick. A short is a TAKE only when `short_edge` PASSes (today's
+  `shortcheck`: 200+ pooled trades, positive at 2× slippage) and the stock's own short odds are positive. Otherwise
+  say "edge not proven" or "edge check unavailable" and that it is at most the user's own call. Remind the user a
+  short must be bought back the same day (square off by 15:10), and that a stock locked at its circuit risks an
+  exchange auction.
+- Quick verdicts (marked quick, empty ticket) need a full `check SYM --desk-entry` before the user chooses.
+- Report money first, always: max loss, then profit at T1 and T2. Then the verdict and reasons.
+- When presenting a trade, give the money in full: max loss, then profit at T1 and T2 (and say a gap can
   lose more than the max loss). Then the verdict line, every BLOCK and WARN in plain words, then the ticket.
 - Never soften a SKIP or a negative expectancy. "No trade" is a valid answer; say what would change it.
 - Never place, modify or cancel an order, and never call a broker order tool. The user types the
   ticket into Kite or their US broker themselves.
 - Lead with expectancy in R, not win rate.
-- Quick verdicts in `plan --all`/`--json` (first_pass) need `check SYM --entry X` before relaying anything.
+- Quick verdicts in `plan --all`/`--json` (first_pass) need `check SYM --desk-entry` before relaying anything.
 - If `plan` prints "PLAN FAILED for every symbol", say the desk is broken today, not that there is no trade.
 - If the user asks for portfolio context and the `kite` MCP server is connected, use its read-only
   holdings/positions tools only.

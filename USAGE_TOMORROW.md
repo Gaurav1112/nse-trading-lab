@@ -5,7 +5,7 @@
 ## Launch (one step — pre-flight runs automatically)
 
 ```bash
-cd /Users/racit/PersonalProject/nse-trading-lab
+cd <path to this repo>
 ./start.sh
 # Runs scripts/startup_check.py first; refuses to launch if any check fails.
 # Override with SKIP_PREFLIGHT=1 ./start.sh (don't).
@@ -45,6 +45,25 @@ cd /Users/racit/PersonalProject/nse-trading-lab
    against its advice ("Your overrides"), not your real trades. Until it says
    "Matching the odds" on 30+ resolved trades, keep paper-trading. Do not delete
    `~/.nse-trading-lab/desk_scoreboard.json`: intraday results older than about 60 days live only there.
+
+## On a HOSTILE day (the "TAKE: none" day)
+
+The desk still shows numbers. Work the day in this order:
+
+1. Open **Choose a Trade**. The table ranks every stock the desk checked, with levels and money, best first. A
+   row marked "(quick check)" is a first pass: open it and press **Full check** before relying on it.
+2. Open a card. Read the money first (max loss, profit at T1 and T2), then the market banner ("Market says sit
+   out", amber): that is advice, and overruling it is your call, logged as your override with the regime's
+   historical cost in money. Red problems (data, limits) and short safety blocks are not advice: fix or re-check,
+   or leave it.
+3. Decide. If you take a trade, type the ticket into your broker yourself. The "Holding up" list is not a
+   trade; it is stocks to watch for when the regime turns.
+4. Before relying on any short (Intraday tab, or `check SYM --mode intraday --side short`), run
+   `python3.13 -m nse_backtest.desk shortcheck`. Until it shows 200+ pooled trades with a positive expectancy, a
+   short is at most WAIT. If you take one anyway, square off yourself by 15:10; the broker's auto square-off adds a
+   charge, and a stock stuck at its circuit can go to an exchange auction.
+5. Once a week, open the **Scoreboard** and read the "Desk sat out (market regime)" record: it shows whether
+   staying out of regime-blocked trades saved or cost money.
 
 ## The order to read the screen
 

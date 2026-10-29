@@ -66,7 +66,11 @@ python3.13 -m nse_backtest.desk check RELIANCE            # one stock, swing
 python3.13 -m nse_backtest.desk check AAPL --market US --mode intraday
 python3.13 -m nse_backtest.desk check RELIANCE --qty 20     # the money for your own quantity
 python3.13 -m nse_backtest.desk check RELIANCE --choose     # take a WAIT/SKIP anyway (logged as your override)
+python3.13 -m nse_backtest.desk check RELIANCE --desk-entry # swing at the plan's own entry, not the last close
+python3.13 -m nse_backtest.desk check INFY --mode intraday --side short   # ORB breakdown short (NSE, HOSTILE days)
+python3.13 -m nse_backtest.desk shortcheck                 # may shorts be a TAKE today? (pooled history, cached per day)
 python3.13 -m nse_backtest.desk plan                      # today's TAKE / WATCH lists
+python3.13 -m nse_backtest.desk plan --all                # every candidate, ranked, with the money
 python3.13 -m nse_backtest.desk positions                 # HOLD / TIGHTEN_STOP / EXIT
 python3.13 -m nse_backtest.desk scoreboard                # paper record of logged TAKEs (all markets)
 python3.13 -m nse_backtest.desk scoreboard --market US --json
@@ -82,10 +86,24 @@ python3.13 -m nse_backtest.desk scoreboard --market US --json
 
 ### Choose a Trade
 
-The first tab lists every candidate the desk has seen today: the Today's Plan TAKE and WATCH lists and the
-Intraday-tab scan (build them on their own tabs, or press the load button on this tab). A table shows, per
-candidate, the desk's verdict, entry, stop, targets, quantity, max loss, profit at T1 and the win odds. Pick one
-to open its trade card:
+The first tab is a "your call" ranking. It lists every stock the desk has checked today, with levels and money, not
+only the TAKEs: the Today's Plan TAKE, WATCH and "also checked" stocks, and the Intraday-tab scan (build them on
+their own tabs, or press the load button on this tab). On a day when the desk says "TAKE: none", the table still
+shows each stock's entry, stop, targets, quantity, max loss, profit at T1, expected value and win odds, so you can
+decide for yourself. Order: TAKE, then WAIT, then SKIPs blocked only by the market regime or the odds (advice),
+then SKIPs blocked by data or limits; within a group, by Monte Carlo expectancy, best first. Extra columns are
+"Checked", "To entry %", "Exp R" and "Expected value". `plan --all` prints the same ranked table, with a
+`check SYM --choose --desk-entry` hint per row.
+
+- **Quick verdicts need a full check.** The plan prices its first pass on the last close with no live quote. Those
+  rows are marked "(quick check)"; their card says "Quick check — run a full check before choosing", has a
+  **Full check** button, and shows no ticket and no override box until the full check has run. A quick verdict
+  has an empty `ticket` in `plan --json`. A TAKE demoted by the full check is not replaced by the next quick one.
+- "Check it" and Check a Trade use the plan's own entry (swing: breakout above the 20-day high), not the last
+  close. On the CLI that is `check SYM --desk-entry`; plain `check` still uses the last close unless you pass
+  `--entry`.
+
+Pick one to open its trade card:
 
 - **Money** (at the desk's size, or at a quantity you type in): max loss, profit at T1, profit at T2,
   reward:risk, expected value, and the share of capital deployed and at risk.
@@ -105,6 +123,15 @@ to open its trade card:
   listed in red. Risk per trade compares the max loss (costs included) with your limit, the sizer's own rule.
   The daily-loss line compares this trade alone with the limit; losses already taken today are checked by the
   daily-loss check. The desk still shows the numbers; the decision is yours.
+- **Advice versus blocks.** Each reason on the card sits in one group:
+  - *Market* (the regime check): an amber **Market says sit out** banner, with what would flip it. This is advice.
+  - *Odds* (Monte Carlo, setup history, robustness, earnings; for shorts the edge gate, the short Monte Carlo and
+    relative volume): an amber **Advice** box. Also advice.
+  - *Data* (freshness, live price, gap) and *limits* (size, risk governor, daily loss, PDT, ban list, stop-out
+    streak, liquidity, entry window, reward:risk): red **Real problems**. Data and limits warnings that do not
+    block are amber "Check before entering".
+  - *Safety* (a short that is not an F&O stock, is in the F&O ban, or whose lists cannot be verified): red "This
+    short can't be taken". No ticket, no override box, and `check --choose` refuses.
 - **The override gate**: for a WAIT or SKIP the ticket stays hidden until you tick "I choose this anyway". The
   ticket is then headed "YOUR OVERRIDE — the desk said SKIP" and the choice is logged once per verdict (one
   row, with the quantity at the first tick; changing the quantity afterwards adds no rows). The CLI does the
@@ -112,6 +139,15 @@ to open its trade card:
   chose (the verdict's own time is kept as `verdict_created_at`), and the scoreboard replays it from then, so a
   move that ran before your decision is never credited to it. A WAIT also shows the desk's own conditional
   ticket ("IF TRIGGERED") without needing an override.
+  - **Overriding the market regime** is allowed and costs a stated amount. On NSE the header reads "YOUR
+    OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged -1.61% per trade, a
+    loss of about ₹x on this position" (the percentage times the position's notional). The held-out figure is
+    measured for NSE HOSTILE only; US and other regimes get the warning without a number.
+  - **Re-check on broken data.** If any data check BLOCKs, there is no override box and no ticket, only a
+    **Re-check** button ("Data is broken (...) — re-check before choosing"). `check --choose` prints "--choose
+    refused: data is broken" and exits 1. Broken data is not an opinion to overrule.
+  - **F&O ban.** For a long (swing or intraday) the ban is a WARN: derivatives are banned, cash is allowed. For
+    an intraday short it is a safety BLOCK, and so is a ban list that cannot be verified or is stale.
 - **Age**: the candidates table has a "Built" column and every card says "built HH:MM (n min ago)". An intraday
   verdict older than 15 minutes, or shown past the entry cutoff, has no ticket and no override box: it shows a
   Re-check button that runs the full check again and replaces the card's verdict. Swing tickets stay, with the
@@ -125,9 +161,66 @@ to open its trade card:
   the 5th, 50th and 95th percentile of the account and the share of runs with a 10% drawdown or a loss.
 - Every projection is a range of the stock's past behaviour, **not a forecast**.
 
+- **Holding up (not a trade).** Below the table, up to 10 stocks that are above their own 50-day EMA and beating
+  the index over 60 days, ranked by that lead in index points. It is a watchlist for when the regime turns: no
+  money, no ticket, no action. If the index and the stocks' last bar dates differ, stocks on a different day are
+  left out (or the whole list is withheld) and the page says why. `plan` prints it as HOLDING UP; in `plan --json`
+  it is `holding_up: {"note", "stocks": [{"symbol", "vs_index_pts"}], "unavailable"}`.
+
 Check a Trade from the terminal prints the same Money block:
 `python3.13 -m nse_backtest.desk check RELIANCE --qty 20` uses your quantity instead of the desk's size
 (breaches are listed), and `--choose` prints and logs the override ticket for a WAIT or SKIP.
+
+### Intraday scan and ORB breakdown shorts
+
+The Intraday tab scans the **whole universe** (not the first 15), with a progress bar, behind its button. Every
+row (TAKE, WAIT or SKIP) has an Open card button that shows the same trade card and override rules as above.
+
+**ORB breakdown shorts** are for **HOSTILE NSE days only**, on **F&O stocks only**. The reasoning: in a falling
+market the evidence favours cash, and the one intraday idea worth testing is a short through the first
+15-minute bar's low on a liquid stock. A short is cash-segment MIS; it is not a futures or options trade.
+- Plan: opening range = the first 15-minute bar. Entry trigger = its low, stop = its midpoint, T1 = entry - 1.5R,
+  T2 = entry - 3R. The sell limit is the smaller of 0.25R and 0.5% of the entry below the trigger. Size comes from
+  the rupee risk at the worst fill (stop minus the limit).
+- Checks beyond the long list: `short_regime` (not HOSTILE or not NSE = BLOCK, advice), `short_fno` (safety
+  BLOCK), `ban_list` (BLOCK for shorts), `relative_volume` (WARN unless the opening bar's volume is at least 1.5×
+  its 20-session median), `short_edge` and `short_monte_carlo`. Setup history and robustness are not run for
+  shorts.
+- **The edge gate.** A short can be a desk TAKE only if two things hold. First, the pooled ORB-short history over
+  today's eligible universe (F&O list, HOSTILE days only, about 60 days of 15-minute bars) has **at least 200
+  trades and a positive expectancy at 2× slippage**. Second, the stock's own simulated short odds are positive
+  (`short_monte_carlo`). Otherwise the short is at most WAIT with "edge not proven on the desk's own history yet
+  (n trades, x R)", and you can still take it as your own call. Per-stock history is too short to prove an edge
+  alone, hence the pool. Run `python3.13 -m nse_backtest.desk shortcheck` (or the button on the Intraday tab)
+  **daily**: the figure is cached for the day and a check never recomputes it. Until you run it, every short
+  reads "edge check unavailable". A short with a user stop or target is not the geometry the pool proves, so its
+  `short_edge` check warns instead of passing.
+- **Tickets** cover both price branches. At or below the trigger: `SELL n SYM MIS LIMIT {limit}`. Above it:
+  `SELL n SYM MIS SL trigger {entry} limit {limit}`. Then `SL-M BUY n SYM trigger {stop}`, `BUY n SYM LIMIT {T1}`,
+  "Cancel the entry if not filled by ..." and "Square off yourself by 15:10 IST (broker auto square-off charges
+  ₹59+)". The desk places nothing.
+- **Square off yourself by 15:10.** A retail cash-segment short has to be bought back the same day: SEBI's
+  short-selling framework (circular of 5 Jan 2024) bars naked short selling, requires delivery at settlement and
+  lets retail traders square off intraday. A position you cannot cover (for example a stock locked at its upper
+  circuit) becomes a short delivery, settled by an exchange auction on T+1 at a price you do not control, with
+  close-out rules that can reach 20% above the auction-day price. F&O stocks have dynamic price bands, which
+  cuts that risk, so the desk allows F&O stocks only. If the broker squares you off, Zerodha charges about ₹50
+  plus GST per order. Sources:
+  - SEBI short-selling framework: https://www.sebi.gov.in/legal/circulars/jan-2024/framework-for-short-selling_80448.html
+  - Short delivery and auctions: https://support.zerodha.com/category/trading-and-markets/trading-faqs/general/articles/what-is-short-delivery-and-what-are-its-consequences
+  - Auction without fresh sellers: https://support.zerodha.com/category/trading-and-markets/trading-faqs/general/articles/short-delivery-without-fresh-sellers-auction-market
+  - Dynamic price bands for F&O stocks: https://www.sebi.gov.in/sebi_data/attachdocs/feb-2019/1549883290545.pdf
+  - Auto square-off charge: https://support.zerodha.com/category/trading-and-markets/trading-faqs/market-sessions/articles/intraday-auto-square-off-timings
+  - Costs and MIS cut-off: https://zerodha.com/charges/
+  - SEBI FY23 study (71% of individual intraday traders lost money): https://www.sebi.gov.in/sebi_data/attachdocs/jul-2024/1721818619980.pdf
+- **Costs.** Intraday round trip on a ₹1,00,000 position is roughly 0.08% before slippage (brokerage, STT on the
+  sell, exchange and SEBI fees, GST, stamp duty on the buy). This is an estimate from the published schedule.
+- **Survivorship.** The pooled history uses today's F&O list and does not replay past bans or past membership, so
+  it is flattered. The shortcheck output says "universe = today's F&O list, past bans not replayed".
+- Shorts are NSE only: a US short returns BLOCK ("Shorts are NSE only") and `check --side short` refuses swing and
+  US.
+- The Scoreboard replays shorts with every rule mirrored and shows them as "intraday short", never pooled with
+  longs (see The Scoreboard).
 
 ### Tickets
 
@@ -164,6 +257,9 @@ change a verdict, a size or a check.
 
 ### The 17 checks
 
+This is the long list. An intraday short adds `short_regime`, `short_fno`, `relative_volume`, `short_edge` and
+`short_monte_carlo`, and runs `ban_list` as a BLOCK; it skips `robustness`. The F&O ban is a WARN for longs.
+
 Missing or failed data is never a PASS: it becomes a WARN or a BLOCK.
 
 | # | Check | BLOCK when | WARN when |
@@ -173,7 +269,7 @@ Missing or failed data is never a PASS: it becomes a WARN or a BLOCK.
 | 3 | `size` | sizing gives less than one share | — |
 | 4 | `risk_governor` | the portfolio governor says no new trades | the governor could not be evaluated |
 | 5 | `daily_loss` | today's realised loss reached the daily limit, or no limit is set | the journal (or today's P&L) is unreadable |
-| 6 | `ban_list` | NSE: the stock is in the F&O ban list | the ban list could not be verified or is stale |
+| 6 | `ban_list` | an intraday short: in the F&O ban, or the list is unverified or stale | a long: in the F&O ban (derivatives only; cash allowed), or the list could not be verified or is stale |
 | 7 | `monte_carlo` | no odds could be computed, or simulated expectancy is below 0R | expectancy is under +0.10R |
 | 8 | `freshness` | the last daily bar misses one or more completed trading sessions (3 calendar days in a year with no holiday calendar), or the last 15-min bar is older than 30 min | the last bar is in the future, today's bar is unfinished, or the year has no holiday calendar |
 | 9 | `live_price` | the live price is at or below the stop | no live quote (last close used), or the quote is over 20 min old in session |
@@ -208,6 +304,12 @@ the Intraday-tab scan) and replays each one against the prices that followed, as
 typed in exactly. TAKEs are scored as **Desk picks** and overrides as **Your overrides**: two separate
 records, never pooled. It is a paper record, **not your real P&L**: it knows nothing about the orders you
 actually placed. It is read-only and places nothing.
+
+A **third record, "Desk sat out (market regime)"**, measures cash as a position. When the regime check is the
+only BLOCK on a full-checked swing long that the desk would otherwise have TAKEn, the plan logs it as `SAT_OUT`
+(once per symbol per session, for the stocks the plan re-checks with a live quote) and the scoreboard replays it
+like a TAKE. Its stats show what sitting out saved or cost. It is never pooled with Desk picks or Your overrides.
+Quick (first-pass) verdicts and an unknown regime are never logged as sat-outs.
 Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; your overrides are scored as a separate record.
 
 Open the **Scoreboard** tab and press "Load scoreboard", or run
