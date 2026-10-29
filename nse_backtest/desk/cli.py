@@ -12,7 +12,7 @@ from enum import Enum
 
 from . import loaders, session
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Limits, Mode
+from .models import Action, DeskVerdict, Mode
 from .positions import review_positions
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
@@ -116,12 +116,12 @@ def cmd_check(a, profile) -> int:
     return _finish(warn + format_verdict(v, profile))
 
 
-def _format_row(v: DeskVerdict, profile, *, why: bool = False) -> str:
+def _format_row(v: DeskVerdict, *, why: bool = False) -> str:
     e = v.odds.mc_expectancy_r if v.odds is not None else None
     row = f"  {v.headline}  [exp {_r(e)}]"
     if why:
         blocks = [c.name for c in v.blocks()]
-        warns = [c.name for c in v.checks if c.status.value == "WARN"]
+        warns = [c.name for c in v.warns()]
         if blocks or warns:
             row += f"\n    blocked by: {', '.join(blocks) or 'none'}; warnings: {', '.join(warns) or 'none'}"
     return row
@@ -137,8 +137,8 @@ def cmd_plan(a, profile) -> int:
     lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
-    lines += ["", "TAKE:"] + ([_format_row(v, profile) for v in plan.take] or ["  none today — no trade is a valid answer"])
-    lines += ["", "WATCH:"] + ([_format_row(v, profile, why=True) for v in plan.watch] or ["  none"])
+    lines += ["", "TAKE:"] + ([_format_row(v) for v in plan.take] or ["  none today — no trade is a valid answer"])
+    lines += ["", "WATCH:"] + ([_format_row(v, why=True) for v in plan.watch] or ["  none"])
     for v in plan.take:
         lines += [""] + format_verdict(v, profile)
     if plan.unavailable:
@@ -159,8 +159,10 @@ def cmd_positions(a, profile) -> int:
         px = "n/a" if x.current_price is None else profile.money(x.current_price)
         r = "n/a" if x.r_so_far is None else f"{x.r_so_far:+.2f}R"
         sug = "" if x.suggested_stop is None else f"  suggested stop {profile.money(x.suggested_stop)}"
-        lines.append(f"  {x.action:<16} {x.symbol}  now {px}  entry {profile.money(x.entry)}  "
-                     f"stop {profile.money(x.stop)}{sug}  {r}  — {x.reason}")
+        entry = "n/a" if x.entry is None else profile.money(x.entry)
+        stop = "n/a" if x.stop is None else profile.money(x.stop)
+        lines.append(f"  {x.action:<16} {x.symbol}  now {px}  entry {entry}  "
+                     f"stop {stop}{sug}  {r}  — {x.reason}")
     return _finish(lines)
 
 
@@ -175,7 +177,7 @@ def cmd_intraday(a, profile) -> int:
     lines = warn + [f"Intraday opening-range scan {profile.code} ({len(syms)} symbols)"]
     for v in verdicts:
         if v.action is Action.SKIP:
-            lines.append(_format_row(v, profile))
+            lines.append(_format_row(v))
         else:
             lines += [""] + format_verdict(v, profile)
     if not verdicts:

@@ -17,6 +17,8 @@ from nse_backtest.desk.markets import get_profile
 from nse_backtest.desk.models import Mode, Odds, TradePlan
 from nse_backtest.desk.plan import atr_series, swing_stop
 
+_INTRADAY_LOOKBACK_BARS = 40 * 25  # ~40 sessions of 15-minute bars (25 per NSE session)
+
 
 def bar_ratios(df: pd.DataFrame, mode: Mode, profile=None) -> np.ndarray:
     """Rows of (O, H, L, C) / previous close, shape (n, 4); non-finite rows dropped.
@@ -234,7 +236,7 @@ def noise_expectancies(df, plan, *, cost_per_share=0.0, runs=20, seed=19, jitter
 
 def odds(df, plan: TradePlan, *, cost_per_share=0.0, replays=10_000, seed=19, block=5,
          lookback=250, robustness=True) -> Odds:
-    window = df.tail(lookback + 1) if plan.mode is Mode.SWING else df.tail(40 * 26)
+    window = df.tail(lookback + 1) if plan.mode is Mode.SWING else df.tail(_INTRADAY_LOOKBACK_BARS)
     ratios = bar_ratios(window, plan.mode, profile=get_profile(plan.market))
     p_t, p_s, p_x, mc_exp = monte_carlo(ratios, plan.entry, plan.stop, plan.target_1,
                                         plan.max_hold_bars, cost_per_share=cost_per_share,

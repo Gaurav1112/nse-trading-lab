@@ -62,3 +62,16 @@ def test_c1_noise_label_in_cli():
                datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo(NSE.tz)))
     text = "\n".join(cli.format_verdict(v, NSE))
     assert "Candle-noise expectancy range: -0.10R to +0.30R" in text and "shuffled" not in text
+
+
+
+def test_d2_no_unused_imports_left():
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    flagged = {"nse_backtest/desk/intraday.py": "replace", "nse_backtest/desk/cli.py": "Limits",
+               "nse_backtest/desk/verdict.py": "Check", "pages/0_Desk.py": "Limits"}
+    for rel, name in flagged.items():
+        tree = ast.parse((root / rel).read_text())
+        imported = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
+        assert name not in imported, f"{rel} still imports {name}"

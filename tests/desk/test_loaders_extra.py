@@ -322,7 +322,7 @@ def test_plan_watch_rows_list_check_names():
     from nse_backtest.desk.daily import daily_plan
     from tests.desk.test_daily_positions_intraday import ctx as dctx, series as dseries
     dp = daily_plan(NSE, {"AAA": dseries()}, dseries(step=0.997), Limits(capital=100_000), dctx(), replays=300)
-    row = cli._format_row(dp.watch[0], NSE, why=True)
+    row = cli._format_row(dp.watch[0], why=True)  # D2: no unused profile parameter
     assert "blocked by: regime" in row
 
 

@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 
 from .markets import MarketProfile
-from .models import Action, Check, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan
+from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan
 
 
 def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile) -> tuple[str, ...]:

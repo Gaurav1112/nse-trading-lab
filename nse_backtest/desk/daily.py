@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from nse_backtest import tape_monitor
@@ -76,15 +75,17 @@ def flip_conditions(regime_df: pd.DataFrame | None, profile) -> tuple[str, ...]:
     return tuple(out)
 
 
-def breakout_entry(df) -> float | None:
+def breakout_entry(df) -> tuple[str, float | None]:
+    """("at", None): at/through the 20-day high, plan at the close. ("trigger", price): within 5% below
+    it, buy only above the trigger. ("far", None): not near a setup."""
     trigger = float(df["High"].tail(20).max())
     close = float(df["Close"].iloc[-1])
     # at/through the 20-day high, or closing at a 20-day closing high (intraday highs run ~1% above closes)
     if close >= trigger * 0.999 or close >= float(df["Close"].tail(20).max()):
-        return None
+        return "at", None
     if close < trigger / 1.05:
-        return float("nan")
-    return trigger * 1.001
+        return "far", None
+    return "trigger", trigger * 1.001
 
 
 def _exp(v: DeskVerdict) -> float:
@@ -148,11 +149,11 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
             unavailable.append(sym)
             continue
         try:
-            e = breakout_entry(df)
+            kind, e = breakout_entry(df)
         except Exception as err:  # noqa: BLE001
             skipped.append((sym, str(err)))
             continue
-        if e is not None and np.isnan(e):
+        if kind == "far":
             skipped.append((sym, "not near a setup"))
             continue
         c = replace(ctx, turnover_20d=turnover_20d(df), today_gap_pct=None)

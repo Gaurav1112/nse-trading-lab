@@ -45,13 +45,14 @@ def test_flip_conditions():
     assert flip_conditions(None, NSE) == ("Regime index data unavailable",)
 
 
-def test_breakout_entry_modes():
+def test_breakout_entry_modes():  # D1: (kind, price) instead of a NaN sentinel
     df = series()
-    assert breakout_entry(df) is None                       # making new highs -> plan at close
+    assert breakout_entry(df) == ("at", None)               # making new highs -> plan at close
     df2 = df.copy(); df2.iloc[-1, df2.columns.get_loc("Close")] = df2.High.tail(20).max() / 1.03
-    assert breakout_entry(df2) == pytest.approx(df2.High.tail(20).max() * 1.001)
+    kind, px = breakout_entry(df2)
+    assert kind == "trigger" and px == pytest.approx(df2.High.tail(20).max() * 1.001)
     df3 = df.copy(); df3.iloc[-1, df3.columns.get_loc("Close")] = df3.High.tail(20).max() / 1.2
-    assert np.isnan(breakout_entry(df3))
+    assert breakout_entry(df3) == ("far", None)
 
 
 def test_daily_plan_hostile_puts_ready_setups_on_watch():
@@ -138,3 +139,36 @@ def test_a5_daily_plan_quote_lookup_only_for_candidates():
     for v in dp.take + dp.watch:
         if v.plan.symbol in asked:
             assert [c for c in v.checks if c.name == "live_price"][0].status.value == "PASS"
+
+
+
+# ---- Final fix wave D3 ----
+def _fake_check(action):
+    from types import SimpleNamespace
+    return lambda p, df: SimpleNamespace(action=action, current_price=90.0, suggested_sl=None, pnl_pct=-10.0,
+                                         reason="stop hit")
+
+
+def test_d3_market_filter_normalises_case_and_none(monkeypatch):
+    from nse_backtest import position_monitor
+    monkeypatch.setattr(position_monitor, "daily_check", _fake_check("HOLD"))
+    pos = [{"symbol": "AAA", "market": "nse", "buy_price": 100, "stop_loss": 95},
+           {"symbol": "BBB", "market": None, "buy_price": 100, "stop_loss": 95},
+           {"symbol": "CCC", "market": "us", "buy_price": 100, "stop_loss": 95}]
+    out = review_positions(pos, {"AAA": series(), "BBB": series(), "CCC": series()}, NSE)
+    assert sorted(o.symbol for o in out) == ["AAA", "BBB"]
+
+
+def test_d3_unreadable_entry_stop_are_none_not_zero():
+    out = review_positions([{"symbol": "AAA", "buy_price": "abc", "stop_loss": 95}], {}, NSE)
+    assert out[0].action == "DATA UNAVAILABLE" and out[0].entry is None and out[0].stop == 95.0
+    out = review_positions([{"symbol": "AAA", "buy_price": 100}], {}, NSE)
+    assert out[0].entry == 100.0 and out[0].stop is None
+
+
+def test_d3_initial_stop_none_never_masks_exit(monkeypatch):
+    from nse_backtest import position_monitor
+    monkeypatch.setattr(position_monitor, "daily_check", _fake_check("EXIT"))
+    out = review_positions([{"symbol": "AAA", "buy_price": 100, "stop_loss": 95, "initial_stop": None}],
+                           {"AAA": series()}, NSE)
+    assert out[0].action == "EXIT" and out[0].r_so_far == pytest.approx((90 - 100) / 5)

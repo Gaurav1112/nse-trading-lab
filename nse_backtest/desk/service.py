@@ -12,7 +12,7 @@ from nse_backtest.picker_replay import spread_pct_for_df
 from . import timemachine
 from .audit import append_verdict, data_dir
 from .checks import CheckContext, run_checks, stoploss_streak
-from .costs import round_trip_cost
+from .costs import DEFAULT_SPREAD, round_trip_cost
 from .markets import MarketProfile
 from .models import DeskVerdict, LiveQuote, Limits, Mode
 from .plan import build_plan
@@ -33,7 +33,7 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
     ctx = replace(ctx, price_is_live=quote is not None, quote_as_of=quote.as_of if quote is not None else None)
     current_price = quote.price if quote is not None else plan.last_close
     halve = stoploss_streak(ctx.journal, profile.code)
-    spread = spread_pct_for_df(df) if mode is Mode.SWING else 0.00075
+    spread = spread_pct_for_df(df) if mode is Mode.SWING else DEFAULT_SPREAD
     sizing = size_position(plan, limits, profile, spread_per_side=spread, halve=halve)
     q = max(sizing.qty, 1)
     cps = round_trip_cost(profile, mode, plan.entry, plan.target_1, q, spread) / q

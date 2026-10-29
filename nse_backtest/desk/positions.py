@@ -1,6 +1,7 @@
 """Open-position review: wraps position_monitor.daily_check, never raises."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -16,19 +17,20 @@ class PositionAction:
     symbol: str
     action: str  # "EXIT" | "TIGHTEN_STOP" | "HOLD" | "DATA UNAVAILABLE"
     current_price: float | None
-    entry: float
-    stop: float
+    entry: float | None  # None when the record's value is unreadable
+    stop: float | None
     suggested_stop: float | None
     r_so_far: float | None
     pnl_pct: float | None
     reason: str
 
 
-def _num(x) -> float:
+def _num(x) -> float | None:
     try:
-        return float(x)
+        v = float(x)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    return v if math.isfinite(v) else None
 
 
 def _unavailable(p: dict, reason: str) -> PositionAction:
@@ -46,16 +48,19 @@ def _review_one(p: dict, frames: dict[str, pd.DataFrame]) -> PositionAction:
         return _unavailable(p, f"No price data for {sym}")
     try:
         v = position_monitor.daily_check(p, df)
-        entry, stop = float(p["buy_price"]), float(p["stop_loss"])
-        init = float(p.get("initial_stop", p["stop_loss"]))
     except Exception as e:  # noqa: BLE001 - surfaced as DATA UNAVAILABLE, never silent
         return _unavailable(p, f"Position check failed: {e}")
-    denom = entry - init
-    r = (v.current_price - entry) / denom if denom > 0 else None
+    entry, stop = _num(p["buy_price"]), _num(p["stop_loss"])
+    init = _num(p.get("initial_stop"))
+    if init is None:
+        init = stop  # missing/None initial stop: measure R from the current stop
+    px = _num(v.current_price)
+    denom = (entry - init) if entry is not None and init is not None else None
+    r = (px - entry) / denom if px is not None and denom is not None and denom > 0 else None
     return PositionAction(sym, v.action, v.current_price, entry, stop, v.suggested_sl, r, v.pnl_pct, v.reason)
 
 
 def review_positions(positions: list[dict], frames: dict[str, pd.DataFrame], profile) -> list[PositionAction]:
     out = [_review_one(p, frames) for p in positions
-           if not p.get("closed") and p.get("market", "NSE") == profile.code]
+           if not p.get("closed") and str(p.get("market") or "NSE").upper() == profile.code]
     return sorted(out, key=lambda a: _ORDER.get(a.action, 9))

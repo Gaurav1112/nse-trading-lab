@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from .costs import round_trip_cost
+from .costs import DEFAULT_SPREAD, round_trip_cost
 from .markets import MarketProfile
 from .models import Limits, Sizing, TradePlan
 
@@ -18,7 +18,7 @@ _ORDER = ("max loss per trade", "position cap", "cash after buffer")
 
 
 def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
-                  spread_per_side: float = 0.00075, halve: bool = False) -> Sizing:
+                  spread_per_side: float = DEFAULT_SPREAD, halve: bool = False) -> Sizing:
     if not (math.isfinite(limits.capital) and limits.capital > 0):
         raise ValueError("capital must be a positive finite number")
     if not (math.isfinite(plan.entry) and math.isfinite(plan.stop)):

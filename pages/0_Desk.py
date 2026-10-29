@@ -20,7 +20,7 @@ from components import theme
 from nse_backtest.desk import loaders, session
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
-from nse_backtest.desk.models import Action, DeskVerdict, Limits, Mode
+from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.positions import review_positions
 
 st.set_page_config(page_title="Desk | Trading Lab", page_icon="🧭", layout="wide")
@@ -349,7 +349,8 @@ with tab_pos:
         df = pd.DataFrame([{
             "Symbol": a.symbol, "Action": a.action,
             "Now": "n/a" if a.current_price is None else profile.money(a.current_price),
-            "Entry": profile.money(a.entry), "Stop": profile.money(a.stop),
+            "Entry": "n/a" if a.entry is None else profile.money(a.entry),
+            "Stop": "n/a" if a.stop is None else profile.money(a.stop),
             "Suggested stop": "" if a.suggested_stop is None else profile.money(a.suggested_stop),
             "R so far": _r(a.r_so_far), "Reason": a.reason} for a in actions])
 

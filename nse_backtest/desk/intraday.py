@@ -1,8 +1,6 @@
 """Intraday opening-range-breakout scan over 15-minute frames."""
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pandas as pd
 
 from .checks import CheckContext

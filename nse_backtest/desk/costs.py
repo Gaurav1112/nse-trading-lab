@@ -6,9 +6,11 @@ from nse_backtest.picker_replay import _delivery_costs_pct
 from .markets import MarketProfile
 from .models import Mode
 
+DEFAULT_SPREAD = 0.00075  # assumed bid-ask spread per side when the frame cannot estimate one
+
 
 def round_trip_cost(profile: MarketProfile, mode: Mode, entry: float, exit_price: float,
-                    qty: int, spread_per_side: float = 0.00075) -> float:
+                    qty: int, spread_per_side: float = DEFAULT_SPREAD) -> float:
     """Total round-trip cost in local currency (>= 0). qty <= 0 costs nothing."""
     if qty <= 0:
         return 0.0

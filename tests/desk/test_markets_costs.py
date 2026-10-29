@@ -62,3 +62,14 @@ def test_zero_qty_costs_nothing():
 def test_tradeplan_properties():
     p = TradePlan("X", "NSE", Mode.SWING, 100, 98, 103, 106, 2, 15, 100, "2026-10-28", "user")
     assert p.risk_per_share == 2 and p.rr_t1 == 1.5
+
+
+
+def test_d4_named_shared_constants():
+    import inspect
+    from nse_backtest.desk import costs, service, sizing, timemachine
+    assert costs.DEFAULT_SPREAD == 0.00075
+    assert inspect.signature(sizing.size_position).parameters["spread_per_side"].default is costs.DEFAULT_SPREAD
+    assert inspect.signature(costs.round_trip_cost).parameters["spread_per_side"].default is costs.DEFAULT_SPREAD
+    assert "DEFAULT_SPREAD" in inspect.getsource(service.check_trade) and "0.00075" not in inspect.getsource(service)
+    assert timemachine._INTRADAY_LOOKBACK_BARS == 40 * 25
