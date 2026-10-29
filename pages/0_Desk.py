@@ -18,7 +18,7 @@ import streamlit as st
 
 from components import theme
 from nse_backtest.desk import loaders, session
-from nse_backtest.desk.scoreboard_io import SCOREBOARD_DISCLAIMER
+from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
@@ -416,9 +416,16 @@ def _score_banner(s) -> None:
         st.info(text)
 
 
-def _render_scoreboard(res, profile) -> None:
+def _render_scoreboard(res, profile, warnings=()) -> None:
     for s in res.stats:
         _score_banner(s)
+    for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
+        st.warning(w)
+    if res.rejects:
+        k = len(res.rejects)
+        st.warning(f"{k} audit line{'s' if k != 1 else ''} could not be read")
+    if getattr(res, "note", None):
+        st.info(res.note)
     if not res.outcomes:
         st.info(f"No TAKE verdicts logged yet for {profile.code} — build a plan or check a trade to start a record.")
     if res.stats:
@@ -454,13 +461,16 @@ def _render_scoreboard(res, profile) -> None:
 
 
 with tab_score:
-    st.caption(SCOREBOARD_DISCLAIMER)
+    st.caption(f"{SCOREBOARD_DISCLAIMER} {SCOREBOARD_COVERAGE}")
     score_key = ("scoreboard", market)
     if st.button("Load scoreboard", key="desk_load_scoreboard"):
+        score_warnings: list[str] = []
         with st.spinner("Replaying logged TAKEs — resolved trades come from the cache..."):
-            sstate = _attempt("Could not build the scoreboard", session.run_scoreboard, market)
+            sstate = _attempt("Could not build the scoreboard", session.run_scoreboard, market,
+                              on_warning=score_warnings.append)
         if "ok" in sstate:
             sstate["at"] = _now_hhmm(profile)
+            sstate["warnings"] = list(score_warnings)
         st.session_state[score_key] = sstate  # a failure REPLACES any earlier success
     sstate = st.session_state.get(score_key)
     if sstate is None:
@@ -470,7 +480,7 @@ with tab_score:
     else:
         st.caption(f"Loaded at {sstate['at']} (market time)")
         try:
-            _render_scoreboard(sstate["ok"], profile)
+            _render_scoreboard(sstate["ok"], profile, sstate.get("warnings", ()))
         except Exception as e:  # noqa: BLE001 - never a blank tab
             st.error(f"Could not show the scoreboard: {type(e).__name__}: {e}")
     st.caption(DISCLAIMER)

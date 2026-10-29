@@ -290,18 +290,16 @@ def fetch_nse(
 
 
 def _ticker_frame(data: pd.DataFrame, ticker: str, n_tickers: int) -> Optional[pd.DataFrame]:
-    """One ticker's raw frame from a group_by='ticker' multi download; None if absent."""
+    """One ticker's raw frame from a group_by='ticker' multi download; None if absent.
+
+    The ticker is matched on the ticker level only (level 0 for group_by='ticker'), exactly: a ticker such as
+    LOW must never match the 'Low' price field of another level."""
     if not isinstance(data.columns, pd.MultiIndex):
         # yfinance may drop the ticker level for a single ticker
         return data.copy() if n_tickers == 1 else None
-    for level in range(data.columns.nlevels):
-        names = [str(v).upper() for v in data.columns.get_level_values(level)]
-        if ticker.upper() in names:
-            key = data.columns.get_level_values(level)[names.index(ticker.upper())]
-            sub = data.xs(key, axis=1, level=level).copy()
-            break
-    else:
+    if ticker not in set(map(str, data.columns.get_level_values(0))):
         return None
+    sub = data.xs(ticker, axis=1, level=0).copy()
     # the batch frame's index is the union of all tickers' dates: rows that are NaN in every
     # column are padding from other tickers, not bars of this one (a single download has none)
     sub = sub.dropna(how="all")
@@ -406,6 +404,10 @@ def fetch_many_daily(
                 ticker = ticker_of[sym]
                 raw_df = _ticker_frame(data, ticker, len(tickers))
                 if raw_df is None or raw_df.empty:
+                    retry.append(sym)
+                    continue
+                cols = set(map(str, _flatten_columns(raw_df.copy()).columns))
+                if not cols.issuperset(_REQUIRED_COLS):  # not a price frame (odd layout): ask for it alone
                     retry.append(sym)
                     continue
                 try:

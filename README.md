@@ -119,6 +119,7 @@ The Scoreboard checks whether the desk's own TAKEs made money. It reads every TA
 each one against the prices that followed, as if the ticket had been typed in exactly. It is the
 desk's paper record, **not your real P&L**: it knows nothing about the orders you actually placed.
 It is read-only and places nothing.
+Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet.
 
 Open the **Scoreboard** tab and press "Load scoreboard", or run
 `python3.13 -m nse_backtest.desk scoreboard [--market NSE|US|ALL] [--json]` (default ALL).
@@ -126,9 +127,14 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
 - One TAKE per stock, mode and session is counted (the first one logged).
 - Fills and exits are conservative. Swing: a one-session LIMIT at the entry, filled if the day's low
   reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
-  default) and a time exit at the last close. Intraday: 15-minute bars after the verdict, filled when
-  the high reaches the entry, flat by the session's flat-by time. When a bar touches both stop and
-  target, the stop wins.
+  default) and a time exit at the last close. A swing TAKE logged while its fill session was open is
+  filled from the 15-minute bars after the verdict (the day's earlier low happened before the order).
+  Intraday: a BUY LIMIT, as the ticket prints it: 15-minute bars after the verdict, filled when the low
+  reaches the entry, at the bar's open if lower, flat by the session's flat-by time. When a bar touches
+  both stop and target, the stop wins.
+- Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
+  prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
+  the trade `data_unavailable` instead of a guess.
 - Realised R = (exit − fill − cost per share) ÷ (entry − stop). A win is realised R above 0.
 - Each trade gets a status: `won`, `lost`, `time` (time exit), `not_filled`, `open` (still running;
   shown marked to the last close, not counted) or `data_unavailable` (bars could not be loaded, have
@@ -143,6 +149,7 @@ The verdict, per market and mode, is the first of these that applies:
 |---|---|
 | Not enough trades yet (n/30) | fewer than 30 resolved trades (won, lost or time) |
 | Losing — do not trade this with real money | the whole 95% interval is below 0R |
+| Inconclusive (trades could not be replayed) | more than 10% of resolved + unavailable trades are `data_unavailable` |
 | Inconclusive (odds missing) | under 80% of the resolved trades carry a Monte Carlo prediction |
 | Worse than the desk's odds — do not size up | the whole interval is below the mean predicted R |
 | Matching the odds — real money at small size (≤0.5% risk) | the interval is above 0R and the mean realised R is within 0.15R of the prediction |

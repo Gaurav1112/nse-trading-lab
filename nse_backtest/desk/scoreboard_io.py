@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,8 +32,12 @@ Warn = Callable[[str], None] | None
 
 SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs as if each ticket were followed exactly — "
                          "not your real P&L.")
+SCOREBOARD_COVERAGE = ("Covers TAKEs from Check a Trade and Today's Plan; "
+                       "Intraday-tab scan TAKEs are not logged yet.")
 AUDIT_FILE = "desk_audit.jsonl"
 CACHE_FILE = "desk_scoreboard.json"
+MAX_AUDIT_BYTES = 50 * 1024 * 1024
+MAX_CACHE_BYTES = 20 * 1024 * 1024
 INTRADAY_MAX_AGE_DAYS = 58  # yfinance serves 15-minute bars for the last 60 days; keep a margin
 FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
@@ -46,6 +51,7 @@ class ScoreboardResult:
     stats: list[ScoreStats]            # summarize(outcomes)
     rejects: list[tuple[int, str]]     # (audit line number, reason) for unreadable lines and malformed TAKE rows
     cache_note: str | None             # set when the cache was unreadable, of another version or not writable
+    note: str | None = None            # set when there is no audit log at all
 
 
 class AuditReadError(Exception):
@@ -60,8 +66,20 @@ def _warn(on_warning: Warn, msg: str) -> None:
         on_warning(msg)
 
 
+_ABS_PATH = re.compile(r"(?<![\w.])/(?:[^\s'\"/:]+/)+([^\s'\"/:,;)]+)")
+
+
+def _scrub(text: str) -> str:
+    """Absolute paths in a message reduced to their file names (the data directory is the user's business)."""
+    return _ABS_PATH.sub(lambda m: m.group(1), text)
+
+
 def _err(e: BaseException) -> str:
-    return str(e) or type(e).__name__
+    """A user-visible reason: strerror (or the class name) plus the file name for OS errors, never a full path."""
+    if isinstance(e, OSError) and (e.strerror or e.filename):
+        msg = e.strerror or type(e).__name__
+        return f"{msg}: {Path(os.fsdecode(e.filename)).name}" if e.filename else msg
+    return _scrub(str(e)) or type(e).__name__
 
 
 # ---------------------------------------------------------------- sessions
@@ -85,12 +103,22 @@ def _local_date(market: str, created_at: datetime) -> date:
 
 def read_audit(path: Path) -> tuple[list[tuple[int, dict]], list[tuple[int, str]]]:
     """(line number, row) for every JSON-object line; unreadable lines become rejects. Missing file -> empty."""
+    rows, rejects, _ = _read_audit(path)
+    return rows, rejects
+
+
+def _read_audit(path: Path) -> tuple[list[tuple[int, dict]], list[tuple[int, str]], bool]:
+    """read_audit plus whether the file was missing. Larger than MAX_AUDIT_BYTES or unreadable -> AuditReadError."""
+    path = Path(path)
     try:
-        raw = Path(path).read_bytes()
+        size = path.stat().st_size
+        if size > MAX_AUDIT_BYTES:
+            raise AuditReadError(f"audit log too large ({size // (1024 * 1024)} MB)")
+        raw = path.read_bytes()
     except FileNotFoundError:
-        return [], []
+        return [], [], True
     except OSError as e:
-        raise AuditReadError(f"cannot read audit log {path}: {e.strerror or _err(e)}") from e
+        raise AuditReadError(f"cannot read audit log {path.name}: {e.strerror or type(e).__name__}") from e
     rows: list[tuple[int, dict]] = []
     rejects: list[tuple[int, str]] = []
     for n, line in enumerate(raw.splitlines(), start=1):
@@ -104,7 +132,7 @@ def read_audit(path: Path) -> tuple[list[tuple[int, dict]], list[tuple[int, str]
             rejects.append((n, "unreadable audit line"))
             continue
         rows.append((n, obj))
-    return rows, rejects
+    return rows, rejects, False
 
 
 def _row_market(row: dict) -> str | None:
@@ -251,15 +279,18 @@ class ScoreboardCache:
     def _backup(self, now: datetime, why: str, tag: str = "corrupt") -> None:
         stamp = now.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
         base = self.path.with_name(f"{self.path.name}.{tag}-{stamp}")
-        target = base
-        for i in range(1, 100):
-            if not target.exists():
-                break
-            target = base.with_name(f"{base.name}-{i}")
         try:
-            if target.exists():
-                raise FileExistsError(f"{target} exists")
-            os.rename(self.path, target)
+            # link-then-unlink: os.link fails when the name exists, so an existing backup is never replaced
+            for i in range(100):
+                target = base if i == 0 else base.with_name(f"{base.name}-{i}")
+                try:
+                    os.link(self.path, target, follow_symlinks=False)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise FileExistsError(f"no free backup name for {self.path.name}")
+            os.unlink(self.path)
         except OSError as e:
             self.writable = False  # never overwrite a corrupt file we could not keep a copy of
             self._note(f"scoreboard cache was {why} and could not be backed up ({_err(e)}); "
@@ -270,6 +301,10 @@ class ScoreboardCache:
 
     def _load(self, now: datetime) -> None:
         try:
+            size = self.path.stat().st_size
+            if size > MAX_CACHE_BYTES:
+                self._backup(now, f"too large ({size // (1024 * 1024)} MB)")
+                return
             text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return
@@ -339,9 +374,8 @@ class ScoreboardCache:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            os.replace(tmp, self.path)  # the temp file is 0o600 already (fchmod above)
             tmp = None
-            os.chmod(self.path, 0o600)
             self.dirty = False
         except (OSError, ValueError, TypeError) as e:
             self._note(f"scoreboard cache could not be written ({_err(e)}); results are still correct")
@@ -462,7 +496,8 @@ def build_scoreboard(market: str | None, *, now: datetime, audit_path: Path, cac
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     want = None if market is None or str(market).strip().upper() == "ALL" else get_profile(market).code
-    rows, rejects = read_audit(audit_path)
+    rows, rejects, missing = _read_audit(audit_path)
+    note = f"No audit log at {Path(audit_path).name} in the data directory" if missing else None
     cands, bad = candidates_from(rows, want)
     rejects = sorted(rejects + bad)
     cache = ScoreboardCache(cache_path, now, on_warning)
@@ -484,4 +519,4 @@ def build_scoreboard(market: str | None, *, now: datetime, audit_path: Path, cac
     final = [o for o in outcomes if o is not None]
     if len(final) != len(cands):  # every candidate is reported, never silently dropped
         raise RuntimeError("scoreboard lost a candidate; refusing to show a partial record")
-    return ScoreboardResult(final, summarize(final), rejects, cache.note)
+    return ScoreboardResult(final, summarize(final), rejects, cache.note, note)

@@ -294,6 +294,7 @@ def test_rejects_carry_line_numbers(paths):
 def test_missing_audit_is_empty(paths):
     res = run(paths)
     assert res.outcomes == [] and res.stats == [] and res.rejects == [] and res.cache_note is None
+    assert res.note == "No audit log at desk_audit.jsonl in the data directory"  # R1: said, not silent
 
 
 def test_cache_file_mode_and_atomic_write(paths):
@@ -361,7 +362,7 @@ def test_cli_default_market_all_and_json(tmp_path, monkeypatch, capsys):
     assert main(["scoreboard", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert {o["candidate"]["market"] for o in data["outcomes"]} == {"NSE", "US"}
-    assert set(data) == {"outcomes", "stats", "rejects", "cache_note"}
+    assert set(data) == {"outcomes", "stats", "rejects", "cache_note", "note"}  # R1: note (missing audit log)
     assert main(["scoreboard", "--market", "US", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert {o["candidate"]["market"] for o in data["outcomes"]} == {"US"}
@@ -697,3 +698,108 @@ def test_r1_old_mid_session_swing_unavailable_without_fetch(paths):
     li = boom_loader()
     o = run(paths, Loader({"ABC": frame(days)}), li).outcomes[0]
     assert o.status is Status.UNAVAILABLE and "older than 60 days" in o.note and li.calls == []
+
+
+# ---- hardening: warnings, missing/oversized files, paths, backups
+def test_r1_bar_load_failures_reach_on_warning(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), mode="intraday",
+                                                   symbol="XYZ", h="i")])
+    warns = []
+    res = run(paths, Loader(exc=RuntimeError("daily feed down")), Loader(exc=RuntimeError("intraday feed down")),
+              on_warning=warns.append)
+    assert [o.status for o in res.outcomes] == [Status.UNAVAILABLE, Status.UNAVAILABLE]
+    assert any("daily feed down" in w and "ABC" in w for w in warns)
+    assert any("intraday feed down" in w and "XYZ" in w for w in warns)
+
+
+def test_r1_missing_audit_says_so(paths):
+    res = run(paths)
+    assert res.outcomes == [] and res.note == "No audit log at desk_audit.jsonl in the data directory"
+    write_audit(paths[0], [])
+    assert run(paths).note is None
+
+
+def test_r1_audit_too_large_is_an_error(paths):
+    with open(paths[0], "wb") as f:
+        f.truncate(51 * 1024 * 1024)  # sparse: no real disk use
+    with pytest.raises(scoreboard_io.AuditReadError, match=r"audit log too large \(51 MB\)"):
+        run(paths)
+
+
+def test_r1_cache_too_large_backed_up_and_rebuilt(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    with open(paths[1], "wb") as f:
+        f.truncate(21 * 1024 * 1024)
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert res.outcomes[0].status is Status.WON and "too large" in res.cache_note
+    backups = list(paths[1].parent.glob("desk_scoreboard.json.corrupt-*"))
+    assert len(backups) == 1 and backups[0].stat().st_size == 21 * 1024 * 1024
+    assert json.loads(paths[1].read_text())["version"] == SCOREBOARD_VERSION
+
+
+def test_r1_errors_never_show_full_paths(paths, tmp_path):
+    with pytest.raises(scoreboard_io.AuditReadError) as e:
+        session.run_scoreboard(audit_path=tmp_path, cache_path=tmp_path / "c.json", now=NOW,
+                               load_daily=boom_loader(), load_intraday=boom_loader())
+    assert str(tmp_path) not in str(e.value) and tmp_path.name in str(e.value)
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    secret = tmp_path / "private" / "cache" / "ABC_1234.parquet"
+    res = run(paths, Loader(exc=PermissionError(13, "Permission denied", str(secret))))
+    note = res.outcomes[0].note
+    assert "Permission denied" in note and "ABC_1234.parquet" in note and str(tmp_path) not in note
+    res = run(paths, Loader(exc=RuntimeError(f"Corrupt cache {secret}: bad magic")))
+    note = res.outcomes[0].note
+    assert "ABC_1234.parquet" in note and str(tmp_path) not in note and "bad magic" in note
+
+
+def test_r1_backup_never_overwrites_an_existing_backup(paths, monkeypatch):
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    paths[1].write_text("{not json", encoding="utf-8")
+    stamp = NOW.astimezone(scoreboard_io.timezone.utc).strftime("%Y%m%d%H%M%S")
+    taken = paths[1].with_name(f"desk_scoreboard.json.corrupt-{stamp}")
+    taken.write_text("older backup", encoding="utf-8")
+    monkeypatch.setattr(scoreboard_io.Path, "exists", lambda self: False)  # the name appears after any check
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert taken.read_text() == "older backup"
+    new = paths[1].with_name(taken.name + "-1")
+    assert new.read_text() == "{not json" and new.name in res.cache_note
+
+
+def test_r1_save_has_no_chmod_after_replace(tmp_path, monkeypatch):
+    def no_chmod(*a, **k):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(scoreboard_io.os, "chmod", no_chmod)
+    cache = scoreboard_io.ScoreboardCache(tmp_path / "c.json", NOW)
+    cache.dirty = True
+    cache.save()
+    assert cache.note is None and stat.S_IMODE(os.stat(tmp_path / "c.json").st_mode) == 0o600
+
+
+# ---- surfaces: coverage sentence, warnings and rejects on the page
+COVERAGE = "Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet."
+
+
+def test_r1_cli_disclaimer_line_2_and_note(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [])
+    (tmp_path / "desk_audit.jsonl").unlink()
+    assert main(["scoreboard"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == DISCLAIMER and out[1] == COVERAGE
+    assert "No audit log at desk_audit.jsonl in the data directory" in out
+    assert str(tmp_path) not in "\n".join(out)
+
+
+def test_r1_page_shows_warnings_rejects_and_coverage(monkeypatch, tmp_path):
+    def fake(market=None, on_warning=None, **k):
+        on_warning("scoreboard: daily bars for NSE ABC unavailable: feed down")
+        return _fake_result()
+    monkeypatch.setattr(session, "run_scoreboard", fake)
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    tab = at.tabs[4]
+    warnings = [w.value for w in tab.warning]
+    assert any("feed down" in w for w in warnings)
+    assert any(w == "1 audit line could not be read" for w in warnings)
+    assert any(COVERAGE in c.value for c in tab.caption)

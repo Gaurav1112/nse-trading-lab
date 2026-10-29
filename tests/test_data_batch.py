@@ -330,3 +330,28 @@ def test_fetch_many_daily_unadjusted_retry_stays_unadjusted(monkeypatch):
                         adjusted=True: seen.append(adjusted) or _bars(base=200))
     data_mod.fetch_many_daily(["BBB"], START, END, "NS", adjusted=False)
     assert seen == [False]
+
+
+# ---- review round R1: the ticker is matched on the ticker level only
+def _probe_frames():
+    idx = pd.bdate_range("2026-01-01", periods=40)
+    fields = ["Open", "High", "Low", "Close", "Volume"]
+    return lambda base: pd.DataFrame({f: (base + np.arange(40.0)) if f != "Volume" else np.full(40, 1000.0)
+                                      for f in fields}, index=idx)
+
+
+def test_ticker_frame_never_matches_a_price_field():
+    f = _probe_frames()
+    a = pd.concat({"AAPL": f(100), "MSFT": f(300)}, axis=1)  # (Ticker, Price): ticker LOW absent
+    assert data_mod._ticker_frame(a, "LOW", 2) is None
+
+
+def test_batch_slot_failing_the_column_check_is_retried_per_symbol(monkeypatch):
+    f = _probe_frames()
+    # a (Price, Ticker) frame: level 0 'Low' matches ticker LOW, the slice has ticker columns, not prices
+    b = pd.concat({"LOW": f(250), "AAPL": f(100)}, axis=1).swaplevel(0, 1, axis=1).sort_index(axis=1)
+    _record(monkeypatch, b)
+    seen = []
+    monkeypatch.setattr(data_mod, "fetch_nse", lambda sym, *a, **k: seen.append(sym) or _bars(base=250))
+    frames, errors = data_mod.fetch_many_daily(["LOW", "AAPL"], START, END, "")
+    assert "LOW" in seen and "LOW" in frames and "LOW" not in errors

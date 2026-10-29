@@ -15,7 +15,7 @@ from . import loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode
 from .positions import review_positions
-from .scoreboard_io import SCOREBOARD_DISCLAIMER, AuditReadError
+from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -226,7 +226,9 @@ def _num_r(x) -> str:
 def format_scoreboard(res, market_label: str) -> list[str]:
     """Text scoreboard: disclaimer first; per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
-    lines = [SCOREBOARD_DISCLAIMER]
+    lines = [SCOREBOARD_DISCLAIMER, SCOREBOARD_COVERAGE]
+    if getattr(res, "note", None):
+        lines.append(res.note)
     if not res.outcomes and res.rejects:
         lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
     elif not res.outcomes:
