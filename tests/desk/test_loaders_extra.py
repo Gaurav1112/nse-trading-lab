@@ -13,6 +13,7 @@ from nse_backtest.desk import cli, loaders, session
 from nse_backtest.desk.markets import NSE, US
 from nse_backtest.desk.models import Limits
 from tests.desk.test_cli_loaders import series
+from tests.desk.test_loaders_many import via_load_daily
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +157,7 @@ def test_load_intraday(monkeypatch):
 
 def test_cli_plan_positions_intraday_settings_text(capsys, monkeypatch, tmp_path):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: (_ for _ in ()).throw(ValueError(f"no intraday data for {s}")))
@@ -179,6 +181,7 @@ def test_cli_plan_positions_intraday_settings_text(capsys, monkeypatch, tmp_path
 
 def test_cli_plan_runs(capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 3, raising=False)
@@ -267,6 +270,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
     from nse_backtest.desk.checks import CheckContext
     seen = {}
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
     def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None, quotes=None):
@@ -283,6 +287,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
 
 def test_cli_settings_fallback_warning(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     (tmp_path / "desk_settings.json").write_text("garbage")

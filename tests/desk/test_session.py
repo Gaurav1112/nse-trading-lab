@@ -2,6 +2,7 @@ from nse_backtest.desk import loaders, session
 from nse_backtest.desk.markets import NSE
 from nse_backtest.desk.models import DeskVerdict, Limits, Mode
 from tests.desk.test_cli_loaders import series
+from tests.desk.test_loaders_many import via_load_daily
 
 
 def test_resolve_regime_none_when_load_fails(monkeypatch):
@@ -24,6 +25,7 @@ def test_load_frames_marks_failures_as_none(monkeypatch):
             raise ValueError("nope")
         return series()
     monkeypatch.setattr(loaders, "load_daily", load)
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     warns = []
     out = session.load_frames(NSE, ["OK", "BAD"], warns.append)
     assert out["OK"] is not None and out["BAD"] is None and "BAD" in warns[0]

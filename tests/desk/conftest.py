@@ -35,8 +35,10 @@ def _no_network(monkeypatch):
 def offline_desk(tmp_path, monkeypatch):
     """Isolated data dir and no network: daily bars, regime, earnings and the ban list are stubbed."""
     from tests.desk.test_cli_loaders import series
+    from tests.desk.test_loaders_many import via_load_daily
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",

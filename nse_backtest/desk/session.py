@@ -125,12 +125,17 @@ def context_for(profile, limits: Limits, symbol_df=None, regime: str | None = No
 
 def load_frames(profile, symbols: Iterable[str], on_warning: Warn = None) -> dict:
     """Daily frames per symbol; a failed load maps to None (reported as unavailable, never dropped)."""
+    symbols = list(symbols)
+    try:
+        frames, errors = loaders.load_daily_many(profile, symbols)
+    except Exception as e:  # noqa: BLE001 - the batch never raises per symbol; this is a last guard
+        frames, errors = {}, {s: str(e) for s in symbols}
     out: dict = {}
     for sym in symbols:
-        try:
-            out[sym] = loaders.load_daily(profile, sym)
-        except Exception as e:  # noqa: BLE001
-            _warn(on_warning, f"no data for {sym}: {e}")
+        if sym in frames:
+            out[sym] = frames[sym]
+        else:
+            _warn(on_warning, f"no data for {sym}: {errors.get(sym, 'unavailable')}")
             out[sym] = None
     return out
 

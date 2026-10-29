@@ -71,7 +71,7 @@ def test_one_call_for_uncached_symbols_cached_one_not_downloaded(monkeypatch):
     for sym in ("BBB", "CCC"):
         path = data_mod._cache_path(sym, "NS", START, END)
         assert os.path.exists(path)
-        pd.testing.assert_frame_equal(pd.read_parquet(path), frames[sym])
+        pd.testing.assert_frame_equal(pd.read_parquet(path), frames[sym], check_freq=False)  # parquet drops freq
 
 
 def test_frames_equal_fetch_nse_for_same_data(monkeypatch, tmp_path):

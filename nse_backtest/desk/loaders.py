@@ -56,19 +56,18 @@ def _market_now(profile: MarketProfile, now: datetime | None = None) -> datetime
     return now.astimezone(ZoneInfo(profile.tz)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(profile.tz))
 
 
-def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: datetime | None = None) -> pd.DataFrame:
-    """Completed daily bars. Today's bar is fetched when it exists and dropped while the session is open."""
-    from nse_backtest.data import fetch_nse
-    now = _market_now(profile, now)
+def _needs_refetch(profile: MarketProfile, df: pd.DataFrame, now: datetime) -> bool:
+    """Just after the close a cached frame may hold a mid-session partial bar: fetch once more, uncached."""
     today = now.date()
-    start = (today - timedelta(days=int(365.25 * years))).isoformat()
-    df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange)
     close = cal.session_close_for(profile, today)  # early-close days end at 13:00 ET
-    if (cal.is_trading_day(profile, today) and pd.Timestamp(df.index[-1]).date() == today
-            and timedelta() <= datetime.combine(today, now.time()) - datetime.combine(today, close) < timedelta(hours=3)):
-        # just after the close a cached frame may hold a mid-session partial bar: re-fetch once, uncached
-        df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange,
-                       use_cache=False)
+    return (cal.is_trading_day(profile, today) and pd.Timestamp(df.index[-1]).date() == today
+            and timedelta() <= datetime.combine(today, now.time()) - datetime.combine(today, close) < timedelta(hours=3))
+
+
+def _finalise_daily(profile: MarketProfile, symbol: str, df: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """Clean fetched daily bars: drop non-trading-day bars of covered years and today's partial bar."""
+    today = now.date()
+    close = cal.session_close_for(profile, today)
     df = _clean_bars(df, f"daily bars for {symbol}")
     # a bar on a non-trading day of a covered year (e.g. a one-hour Muhurat Sunday) is never a real close
     off = [cal.covered(profile, d) and not cal.is_trading_day(profile, d) for d in pd.DatetimeIndex(df.index).date]
@@ -81,6 +80,48 @@ def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: date
         if len(df) == 0:
             raise ValueError(f"daily bars for {symbol}: no completed bars")
     return df
+
+
+def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: datetime | None = None) -> pd.DataFrame:
+    """Completed daily bars. Today's bar is fetched when it exists and dropped while the session is open."""
+    from nse_backtest.data import fetch_nse
+    now = _market_now(profile, now)
+    today = now.date()
+    start = (today - timedelta(days=int(365.25 * years))).isoformat()
+    end = (today + timedelta(days=1)).isoformat()
+    df = fetch_nse(symbol, start, end=end, exchange=profile.exchange)
+    if _needs_refetch(profile, df, now):
+        df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, use_cache=False)
+    return _finalise_daily(profile, symbol, df, now)
+
+
+def load_daily_many(profile: MarketProfile, symbols, years: int = 4, *,
+                    now: datetime | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """`load_daily` for many symbols: (frames, errors) keyed by symbol as given; never raises per symbol.
+
+    Cached symbols are read from the same cache files as `load_daily`; the rest come from one yfinance
+    call (per-symbol fallback when that call fails). Each frame equals what `load_daily` returns."""
+    from nse_backtest.data import fetch_many_daily
+    symbols = list(symbols)
+    if not symbols:
+        return {}, {}
+    now = _market_now(profile, now)
+    today = now.date()
+    start = (today - timedelta(days=int(365.25 * years))).isoformat()
+    end = (today + timedelta(days=1)).isoformat()
+    raw, errors = fetch_many_daily(symbols, start, end, profile.exchange,
+                                   refetch_if=lambda sym, df: _needs_refetch(profile, df, now))
+    errors = dict(errors)
+    frames: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        if sym not in raw:
+            errors.setdefault(sym, f"no daily data for {sym}")
+            continue
+        try:
+            frames[sym] = _finalise_daily(profile, sym, raw[sym], now)
+        except Exception as e:  # noqa: BLE001 - one bad symbol never fails the batch
+            errors[sym] = str(e)
+    return frames, errors
 
 
 def _yf_frame(df) -> pd.DataFrame:

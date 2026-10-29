@@ -2,6 +2,8 @@ import numpy as np, pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from tests.desk.test_loaders_many import via_load_daily
+
 
 @pytest.fixture(autouse=True)
 def _no_live_quote(monkeypatch):
@@ -20,6 +22,7 @@ def test_desk_page_renders_and_checks_a_trade(monkeypatch, tmp_path):
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     from nse_backtest.desk import loaders
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
@@ -40,6 +43,7 @@ def test_desk_page_survives_loader_failures(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise RuntimeError("network down")
     monkeypatch.setattr(loaders, "load_daily", boom)
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", boom)
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, False))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
@@ -59,6 +63,7 @@ def _patch_ok(monkeypatch, tmp_path):
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     from nse_backtest.desk import loaders
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
