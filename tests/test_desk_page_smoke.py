@@ -136,7 +136,7 @@ def test_watch_distance_guards_bad_price(monkeypatch, tmp_path):
     at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
     at.button(key="desk_build_plan").click().run()
     assert not at.exception
-    assert any(df.value["Distance %"].astype(str).eq("n/a").all() for df in at.dataframe
+    assert any(df.value["Distance %"].isna().all() for df in at.dataframe
                if "Distance %" in df.value.columns)
 
 
@@ -158,3 +158,147 @@ def test_intraday_scan_cache_key_has_date(monkeypatch, tmp_path):
     at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
     at.button(key="desk_scan").click().run()
     assert str(("intraday", "NSE", date.today().isoformat())) in at.session_state.filtered_state
+
+
+# ---------------------------------------------------------------- fix round 2
+
+def _errors(at):
+    return " | ".join(e.value for e in at.error)
+
+
+def _plan_with(verdicts_watch=(), take=()):
+    from nse_backtest.desk.daily import DailyPlan
+    return DailyPlan("NSE", None, "", tuple(take), (), tuple(verdicts_watch), (), ())
+
+
+def test_empty_checks_never_green(monkeypatch, tmp_path):
+    md = _summary_md(monkeypatch, tmp_path, [])
+    joined = " ".join(md)
+    assert "No checks were run" in joined and "do not trade" in joined
+    assert not any("checks passed" in m for m in md)
+    line = next(m for m in md if "No checks were run" in m)
+    assert "#FFB800" in line
+
+
+def test_intraday_error_persists_across_rerun(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+
+    def bad(*a, **k):
+        raise RuntimeError("feed down")
+    monkeypatch.setattr(session, "run_intraday", bad)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.button(key="desk_scan").click().run()
+    assert "feed down" in _errors(at)
+    at.run()
+    assert "feed down" in _errors(at)
+    assert not any("No setups" in i.value for i in at.info)
+
+
+def test_intraday_failure_replaces_old_success(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    v = _verdict_with([])
+    calls = {"n": 0}
+
+    def scan(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ([v], [])
+        raise RuntimeError("second scan broke")
+    monkeypatch.setattr(session, "run_intraday", scan)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.button(key="desk_scan").click().run()
+    assert any("Symbol" in df.value.columns and "MC R" in df.value.columns for df in at.dataframe)
+    assert any("Built at" in c.value for c in at.caption)
+    at.button(key="desk_scan").click().run()
+    assert "second scan broke" in _errors(at)
+    assert not any("MC R" in df.value.columns for df in at.dataframe)
+    at.run()
+    assert "second scan broke" in _errors(at)
+    assert not any("MC R" in df.value.columns for df in at.dataframe)
+
+
+def test_plan_error_persists_and_replaces_success(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    calls = {"n": 0}
+    good = _plan_with()
+
+    def build(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise RuntimeError("universe scan broke")
+    monkeypatch.setattr(session, "run_daily_plan", build)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.button(key="desk_build_plan").click().run()
+    assert any("Nothing qualifies" in i.value for i in at.info)
+    assert any("Built at" in c.value for c in at.caption)
+    at.button(key="desk_build_plan").click().run()
+    assert "universe scan broke" in _errors(at)
+    at.run()
+    assert "universe scan broke" in _errors(at)
+    assert not any("Nothing qualifies" in i.value for i in at.info)
+
+
+def test_check_error_persists_and_replaces_success(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    real = session.run_check
+    calls = {"n": 0}
+
+    def chk(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real(*a, **k)
+        raise ValueError("symbol XYZ not found")
+    monkeypatch.setattr(session, "run_check", chk)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.button(key="desk_check").click().run()
+    assert any("Plan" == m.value.strip("*") for m in at.markdown)
+    assert any("Checked at" in c.value for c in at.caption)
+    at.button(key="desk_check").click().run()
+    assert "symbol XYZ not found" in _errors(at)
+    assert not any("Plan" == m.value.strip("*") for m in at.markdown)
+    at.run()
+    assert "symbol XYZ not found" in _errors(at)
+    assert not any("Plan" == m.value.strip("*") for m in at.markdown)
+
+
+def test_check_names_are_html_escaped(monkeypatch, tmp_path):
+    from nse_backtest.desk.models import Check, Status
+    md = _summary_md(monkeypatch, tmp_path, [Check("<b>x</b>&y", Status.WARN, "r")])
+    joined = " ".join(md)
+    assert "<b>x</b>" not in joined and "&lt;b&gt;x&lt;/b&gt;&amp;y" in joined
+
+
+def test_watch_distance_is_numeric(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    v = replace(_verdict_with([]), current_price=100.0, trigger=105.0)
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: _plan_with([v]))
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.button(key="desk_build_plan").click().run()
+    frames = [df.value for df in at.dataframe if "Distance %" in df.value.columns]
+    assert frames and pd.api.types.is_numeric_dtype(frames[0]["Distance %"])
+    assert abs(frames[0]["Distance %"].iloc[0] - 5.0) < 1e-9
+
+
+def test_positions_refresh_recovers_from_error(monkeypatch, tmp_path):
+    loaders = _patch_ok(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise loaders.UserDataError("positions.json is corrupt")
+        return []
+    monkeypatch.setattr(loaders, "load_positions", flaky)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    assert "positions.json is corrupt" in _errors(at)
+    at.button(key="desk_refresh_pos").click().run()
+    assert "positions.json is corrupt" not in _errors(at)
+    assert any("No open" in i.value for i in at.info)

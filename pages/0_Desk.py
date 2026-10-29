@@ -5,8 +5,10 @@ error and the rest of the page keeps working.
 """
 from __future__ import annotations
 
+import html
 import math
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -51,11 +53,29 @@ def _safe(label: str, fn, *args, **kw):
         return None, msg
 
 
+def _now_hhmm(profile) -> str:
+    try:
+        return datetime.now(ZoneInfo(profile.tz)).strftime("%H:%M")
+    except Exception:  # noqa: BLE001 - a bad tz name must not hide a result
+        return datetime.now().strftime("%H:%M")
+
+
+def _attempt(label: str, fn, *args, **kw) -> dict:
+    """Run fn quietly; return {"ok": result, "at": HH:MM} or {"error": msg}. Rendered from session state."""
+    try:
+        return {"ok": fn(*args, **kw)}
+    except Exception as e:  # noqa: BLE001 - every failure must be readable, never a blank page
+        return {"error": f"{label}: {e}" if str(e) else f"{label}: {type(e).__name__}"}
+
+
 # ---------------------------------------------------------------- verdict card
 
 def _check_summary(v: DeskVerdict) -> str:
     """One line: 'N BLOCK · M WARN' with the names; red if any BLOCK, amber if only WARN, else green."""
-    blocks, warns = [c.name for c in v.blocks()], [c.name for c in v.warns()]
+    if not v.checks:
+        return (f"<span style='color:{STATUS_COLOR['WARN']};font-weight:700'>"
+                "No checks were run — do not trade on this verdict</span>")
+    blocks, warns = [html.escape(c.name) for c in v.blocks()], [html.escape(c.name) for c in v.warns()]
     if not blocks and not warns:
         return f"<span style='color:{STATUS_COLOR['PASS']};font-weight:700'>All {len(v.checks)} checks passed</span>"
     color = STATUS_COLOR["BLOCK"] if blocks else STATUS_COLOR["WARN"]
@@ -64,12 +84,14 @@ def _check_summary(v: DeskVerdict) -> str:
     return f"<span style='color:{color};font-weight:700'>{parts[0]} &nbsp;({' · '.join(names)})</span>"
 
 
-def render_verdict(v: DeskVerdict, profile, key: str) -> None:
+def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None) -> None:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     color = ACTION_COLOR.get(v.action.value, "#888888")
     st.markdown(f"<div style='font-size:2.6rem;font-weight:800;color:{color};line-height:1.1'>"
                 f"{v.action.value}</div>", unsafe_allow_html=True)
     st.markdown(f"**{v.headline}**")
+    if at:
+        st.caption(f"Checked at {at} (market time)")
     st.markdown(_check_summary(v), unsafe_allow_html=True)
 
     st.markdown("**Plan**")
@@ -203,19 +225,24 @@ with tab_plan:
     plan_key = ("plan", market, _today())
     if st.button("Build today's plan", key="desk_build_plan"):
         with st.spinner("Scanning the universe — this can take a few minutes the first time..."):
-            plan, _ = _safe("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile))
-        if plan is not None:
-            st.session_state[plan_key] = plan
-    plan = st.session_state.get(plan_key)
-    if plan is None:
+            state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile))
+        if "ok" in state:
+            state["at"] = _now_hhmm(profile)
+        st.session_state[plan_key] = state  # a failure REPLACES any earlier success
+    pstate = st.session_state.get(plan_key)
+    plan = pstate.get("ok") if pstate else None
+    if pstate and "error" in pstate:
+        st.error(pstate["error"])
+    elif plan is None:
         st.info("Press the button to build today's plan. No trade is a valid answer.")
     else:
+        st.caption(f"Built at {pstate['at']} (market time)")
         st.subheader(f"TAKE ({len(plan.take)})")
         if not plan.take:
             st.info("Nothing qualifies today — no trade is a valid answer.")
         for i, v in enumerate(plan.take):
             with st.container(border=True):
-                render_verdict(v, profile, f"plan_{i}")
+                render_verdict(v, profile, f"plan_{i}", at=pstate["at"])
         st.subheader(f"WATCH ({len(plan.watch)})")
         if plan.watch:
             rows = []
@@ -224,9 +251,10 @@ with tab_plan:
                 px_now = v.current_price
                 ok = isinstance(px_now, (int, float)) and math.isfinite(px_now) and px_now > 0
                 rows.append({"Symbol": v.plan.symbol, "Trigger": profile.money(trig),
-                             "Distance %": str(round((trig / px_now - 1) * 100, 2)) if ok else "n/a",
+                             "Distance %": round((trig / px_now - 1) * 100, 2) if ok else None,
                              "Blocked by": ", ".join(c.name for c in v.blocks()) or "waiting for trigger"})
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                         column_config={"Distance %": st.column_config.NumberColumn(format="%.1f%%")})
         else:
             st.caption("Nothing on the watch list.")
         with st.expander(f"Skipped ({len(plan.skipped)}) and unavailable ({len(plan.unavailable)})"):
@@ -249,20 +277,23 @@ with tab_check:
     target = e3.number_input("Target (0 = auto)", min_value=0.0, value=0.0, key="desk_target")
     result_key = ("check", market, symbol.strip().upper(), mode, entry, stop, target)
     if st.button("Check this trade", key="desk_check"):
-        st.session_state.pop(result_key, None)
-        try:
-            with st.spinner("Checking..."):
+        with st.spinner("Checking..."):
+            try:
                 v = session.run_check(profile, symbol, Mode(mode), limits, entry=entry or None,
                                       stop=stop or None, target=target or None, regime=regime_name)
-            st.session_state[result_key] = v
-        except ValueError as e:
-            st.error(str(e))
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Check failed: {type(e).__name__}: {e}")
-    v = st.session_state.get(result_key)
-    if v is not None:
-        with st.container(border=True):
-            render_verdict(v, profile, "check")
+                cstate = {"ok": v, "at": _now_hhmm(profile)}
+            except ValueError as e:
+                cstate = {"error": str(e) or "Invalid input"}
+            except Exception as e:  # noqa: BLE001
+                cstate = {"error": f"Check failed: {type(e).__name__}: {e}"}
+        st.session_state[result_key] = cstate  # a failure REPLACES any earlier success
+    cstate = st.session_state.get(result_key)
+    if cstate is not None:
+        if "error" in cstate:
+            st.error(cstate["error"])
+        else:
+            with st.container(border=True):
+                render_verdict(cstate["ok"], profile, "check", at=cstate["at"])
 
 
 # ---------------------------------------------------------------- My Positions
@@ -313,13 +344,17 @@ with tab_intra:
             st.error("Pick at least one symbol.")
         else:
             with st.spinner("Scanning 15-minute bars..."):
-                res, _ = _safe("Intraday scan failed", session.run_intraday, profile, limits, picked,
-                               regime=regime_name)
-            if res is not None:
-                st.session_state[scan_key] = res
-    res = st.session_state.get(scan_key)
-    if res is not None:
-        verdicts, failures = res
+                state = _attempt("Intraday scan failed", session.run_intraday, profile, limits, picked,
+                                 regime=regime_name)
+            if "ok" in state:
+                state["at"] = _now_hhmm(profile)
+            st.session_state[scan_key] = state  # a failure REPLACES any earlier success
+    istate = st.session_state.get(scan_key)
+    if istate is not None and "error" in istate:
+        st.error(istate["error"])
+    elif istate is not None:
+        verdicts, failures = istate["ok"]
+        st.caption(f"Built at {istate['at']} (market time)")
         if not verdicts:
             st.info("No setups scanned.")
         else:
@@ -331,7 +366,7 @@ with tab_intra:
                 if v.action is Action.SKIP:
                     continue
                 with st.expander(f"{v.action.value} — {v.plan.symbol}", expanded=v.action is Action.TAKE):
-                    render_verdict(v, profile, f"intra_{i}")
+                    render_verdict(v, profile, f"intra_{i}", at=istate["at"])
         if failures:
             with st.expander(f"Not scanned ({len(failures)})"):
                 for s, why in failures:
