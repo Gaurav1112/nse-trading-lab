@@ -260,6 +260,42 @@ def check_price_scale(c: Candidate, daily: pd.DataFrame) -> Outcome | None:
     return None
 
 
+def check_intraday_price_scale(c: Candidate, bars15: pd.DataFrame) -> Outcome | None:
+    """check_price_scale for an intraday ticket: yfinance split-adjusts 15-minute bars even unadjusted.
+
+    The plan's last 15-minute bar (last_bar) may still have been forming when the ticket was printed, so its
+    logged close (last_close) is any price the bar traded at: it must lie inside that bar's final Low..High,
+    widened by 0.5%. Rows without last_close: entry within 20% of that bar's Close. No last_bar, or no bar at
+    it -> UNAVAILABLE."""
+    profile = get_profile(c.market)
+    money = profile.money
+    if not c.last_bar:
+        return unavailable(c, "audit row has no last_bar, so the price scale cannot be checked")
+    try:
+        ts = pd.Timestamp(c.last_bar)
+        if pd.isna(ts):
+            raise ValueError("not a time")
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert(profile.tz).tz_localize(None)
+    except (ValueError, TypeError, OverflowError):
+        return unavailable(c, f"unreadable last_bar {c.last_bar!r}, so the price scale cannot be checked")
+    hits = np.flatnonzero(bars15.index == ts)
+    if len(hits) == 0:
+        return unavailable(c, f"no 15-minute bar for the ticket's last bar {ts:%Y-%m-%d %H:%M}")
+    j = int(hits[-1])
+    lo, hi, cl = (float(bars15[k].to_numpy(dtype=float)[j]) for k in ("Low", "High", "Close"))
+    if not all(math.isfinite(x) and x > 0 for x in (lo, hi, cl)):
+        return unavailable(c, "bad price data")
+    if c.last_close is not None:
+        if not lo * (1 - SCALE_TOLERANCE) <= c.last_close <= hi * (1 + SCALE_TOLERANCE):
+            return unavailable(c, f"prices re-scaled since the ticket (split/bonus?): logged close "
+                                  f"{money(c.last_close)}, that bar now {money(lo)} to {money(hi)}")
+    elif abs(c.entry / cl - 1) > SCALE_ENTRY_BAND:
+        return unavailable(c, f"prices re-scaled since the ticket (split/bonus?): logged entry {money(c.entry)}, "
+                              f"close on the ticket's last bar now {money(cl)}")
+    return None
+
+
 def _missing_session(market: str, dates: list[date]) -> date | None:
     """The first trading session missing between consecutive bar dates (None when the dates are consecutive
     trading sessions). Uncovered years: every weekday is a session."""
@@ -439,7 +475,8 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     fill = min(op[k], c.entry)
     fill_at = sess.index[k]
     if lo[k] <= c.stop:
-        return _finish(c, fill, fill_at, c.stop, fill_at, 0, "stop touched on the fill bar")
+        # a bar that opens below the stop fills at its open and is out at that open, never at the higher stop
+        return _finish(c, fill, fill_at, min(op[k], c.stop), fill_at, 0, "stop touched on the fill bar")
     n = len(sess)
     res = _walk(op, hi, lo, cl, k + 1, n - 1, c.stop, c.target_1) if k + 1 <= n - 1 else None
     if res is not None:

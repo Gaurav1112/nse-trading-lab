@@ -355,3 +355,13 @@ def test_batch_slot_failing_the_column_check_is_retried_per_symbol(monkeypatch):
     monkeypatch.setattr(data_mod, "fetch_nse", lambda sym, *a, **k: seen.append(sym) or _bars(base=250))
     frames, errors = data_mod.fetch_many_daily(["LOW", "AAPL"], START, END, "")
     assert "LOW" in seen and "LOW" in frames and "LOW" not in errors
+
+
+def test_batch_slot_with_the_ticker_but_no_price_columns_is_retried(monkeypatch):
+    # M1: the ticker matches on level 0, but its slot holds no price columns (odd yfinance layout)
+    odd = pd.DataFrame({"Foo": np.arange(40.0), "Bar": np.arange(40.0)}, index=_bars().index)
+    _record(monkeypatch, multi({"BBB.NS": _bars(base=200), "CCC.NS": odd}))
+    seen = []
+    monkeypatch.setattr(data_mod, "fetch_nse", lambda sym, *a, **k: seen.append(sym) or _bars(base=300))
+    frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
+    assert seen == ["CCC"] and "CCC" in frames and errors == {}

@@ -24,7 +24,8 @@ from . import calendars as cal
 from .markets import get_profile
 from .models import Mode
 from .scoreboard import (
-    SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_price_scale, exit_status, load_candidates,
+    SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale, check_price_scale,
+    exit_status, load_candidates,
     logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 
@@ -66,19 +67,25 @@ def _warn(on_warning: Warn, msg: str) -> None:
         on_warning(msg)
 
 
-_ABS_PATH = re.compile(r"(?<![\w.])/(?:[^\s'\"/:]+/)+([^\s'\"/:,;)]+)")
+# from an absolute path's first "/" to its last "/" before a quote, colon or line end (spaces allowed: folder
+# names have them); everything up to and including that last "/" is dropped, leaving the file name. Greedy on
+# purpose: a message with two paths may lose words between them, but never shows a directory.
+_ABS_DIRS = re.compile(r"(?<![\w.])/[^'\":\n]*/")
 
 
 def _scrub(text: str) -> str:
     """Absolute paths in a message reduced to their file names (the data directory is the user's business)."""
-    return _ABS_PATH.sub(lambda m: m.group(1), text)
+    return _ABS_DIRS.sub("", text)
 
 
 def _err(e: BaseException) -> str:
     """A user-visible reason: strerror (or the class name) plus the file name for OS errors, never a full path."""
     if isinstance(e, OSError) and (e.strerror or e.filename):
         msg = e.strerror or type(e).__name__
-        return f"{msg}: {Path(os.fsdecode(e.filename)).name}" if e.filename else msg
+        name = e.filename
+        if name and isinstance(name, (str, bytes, os.PathLike)):
+            return f"{msg}: {Path(os.fsdecode(name)).name}"
+        return msg
     return _scrub(str(e)) or type(e).__name__
 
 
@@ -291,7 +298,7 @@ class ScoreboardCache:
             else:
                 raise FileExistsError(f"no free backup name for {self.path.name}")
             os.unlink(self.path)
-        except OSError as e:
+        except (OSError, NotImplementedError) as e:  # NotImplementedError: no hard links on this platform
             self.writable = False  # never overwrite a corrupt file we could not keep a copy of
             self._note(f"scoreboard cache was {why} and could not be backed up ({_err(e)}); "
                        "results recomputed, cache left untouched")
@@ -403,6 +410,11 @@ def _replay_swing(c: Candidate, daily: pd.DataFrame, **kw) -> Outcome:
     return check_price_scale(c, daily) or resolve_swing(c, daily, **kw)
 
 
+def _replay_intraday(c: Candidate, bars15: pd.DataFrame, **kw) -> Outcome:
+    """The intraday replay, refused when the 15-minute bars are no longer on the ticket's price scale."""
+    return check_intraday_price_scale(c, bars15) or resolve_intraday(c, bars15, **kw)
+
+
 def _decided_on(o: Outcome) -> date | None:
     """The market-local date whose bars decided a final outcome (None when it cannot be told)."""
     c = o.candidate
@@ -448,7 +460,7 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
                 for i in todo:
                     c = cs[i]
                     flat_by = cal.flat_by_for(profile, _local_date(c.market, c.created_at))
-                    out[i] = _replay(c, on_warning, resolve_intraday, bars, flat_by=flat_by, now=now)
+                    out[i] = _replay(c, on_warning, _replay_intraday, bars, flat_by=flat_by, now=now)
     else:
         closed = cal.is_trading_day(profile, today) and now_l.time() >= cal.session_close_for(profile, today)
         fills = [fill_session_of(c.market, c.created_at) for c in cs]  # cannot fail: candidates_from screened it

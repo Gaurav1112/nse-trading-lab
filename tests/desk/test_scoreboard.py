@@ -640,3 +640,106 @@ def test_parse_row_uses_early_close_flat_by():
     assert not cands and rejects[0][1] == "created after flat-by"
     cands, _ = load_candidates([dict(row, created_at="2026-11-27T12:40:00-05:00")])
     assert len(cands) == 1
+
+
+# ---- review round R1 follow-up: a stop exit is never above the bar's open; LOST never books a gain
+def test_intraday_fill_bar_opening_below_stop_exits_at_open():
+    # probe_b: the first bar after the TAKE opens at 97 (below the 98 stop): filled at 97, out at 97, never +0.5R
+    c = Candidate(datetime(2026, 10, 27, 10, 5, tzinfo=IST), "NSE", "ABC", Mode.INTRADAY, 100.0, 98.0, 103.0, 20,
+                  0.0, 10, None, None, "h|x")
+    rows = [(101, 101, 100.5, 101)] * 4 + [(97, 99, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
+    idx = pd.date_range("2026-10-27 09:15", periods=len(rows), freq="15min")
+    bars = pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
+    o = resolve_intraday(c, bars, flat_by=time(15, 10), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
+    assert o.status is Status.LOST and o.fill_price == 97 and o.exit_price == 97
+    assert o.realised_r == pytest.approx(0.0) and summarize([o])[0].wins == 0
+
+
+def _random_bars(rng, n, base=100.0, spread=4.0):
+    """n OHLC rows around `base` with wide moves: opens below stops, gaps through targets, both touched."""
+    op = base + rng.uniform(-spread, spread, n)
+    cl = base + rng.uniform(-spread, spread, n)
+    hi = np.maximum(op, cl) + rng.uniform(0, 0.75 * spread, n)
+    lo = np.minimum(op, cl) - rng.uniform(0, 0.75 * spread, n)
+    return np.column_stack([op, hi, lo, cl])
+
+
+def _check_invariants(c, o):
+    if o.status is Status.LOST:
+        assert o.exit_price <= c.stop + 1e-9 and o.exit_price <= o.fill_price + 1e-9
+        assert o.realised_r + c.cost_per_share / (c.entry - c.stop) <= 1e-9  # no gain before costs
+    if o.status is Status.WON:
+        assert o.exit_price >= c.target_1 - 1e-9
+    if o.fill_price is not None:
+        assert o.fill_price <= c.entry + 1e-9  # a BUY LIMIT never pays above its limit
+
+
+def test_property_exits_respect_stop_and_target():
+    rng = np.random.default_rng(19)
+    days = pd.bdate_range("2026-11-02", periods=20)
+    days = days[[cal_ok for cal_ok in [d.date() != date(2026, 11, 10) and d.date() != date(2026, 11, 24)
+                                      for d in days]]]
+    seen = set()
+    for trial in range(400):
+        # swing, daily rule (created after the close the day before the first bar)
+        c = Candidate(datetime(2026, 10, 30, 18, 0, tzinfo=IST), "NSE", "P", Mode.SWING, 100.0, 98.0, 103.0,
+                      int(rng.integers(1, 8)), 0.05, 10, None, None, f"s{trial}")
+        df = pd.DataFrame(_random_bars(rng, len(days)), index=days, columns=["Open", "High", "Low", "Close"])
+        o = resolve_swing(c, df, fill_session=days[0].date(), now=NOW + pd.Timedelta(days=30).to_pytimedelta())
+        _check_invariants(c, o)
+        seen.add(("swing", o.status))
+        # swing logged mid-session: fill day from 15-minute bars
+        cm = Candidate(datetime(2026, 11, 2, 11, 0, tzinfo=IST), "NSE", "P", Mode.SWING, 100.0, 98.0, 103.0,
+                       int(rng.integers(1, 8)), 0.05, 10, None, None, f"m{trial}")
+        idx = pd.date_range("2026-11-02 11:15", "2026-11-02 15:15", freq="15min")
+        b15 = pd.DataFrame(_random_bars(rng, len(idx), base=100.5, spread=float(rng.choice([0.6, 3.0]))),
+                           index=idx, columns=["Open", "High", "Low", "Close"])
+        o = resolve_swing(cm, df, fill_session=days[0].date(), now=NOW + pd.Timedelta(days=30).to_pytimedelta(),
+                          bars15=b15)
+        _check_invariants(cm, o)
+        seen.add(("mid", o.status))
+        # intraday
+        ci = Candidate(datetime(2026, 11, 2, 9, 31, tzinfo=IST), "NSE", "P", Mode.INTRADAY, 100.0, 98.0, 103.0, 26,
+                       0.05, 10, None, None, f"i{trial}")
+        idx = pd.date_range("2026-11-02 09:45", "2026-11-02 15:00", freq="15min")
+        bi = pd.DataFrame(_random_bars(rng, len(idx)), index=idx, columns=["Open", "High", "Low", "Close"])
+        o = resolve_intraday(ci, bi, flat_by=time(15, 15), now=NOW + pd.Timedelta(days=30).to_pytimedelta())
+        _check_invariants(ci, o)
+        seen.add(("intraday", o.status))
+    for kind in ("swing", "mid", "intraday"):  # the grid really reaches losses and wins on every path
+        assert (kind, Status.LOST) in seen and (kind, Status.WON) in seen
+
+
+# ---- intraday price scale: yfinance split-adjusts 15-minute bars too
+from nse_backtest.desk.scoreboard import check_intraday_price_scale  # noqa: E402
+
+
+def _ic_scaled(last_close=100.6, last_bar="2026-10-27T10:00:00"):
+    return Candidate(datetime(2026, 10, 27, 10, 5, tzinfo=IST), "NSE", "ABC", Mode.INTRADAY, 100.0, 98.0, 103.0,
+                     20, 0.0, 10, None, None, "h|x", last_bar, last_close)
+
+
+def _ic_bars(scale=1.0):
+    idx = pd.date_range("2026-10-27 09:15", periods=24, freq="15min")
+    return pd.DataFrame([(100.5, 100.8, 100.2, 100.6)] * 24, index=idx, columns=["Open", "High", "Low", "Close"]) * scale
+
+
+def test_intraday_price_scale_halved_bars_unavailable():
+    assert check_intraday_price_scale(_ic_scaled(), _ic_bars()) is None
+    o = check_intraday_price_scale(_ic_scaled(), _ic_bars(0.5))  # probe_a P2: 1:1 bonus inside 58 days
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("prices re-scaled since the ticket (split/bonus?)")
+    o = check_intraday_price_scale(_ic_scaled(last_close=None), _ic_bars(0.5))
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("prices re-scaled since the ticket")
+    assert check_intraday_price_scale(_ic_scaled(last_close=None), _ic_bars()) is None
+
+
+def test_intraday_price_scale_partial_bar_close_inside_final_range_is_fine():
+    # the plan's last 15-minute bar was still forming: its close then is any price inside the final bar's range
+    assert check_intraday_price_scale(_ic_scaled(last_close=100.25), _ic_bars()) is None
+    assert check_intraday_price_scale(_ic_scaled(last_close=101.5), _ic_bars()).status is Status.UNAVAILABLE
+
+
+def test_intraday_price_scale_needs_the_last_bar():
+    o = check_intraday_price_scale(_ic_scaled(last_bar="2026-10-27T08:00:00"), _ic_bars())
+    assert o.status is Status.UNAVAILABLE and "last bar" in o.note
+    assert check_intraday_price_scale(_ic_scaled(last_bar=None), _ic_bars()).status is Status.UNAVAILABLE

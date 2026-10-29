@@ -33,6 +33,10 @@ def row(created, symbol="ABC", market="NSE", mode="swing", entry=100.0, stop=98.
          "entry": entry, "stop": stop, "target_1": target_1, "qty": 10, "mc_expectancy_r": 0.3,
          "history_expectancy_r": 0.2, "input_hash": h, "max_hold_bars": 15, "cost_per_share": 0.0,
          "last_bar": f"{prior.isoformat()}T00:00:00", "last_close": LAST_CLOSE}
+    if mode == "intraday":  # the plan's last bar is the 15-minute bar in progress at created_at
+        local = created.astimezone(ZoneInfo(p.tz)).replace(tzinfo=None)
+        r["last_bar"] = local.replace(minute=local.minute // 15 * 15, second=0, microsecond=0).isoformat()
+        r["last_close"] = None  # unknown to the fake bars: the 20% entry band applies
     r.update(kw)
     return r
 
@@ -803,3 +807,38 @@ def test_r1_page_shows_warnings_rejects_and_coverage(monkeypatch, tmp_path):
     assert any("feed down" in w for w in warnings)
     assert any(w == "1 audit line could not be read" for w in warnings)
     assert any(COVERAGE in c.value for c in tab.caption)
+
+
+# ---- R1 follow-up: intraday price scale (yfinance split-adjusts 15-minute bars too)
+def test_r1_intraday_halved_bars_unavailable(paths):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday", last_bar="2026-10-27T09:45:00", last_close=99.2)])
+    o = run(paths, intraday=Loader({"ABC": _intraday_win_bars()})).outcomes[0]
+    assert o.status is Status.WON
+    paths[1].unlink()
+    o = run(paths, intraday=Loader({"ABC": _intraday_win_bars() / 2})).outcomes[0]  # 1:1 bonus after the TAKE
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("prices re-scaled since the ticket (split/bonus?)")
+    assert _cached(paths) == {}
+
+
+def test_r1_err_never_raises_on_odd_filename():
+    assert scoreboard_io._err(OSError(9, "Bad file descriptor", 3)) == "Bad file descriptor"
+    assert scoreboard_io._err(OSError(2, "No such file", b"/a/b/c.json")) == "No such file: c.json"
+
+
+def test_r1_scrub_keeps_only_the_file_name_even_with_spaces():
+    msg = scoreboard_io._scrub("Corrupt cache /Users/x/My Data/nse/desk_scoreboard.json: bad magic")
+    assert msg == "Corrupt cache desk_scoreboard.json: bad magic"
+    assert scoreboard_io._scrub("ratio 1/2 of 15/30") == "ratio 1/2 of 15/30"
+
+
+def test_r1_backup_without_hard_link_support_leaves_cache_untouched(paths, monkeypatch):
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    paths[1].write_text("{not json", encoding="utf-8")
+
+    def no_link(*a, **k):
+        raise NotImplementedError("link unavailable on this platform")
+    monkeypatch.setattr(scoreboard_io.os, "link", no_link)
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert res.outcomes[0].status is Status.WON
+    assert "could not be backed up" in res.cache_note and paths[1].read_text() == "{not json"
