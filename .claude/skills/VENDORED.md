@@ -29,5 +29,7 @@
 
 ### Rule
 
-These skills are research context in Claude sessions only. They are never inputs to a desk verdict:
-nothing under `nse_backtest/desk/` imports, runs or reads their output.
+These skills may be run by `nse_backtest/desk/research.py` as isolated subprocesses for a display-only
+research panel (US news, 8-Ks, SEC earnings). They are still never inputs to a desk verdict: no decision
+module (checks, verdict, service, plan, sizing, timemachine, ...) imports `research`, and
+`tests/desk/test_research.py` enforces this with an AST scan.
