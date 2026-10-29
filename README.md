@@ -229,14 +229,17 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   both stop and target, the stop wins.
 - The 15-minute bar that contains the verdict's time counts, for swing and intraday, but a fill that only that
   bar made possible is ambiguous: the touch may have come before the verdict. Such a fill is kept only if it
-  loses (or exits at 0R or below), and its target never counts. If it would win, the trade is scored from the
-  first later bar that fills the order for real, or `not_filled` ("fill only possible on the bar the TAKE was
-  logged in — counted only if it loses"). A missing containing bar makes the trade `data_unavailable`. Intraday rows logged at or above the
-  trigger printed a LIMIT ticket: a desk TAKE priced up to the limit fills at the logged price; a desk row above
-  the limit, or any override at or above the entry, is a resting limit at the limit price. A LIMIT row logged
-  outside the entry window, or a stop-limit row logged after the cancel time, is `not_filled`.
-- One small optimism is accepted: a desk TAKE's plain limit fills at the logged price, although an order typed in
-  later could fill up to the limit (at most about 0.25R worse).
+  loses (or exits at 0R or below), and its target never counts. If it would win, the order is replayed from the
+  later bars, and a later fill counts only if its R is no better than the containing-bar fill's: a counted
+  result is never better than either possible history. Otherwise it is `not_filled` ("fill only possible on the
+  bar the TAKE was logged in — counted only if it loses"). A missing containing bar makes the trade
+  `data_unavailable`. A row with no logged price whose containing bar traded wholly between the trigger and the
+  limit is a certain fill there, at the limit.
+- Intraday rows logged at or above the trigger printed a LIMIT ticket. Priced up to the limit (desk TAKE or
+  override), it fills at the logged price. Priced above the limit, it is a resting limit at the limit price. A
+  LIMIT row logged outside the entry window, or a stop-limit row logged after the cancel time, is `not_filled`.
+- One small optimism is accepted: a plain limit fills at the logged price, although an order typed in later
+  could fill up to the limit (at most about 0.25R worse).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.

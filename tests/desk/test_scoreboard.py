@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 8  # F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 9  # F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -1001,13 +1001,15 @@ def test_r3_resting_limit_never_back_is_not_filled():
 
 
 def test_r3_every_override_priced_at_or_above_entry_is_a_resting_limit():
-    # same bars as probe A: a desk row is a logged-price fill; an override rests at the limit (fills at 100.5)
-    # F1 r5: the containing bar stays above the limit, so the override's fill is confirmed by the 10:15 bar
+    # F1 r6: an override priced inside [entry, limit] is marketable, like a desk row (fill at the logged price);
+    # one priced above the limit rests at the limit. The containing bar stays above the limit, so the resting
+    # override's fill is confirmed by the 10:15 bar.
     over = {"10:00": (100.6, 100.8, 100.6, 100.7), "10:15": (100.3, 103.2, 100.1, 103)}
     desk = _r3(100.2, over)
     mine = _r3(100.2, over, record="override")
-    assert desk.fill_price == pytest.approx(100.2) and mine.fill_price == 100.5
-    assert mine.fill_at == "2026-10-27 10:15:00"
+    assert desk.fill_price == pytest.approx(100.2) and mine.fill_price == pytest.approx(100.2)
+    rest = _r3(100.6, over, record="override")
+    assert rest.fill_price == 100.5 and rest.fill_at == "2026-10-27 10:15:00"
     below = _r3(99.9, {"10:15": (99.9, 100.4, 99.8, 100.2), "10:30": (100.2, 103.2, 100.1, 103)},
                 record="override")  # below the trigger: the stop-limit
     assert below.status is Status.WON and below.fill_price == pytest.approx(100.0)
@@ -1160,7 +1162,7 @@ def test_r5_stop_limit_containing_bar_loser_kept_with_fill_at_created_at():
 def test_r5_resting_containing_bar_winner_is_not_filled():
     above = {f"{t:%H:%M}": (100.6, 103.2, 100.6, 103) for t in pd.date_range("2026-10-27 10:15", "2026-10-27 15:00",
                                                                               freq="15min")}
-    o = _r3(100.2, {"10:00": (100.4, 100.6, 100.4, 100.5), **above}, record="override")  # I10, never back down
+    o = _r3(100.6, {"10:00": (100.4, 100.6, 100.4, 100.5), **above}, record="override")  # never back down
     assert o.status is Status.NOT_FILLED and o.note == AMBIG
 
 
@@ -1181,16 +1183,19 @@ def test_r5_property_containing_bar_only_fills_never_win():
             over[f"{t:%H:%M}"] = (o_, h, l_, float(rng.uniform(l_, h)))
         cpf = None if cp is None else float(cp)
         out = _r3(cpf, over, record=record)
-        plain = cpf is not None and record == "desk" and 100.0 <= cpf <= 100.5
+        plain = cpf is not None and 100.0 <= cpf <= 100.5  # F1 r6: overrides priced inside are plain too
+        b0 = over["10:00"]
+        certain = cpf is None and b0[2] >= 100.0 and b0[1] <= 100.5  # F1 r6: a certain containing-bar fill
+        plain = plain or certain
         if out.fill_at == "2026-10-27T10:07:00+05:30" and not plain and out.realised_r is not None:
             assert out.realised_r <= 1e-9, (cpf, record, out)
 
 
 def test_r5_swing_later_bar_confirms_after_an_ambiguous_containing_bar():
-    """SW5: the containing-bar fill would win, so it is dropped; the 14:45 bar then fills the resting order for
-    real (at its open 99.2) and that fill is scored normally."""
+    """SW5: the containing-bar fill would win (+1.5R); the 14:45 bar's real fill would win more (+1.77R). F1 r6: a
+    counted result is never better than either history, so it is NOT_FILLED."""
     o = _sw((14, 20), 101.5, {"14:15": (99.9, 101.6, 99.9, 101.5), "14:45": (99.2, 99.5, 99.0, 99.4)})
-    assert o.status is Status.WON and o.fill_price == pytest.approx(99.2) and o.fill_at.startswith("2026-10-26 14:45")
+    assert o.status is Status.NOT_FILLED and o.note == AMBIG
 
 
 def test_r5_stop_limit_later_bar_confirms_after_an_ambiguous_containing_bar():
@@ -1205,3 +1210,86 @@ def test_r5_resting_later_bar_confirms_after_an_ambiguous_containing_bar():
     o = _r3(100.6, {"10:00": (100.4, 100.6, 100.4, 100.5), "10:15": (100.6, 100.7, 100.3, 100.6),
                     "10:30": (100.6, 103.2, 100.6, 103)})
     assert o.status is Status.WON and o.fill_at == "2026-10-27 10:15:00" and o.fill_price == 100.5
+
+
+# ---------------------------------------------------------------- F1 round 6: the later-bar fallback is capped
+
+GAP_PATTERN = {"10:15": (102.0, 103.0, 101.9, 102.5), "10:30": (101.0, 101.2, 100.4, 100.9),
+               "10:45": (106.0, 106.5, 105.8, 106.2)}
+
+
+def test_r6_a_swing_later_fill_better_than_the_containing_one_is_not_filled():
+    from dataclasses import replace as _replace
+    c = _replace(_mid_cand(datetime(2026, 10, 26, 14, 20, tzinfo=IST)), current_price=101.5)
+    o = resolve_swing(c, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True,
+                      bars15=_fill_day({"14:15": (99.9, 101.6, 99.9, 101.5), "14:45": (97.2, 97.5, 97.1, 97.4)}))
+    assert o.status is Status.NOT_FILLED and o.note == AMBIG
+
+
+def test_r6_b_stop_limit_later_fill_better_than_the_containing_one_is_not_filled():
+    o = _r3(99.8, {"10:00": (100.2, 100.3, 99.5, 99.8), **GAP_PATTERN})
+    assert o.status is Status.NOT_FILLED and o.note == AMBIG
+
+
+def test_r6_c_resting_later_fill_better_than_the_containing_one_is_not_filled():
+    o = _r3(100.6, {"10:00": (100.6, 100.7, 100.4, 100.6), "10:15": (100.7, 103.0, 100.6, 102.8),
+                    "10:30": (101.0, 101.2, 100.4, 100.9), "10:45": (106.0, 106.5, 105.8, 106.2)}, record="override")
+    assert o.status is Status.NOT_FILLED and o.note == AMBIG
+
+
+def test_r6_g_a_worse_later_fill_is_counted():
+    o = _r3(100.6, {"10:00": (100.6, 100.7, 100.4, 100.6), "10:15": (100.7, 103.0, 100.6, 102.8),
+                    "10:30": (101.0, 101.2, 100.4, 100.9)}, record="override")
+    assert o.status is Status.TIME and o.fill_at == "2026-10-27 10:30:00" and o.realised_r < 0
+
+
+def test_r6_d_stop_limit_without_price_containing_bar_inside_trigger_and_limit_is_a_certain_fill():
+    o = _r3(None, {"10:00": (100.3, 100.45, 100.2, 100.4), "10:15": (99.6, 100.1, 99.5, 100.0),
+                   "10:30": (100.1, 103.2, 100.0, 103.0)})
+    assert o.status is Status.WON and o.fill_price == 100.5 and o.realised_r == pytest.approx(1.25)
+    assert o.fill_at == "2026-10-27T10:07:00+05:30"
+
+
+def test_r6_f_override_priced_inside_the_limit_is_marketable_at_the_logged_price():
+    o = _r3(100.2, {"10:00": (100.2, 100.3, 100.1, 100.2), "10:15": (100.7, 103.0, 100.6, 102.8),
+                    "10:30": (101.0, 101.2, 100.4, 100.9), "10:45": (106.0, 106.5, 105.8, 106.2)}, record="override")
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.2) and o.realised_r == pytest.approx(1.4)
+    stop = _r3(100.2, {"10:00": (100.2, 100.3, 97.5, 100.2)}, record="override")  # containing-bar stop rule
+    assert stop.status is Status.LOST and stop.exit_price == 98.0
+
+
+def _containing_path_r(cp, record, over):
+    """R of the containing-bar fill path (the order filled on the bar the TAKE was logged in), or None."""
+    from nse_backtest.desk import scoreboard as sb
+    real = sb._only_if_it_loses
+    try:
+        sb._only_if_it_loses = lambda c, o: o  # keep the containing-bar outcome as computed: no fallback
+        return _r3(cp, over, record=record)
+    finally:
+        sb._only_if_it_loses = real
+
+
+def test_r6_property_scored_r_never_beats_the_containing_bar_path():
+    rng = np.random.default_rng(23)
+    for _ in range(600):
+        cp = rng.choice([None, 99.5, 99.9, 100.0, 100.2, 100.5, 100.6, 101.0])
+        record = str(rng.choice(["desk", "override"]))
+        over = {}
+        for t in pd.date_range("2026-10-27 09:15", "2026-10-27 15:00", freq="15min"):
+            o_ = float(rng.uniform(97, 104))
+            h, l_ = o_ + float(rng.uniform(0, 2)), o_ - float(rng.uniform(0, 2))
+            over[f"{t:%H:%M}"] = (o_, h, l_, float(rng.uniform(l_, h)))
+        cpf = None if cp is None else float(cp)
+        cont = _containing_path_r(cpf, record, over)
+        out = _r3(cpf, over, record=record)
+        if cont.fill_at == "2026-10-27T10:07:00+05:30" and cont.realised_r is not None and out.realised_r is not None:
+            assert out.realised_r <= cont.realised_r + 1e-9, (cpf, record, cont, out)
+
+
+def test_r6_certain_containing_fill_with_a_positive_time_exit_is_kept():
+    """A certain fill (no logged price, containing bar wholly inside [trigger, limit]) is never dropped, even when
+    it ends in a positive time exit."""
+    up = {f"{t:%H:%M}": (100.8, 101.2, 100.7, 101.0) for t in pd.date_range("2026-10-27 10:15", "2026-10-27 15:00",
+                                                                             freq="15min")}
+    o = _r3(None, {"10:00": (100.3, 100.45, 100.2, 100.4), **up})
+    assert o.status is Status.TIME and o.fill_price == 100.5 and o.realised_r > 0
