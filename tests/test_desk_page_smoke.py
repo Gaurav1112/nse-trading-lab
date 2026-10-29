@@ -26,7 +26,7 @@ def test_desk_page_renders_and_checks_a_trade(monkeypatch, tmp_path):
                         lambda d, t, fetcher=None: loaders.nse_lists.BanList(frozenset(), "ok", None, ""))
     at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["Today's Plan", "Check a Trade", "My Positions", "Intraday"]
+    assert [t.label for t in at.tabs] == ["Today's Plan", "Check a Trade", "My Positions", "Intraday", "Scoreboard"]
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert not at.exception

@@ -180,6 +180,8 @@ def test_wrong_version_rebuilt(paths):
     assert ld.calls and res.cache_note and "version" in res.cache_note
     data = json.loads(paths[1].read_text())
     assert data["version"] == SCOREBOARD_VERSION and len(data["outcomes"]) == 1
+    kept = list(paths[1].parent.glob("desk_scoreboard.json.other-version-*"))  # never silently destroyed
+    assert len(kept) == 1 and json.loads(kept[0].read_text())["version"] == SCOREBOARD_VERSION + 1
 
 
 def test_bool_version_is_not_a_match(paths):

@@ -1,4 +1,4 @@
-"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings}. Places nothing."""
+"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings,scoreboard}. Places nothing."""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +9,13 @@ import sys
 from dataclasses import replace
 from datetime import date, datetime
 from enum import Enum
+from zoneinfo import ZoneInfo
 
 from . import loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode
 from .positions import review_positions
+from .scoreboard_io import SCOREBOARD_DISCLAIMER
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -217,6 +219,62 @@ def cmd_settings(a, profile) -> int:
     return _finish(lines)
 
 
+def _num_r(x) -> str:
+    return "n/a" if x is None else f"{x:+.2f}R"
+
+
+def format_scoreboard(res, market_label: str) -> list[str]:
+    """Text scoreboard: disclaimer first; per (market, mode) the verdict line first, then the numbers."""
+    from .markets import get_profile as _gp
+    lines = [SCOREBOARD_DISCLAIMER]
+    if not res.outcomes:
+        lines.append(f"No TAKE verdicts logged yet for {market_label} — run `plan` or `check` to build a record.")
+    for s in res.stats:
+        win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
+        ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
+        dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
+        cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
+        lines += ["", f"{s.market} {s.mode.value}: {s.verdict}",
+                  f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
+                  f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
+                  f"  95% CI of mean realised {ci}  max drawdown {dd}",
+                  f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
+                  f"prediction coverage {cov}"]
+    if res.outcomes:
+        lines += ["", "Trades:",
+                  f"  {'date':<10} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
+                  f"{'exit':>14} {'real R':>8} {'MC R':>8}  note"]
+        for o in res.outcomes:
+            c = o.candidate
+            m = _gp(c.market).money
+            fill = "-" if o.fill_price is None else m(o.fill_price)
+            exit_ = "-" if o.exit_price is None else m(o.exit_price)
+            real = _num_r(o.realised_r) if o.realised_r is not None else (
+                f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
+            day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
+            lines.append(f"  {day:<10} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} {o.status.value:<16} "
+                         f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
+        if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
+            lines.append("  (R in brackets = open trade marked to the last close; not counted in the stats)")
+    if res.rejects:
+        n = len(res.rejects)
+        lines += ["", f"Rejected {n} audit line{'s' if n != 1 else ''}:"]
+        lines += [f"  line {ln}: {why}" for ln, why in res.rejects]
+    if res.cache_note:
+        lines += ["", f"Cache: {res.cache_note}"]
+    return lines
+
+
+def cmd_scoreboard(a, profile) -> int:
+    market = str(a.market).strip().upper()
+    label = "all markets" if market == "ALL" else get_profile(market).code  # ValueError -> exit 2
+    res = session.run_scoreboard(None if market == "ALL" else label, on_warning=_stderr_warn)
+    if a.json:
+        _emit_json(res)
+        return 0
+    return _finish(format_scoreboard(res, label))  # 0 even when the verdict is "Losing": it is information
+
+
 # ---------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -251,13 +309,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--daily-loss-pct", type=float)
     s.add_argument("--pdt-guard", choices=["on", "off"])
     s.set_defaults(fn=cmd_settings)
+    sb = sub.add_parser("scoreboard", help="paper record of the desk's logged TAKEs")
+    sb.add_argument("--market", default="ALL", help="NSE, US or ALL (default ALL)")
+    sb.add_argument("--json", action="store_true", help="print JSON instead of text")
+    sb.set_defaults(fn=cmd_scoreboard)
     return ap
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return args.fn(args, get_profile(args.market))
+        profile = None if args.cmd == "scoreboard" else get_profile(args.market)  # scoreboard accepts ALL
+        return args.fn(args, profile)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

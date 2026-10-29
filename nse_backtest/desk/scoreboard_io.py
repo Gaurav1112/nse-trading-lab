@@ -27,6 +27,8 @@ from .scoreboard import (
 
 Warn = Callable[[str], None] | None
 
+SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs as if each ticket were followed exactly — "
+                         "not your real P&L.")
 AUDIT_FILE = "desk_audit.jsonl"
 CACHE_FILE = "desk_scoreboard.json"
 INTRADAY_MAX_AGE_DAYS = 58  # yfinance serves 15-minute bars for the last 60 days; keep a margin
@@ -204,9 +206,9 @@ class ScoreboardCache:
         self.notes.append(msg)
         _warn(self._on_warning, msg)
 
-    def _backup(self, now: datetime, why: str) -> None:
+    def _backup(self, now: datetime, why: str, tag: str = "corrupt") -> None:
         stamp = now.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
-        base = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        base = self.path.with_name(f"{self.path.name}.{tag}-{stamp}")
         target = base
         for i in range(1, 100):
             if not target.exists():
@@ -246,8 +248,8 @@ class ScoreboardCache:
             return
         version = data["version"]
         if type(version) is not int or version != SCOREBOARD_VERSION:
-            self.dirty = True
-            self._note(f"scoreboard cache version {version!r} is not {SCOREBOARD_VERSION}; ignored and rebuilt")
+            # kept, not overwritten: it may hold intraday results older than yfinance's 60 days
+            self._backup(now, f"version {version!r}, not {SCOREBOARD_VERSION}, so it was ignored", tag="other-version")
             return
         for k, v in data["outcomes"].items():
             if _well_formed(v):
