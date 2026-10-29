@@ -21,8 +21,8 @@ from nse_backtest.desk import audit, charts, loaders, projections, research, ses
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.models import Action, DeskVerdict, Mode, Status
 from nse_backtest.desk.textsafe import md_escape, safe_url, shown
-from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
-from nse_backtest.desk.verdict import block_groups, data_broken, is_quick, safety_blocked
+from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card, ev_basis_note
+from nse_backtest.desk.verdict import REGIME_UNKNOWN, block_groups, data_broken, is_quick, safety_blocked
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -267,6 +267,8 @@ def _money(card, profile) -> None:
         st.caption(f"Profit at T1 and T2 {card.fill_note}.")
     if card.fill_note and card.expected_value is not None:
         st.caption(f"Expected value {card.fill_note}.")
+    if card.expected_value is not None and (basis := ev_basis_note(card.verdict)):
+        st.caption(f"Expected value {basis}.")
     st.caption(f"{card.qty} shares{' (your quantity)' if card.qty_is_override else ''} · notional "
                f"{m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital) · at risk "
                f"{card.pct_capital_at_risk:.1f}% of capital · costs {m(card.cost)}. {card.gap_note}")
@@ -359,6 +361,9 @@ def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = ""
         _recheck(v, profile, limits, key, wkey, reason)
         return
     broken = data_broken(v)
+    if broken == (REGIME_UNKNOWN,):  # the index data failed: not market advice, nothing to override
+        _recheck(v, profile, limits, key, wkey, f"{REGIME_UNKNOWN} — re-check", broken=True)
+        return
     if broken:  # broken inputs are not an opinion to override: no ticket, no override box, only a Re-check
         _recheck(v, profile, limits, key, wkey,
                  f"Data is broken ({'; '.join(broken)}) — re-check before choosing", broken=True)

@@ -133,3 +133,17 @@ def test_i3_page_plan_and_choose_tabs_show_plan_errors(monkeypatch, tmp_path):
     errs = [_plain(e.value) for e in at.error]
     want = "The plan hit errors for 2 symbol(s): ABC: TypeError: boom"
     assert sum(want in e for e in errs) == 2  # Today's Plan and Choose a Trade
+
+
+# ---------------------------------------------------------------- M10: an unknown regime is a red re-check
+
+def test_m10_card_unknown_regime_is_a_red_recheck_not_an_override(monkeypatch):
+    from nse_backtest.desk.models import Action, Check, Status
+    v, lim, now, _ = _swing_verdict(days_after=0)
+    checks = tuple(Check("regime", Status.BLOCK, "Regime unknown — treated as HOSTILE (swing longs blocked)")
+                   if c.name == "regime" else replace(c, status=Status.PASS) for c in v.checks)
+    v = replace(v, action=Action.SKIP, checks=checks, regime=None)
+    calls = _capture(monkeypatch)
+    desk_card._ticket(v, desk_card.build_card(v, NSE, lim), NSE, lim, None, "w", key="choose", now=now)
+    assert desk_card.st.shown[0] == "Market regime unknown (index data unavailable) — re-check"
+    assert calls == [{"entry": v.plan.entry}]  # the Re-check ran; no override box

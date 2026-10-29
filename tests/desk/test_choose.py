@@ -298,8 +298,9 @@ def test_h3_cli_regime_override_states_the_held_out_cost(desk, monkeypatch, caps
 
 def test_h3_candidate_rank_treats_exactly_the_market_and_odds_groups_as_advice():
     from nse_backtest.desk.verdict import CHECK_GROUPS
-    for name, group in CHECK_GROUPS.items():
-        rank = session.candidate_rank(v("X", Action.SKIP, checks=(Check(name, Status.BLOCK, ""),)))
+    for name, group in CHECK_GROUPS.items():  # a known regime (F2/M10: an unknown one makes the regime checks data)
+        rank = session.candidate_rank(replace(v("X", Action.SKIP, checks=(Check(name, Status.BLOCK, ""),)),
+                                              regime="HOSTILE"))
         assert rank[0] == (2 if group in ("market", "odds") else 3), name
     assert session.candidate_rank(v("X", Action.SKIP, checks=(Check("mystery", Status.BLOCK, ""),)))[0] == 3
 
@@ -348,7 +349,9 @@ def test_h5a_fix_cli_choose_allows_a_short_off_hostile_days(desk, monkeypatch, c
     from datetime import datetime
     from zoneinfo import ZoneInfo
     monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
-    _fake(monkeypatch, _short_v((Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only"),)))
+    # a KNOWN non-HOSTILE regime (F2/M10: an unknown regime is broken data, never overridable)
+    _fake(monkeypatch, replace(_short_v((Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only"),)),
+                               regime="TRENDING"))
     assert cli.main(["check", "ABC", "--choose"]) == 0
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE (SHORT) — the desk said SKIP" in out and len(_audit_rows(tmp_path)) == 1

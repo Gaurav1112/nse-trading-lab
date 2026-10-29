@@ -170,8 +170,9 @@ def test_r1b_regime_stale_uncovered_year_names_missing_calendar():
 def _rank_v(sym, action, e, blocks=()):
     from tests.desk.test_choose import v
     from nse_backtest.desk.models import Action, Check, Status
+    from dataclasses import replace
     checks = tuple(Check(b, Status.BLOCK, b) for b in blocks) or (Check("regime", Status.PASS, ""),)
-    return v(sym, Action(action), e=e, checks=checks)
+    return replace(v(sym, Action(action), e=e, checks=checks), regime="HOSTILE")  # known (F2/M10)
 
 
 def test_h2_candidate_rank_take_wait_advice_skip_then_other_skip_by_expectancy():

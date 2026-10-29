@@ -10,6 +10,13 @@ from .sizing import loss_at_stop, worst_entry
 from .verdict import market_day, regime_override_note, safety_blocked, ticket_lines
 
 GAP_NOTE = "A gap through the stop can lose more than this."
+SHORT_EV_BASIS = "at 1× slippage (the edge gate uses 2×)"
+
+
+def ev_basis_note(v: DeskVerdict) -> str:
+    """How a verdict's expected value / Exp R is costed when that differs from the gate: a short's Monte Carlo is at
+    1× slippage while its edge gate replays at 2× (SHORT_EV_BASIS); "" for a long."""
+    return SHORT_EV_BASIS if v.plan.is_short else ""
 DAILY_LOSS_NOTE = ("The daily-loss line compares this trade alone with the daily loss limit; losses already taken "
                    "today are checked by the daily-loss check in Checks.")
 LIMIT_FILL_NOTE = "An intraday fill can be up to {limit} (the order's limit), which is already in the max loss."

@@ -23,10 +23,10 @@ from .audit import data_dir
 from .daily import DailyPlan, daily_plan, plan_entry, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .markets import universe
-from .models import Action, DeskVerdict, Limits, Mode, ShortEdge, Side
+from .models import Action, DeskVerdict, Limits, Mode, ShortEdge, Side, Status
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
-from .verdict import ADVICE_GROUPS, group_of
+from .verdict import ADVICE_GROUPS, block_groups, short_edge_cap
 
 Warn = Callable[[str], None] | None
 _RESOLVE = object()
@@ -353,19 +353,21 @@ def expectancy(v: DeskVerdict) -> float | None:
 
 def candidate_rank(v: DeskVerdict) -> tuple:
     """Sort key for "your call": TAKE, then WAIT, then SKIPs blocked only by the market or the desk's own odds
-    (verdict.block_groups' "market" and "odds"), then every other SKIP (data, limits, exchange). Within
-    a group, the highest Monte Carlo expectancy first; no odds last."""
-    blocks = {c.name for c in v.blocks()}
+    (verdict.block_groups' "market" and "odds", the card's and the CLI's own source), then every other SKIP (data,
+    limits, exchange). Within a group, a short whose pooled edge is not proven ranks after its proven and long peers
+    (its Exp R is at 1× slippage; the gate uses 2×), then the highest Monte Carlo expectancy first; no odds last."""
+    blocked = {g for g, cs in block_groups(v).items() if any(c.status is Status.BLOCK for c in cs)}
     if v.action is Action.TAKE:
         group = 0
     elif v.action is Action.WAIT:
         group = 1
-    elif blocks and all(group_of(b) in ADVICE_GROUPS for b in blocks):
+    elif blocked and blocked <= ADVICE_GROUPS:
         group = 2
     else:
         group = 3
+    unproven = short_edge_cap(v.plan, v.checks) is not None
     e = expectancy(v)
-    return (group, e is None, -(e or 0.0))
+    return (group, unproven, e is None, -(e or 0.0))
 
 
 def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = (), *,

@@ -4,9 +4,10 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pytest
 from nse_backtest.desk.checks import CheckContext
 from nse_backtest.desk.markets import NSE
-from nse_backtest.desk.models import Action, Limits, LiveQuote, Mode, ShortEdge, Side, Status
+from nse_backtest.desk.models import Action, Check, Limits, LiveQuote, Mode, ShortEdge, Side, Status
 from nse_backtest.desk.nse_lists import BanList
 from nse_backtest.desk.service import check_trade
 
@@ -201,3 +202,67 @@ def test_i4_tie_passes_and_a_real_shortfall_still_blocks():
     low = replace(splan(), target_1=100.0 - 2.0 * 1.49)  # 1.49R: a real shortfall
     c = next(c for c in run_checks(low, SIZE, ODDS, sctx(), current_price=100.0) if c.name == "reward_risk")
     assert c.status is Status.BLOCK and c.reason == "Reward:risk 1:1.49 is below minimum 1:1.50"
+
+
+# ---------------------------------------------------------------- M1/M4/M8/M10: ranking and groups
+
+def _vv(sym="X", action=Action.WAIT, checks=(), side=Side.LONG, e=0.3, regime="HOSTILE"):
+    from dataclasses import replace
+    from tests.desk.test_choose import v
+    out = v(sym, action, Mode.INTRADAY if side is Side.SHORT else Mode.SWING, e=e,
+            checks=checks or (Check("regime", Status.PASS, ""),))
+    return replace(out, plan=replace(out.plan, side=side), regime=regime)
+
+
+def test_m8_unknown_check_names_are_data_never_overridable():
+    from nse_backtest.desk.verdict import group_of
+    assert group_of("mystery") == "data" and group_of("mystery", Side.SHORT) == "data"
+
+
+def test_m1_candidate_rank_reads_block_groups_like_the_card():
+    from nse_backtest.desk import session
+    # an unknown regime (index data failed) puts the regime BLOCK in "data": no longer advice-ranked
+    known = _vv(action=Action.SKIP, checks=(Check("regime", Status.BLOCK, "x"),), regime="HOSTILE")
+    unknown = _vv(action=Action.SKIP, checks=(Check("regime", Status.BLOCK, "x"),), regime=None)
+    assert session.candidate_rank(known)[0] == 2 and session.candidate_rank(unknown)[0] == 3
+
+
+def test_m10_unknown_regime_is_data_broken_with_its_own_reason_and_no_override(tmp_path):
+    from nse_backtest.desk import audit
+    from nse_backtest.desk.verdict import REGIME_UNKNOWN, block_groups, data_broken
+    v = _vv(action=Action.SKIP, checks=(Check("regime", Status.BLOCK,
+                                              "Regime unknown — treated as HOSTILE (swing longs blocked)"),),
+            regime=None)
+    assert [c.name for c in block_groups(v)["data"]] == ["regime"] and block_groups(v)["market"] == []
+    assert data_broken(v) == (REGIME_UNKNOWN,) == ("Market regime unknown (index data unavailable)",)
+    with pytest.raises(ValueError, match="re-check"):
+        audit.append_override(v, tmp_path / "a.jsonl")  # M2
+    assert not (tmp_path / "a.jsonl").exists()
+    short = _vv(side=Side.SHORT, action=Action.SKIP, regime=None, checks=(
+        Check("regime", Status.WARN, "Market regime unknown: ORB shorts are for HOSTILE days only"),
+        Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only (regime unknown)")))
+    assert data_broken(short) == (REGIME_UNKNOWN,)
+
+
+def test_m2_append_override_refuses_any_data_broken_verdict(tmp_path):
+    from nse_backtest.desk import audit
+    v = _vv(action=Action.SKIP, checks=(Check("freshness", Status.BLOCK, "Data is stale"),))
+    with pytest.raises(ValueError, match="data is broken"):
+        audit.append_override(v, tmp_path / "a.jsonl")
+
+
+def test_m4_unproven_shorts_rank_after_proven_peers_within_wait():
+    from nse_backtest.desk import session
+    proven = Check("short_edge", Status.PASS, "edge proven")
+    unproven = Check("short_edge", Status.WARN, "edge not proven")
+    long_w = _vv("L", e=0.2)
+    short_ok = _vv("SP", side=Side.SHORT, e=0.3, checks=(proven,))
+    short_un = _vv("SU", side=Side.SHORT, e=0.9, checks=(unproven,))  # its 1x-slippage Exp R is the highest
+    order = [x.plan.symbol for x in sorted([short_un, long_w, short_ok], key=session.candidate_rank)]
+    assert order == ["SP", "L", "SU"]
+
+
+def test_m4_short_expected_value_is_labelled_with_its_slippage_basis():
+    from nse_backtest.desk.tradecard import ev_basis_note
+    assert ev_basis_note(_vv(side=Side.SHORT)) == "at 1× slippage (the edge gate uses 2×)"
+    assert ev_basis_note(_vv()) == ""

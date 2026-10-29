@@ -322,17 +322,18 @@ def test_h3_every_check_name_is_mapped_to_exactly_one_group():
         assert _verdict.CHECK_GROUPS[n] == "limits"
 
 
-def test_h3_block_groups_splits_non_pass_checks_and_unknown_names_go_to_limits():
+def test_h3_block_groups_splits_non_pass_checks_and_unknown_names_go_to_data():
     checks = (Check("regime", Status.BLOCK, "r"), Check("monte_carlo", Status.BLOCK, "m"),
               Check("freshness", Status.BLOCK, "f"), Check("liquidity", Status.WARN, "l"),
               Check("size", Status.PASS, "ok"), Check("window", Status.BLOCK, "w"))
-    v = decide(P, S, None, checks, NSE, 100.0, NOW)
+    v = replace(decide(P, S, None, checks, NSE, 100.0, NOW), regime="HOSTILE")  # a known regime (F2/M10)
     g = _verdict.block_groups(v)
     assert list(g) == ["market", "odds", "data", "safety", "limits"]
     assert [c.name for c in g["market"]] == ["regime"] and [c.name for c in g["odds"]] == ["monte_carlo"]
-    assert [c.name for c in g["data"]] == ["freshness"]
-    assert [c.name for c in g["limits"]] == ["liquidity", "window"]  # PASS left out; unknown -> limits
-    assert _verdict.data_broken(v) == ("f",)
+    # F2/M8: an unknown check name is broken data (never overridable), no longer a limit
+    assert [c.name for c in g["data"]] == ["freshness", "window"]
+    assert [c.name for c in g["limits"]] == ["liquidity"]  # PASS left out
+    assert _verdict.data_broken(v) == ("f", "w")
     assert _verdict.data_broken(decide(P, S, None, (Check("gap", Status.WARN, "g"),), NSE, 100.0, NOW)) == ()
 
 
@@ -598,7 +599,8 @@ def test_h5a_fix_a_long_ban_list_stays_a_limit_warn():
 
 
 def test_h5a_fix_short_regime_is_market_advice():
-    v = decide(_short_plan(), S, None, EDGE_WARN + (Check("short_regime", Status.BLOCK, "r"),), NSE, 99.8, NOW)
+    v = replace(decide(_short_plan(), S, None, EDGE_WARN + (Check("short_regime", Status.BLOCK, "r"),), NSE, 99.8,
+                       NOW), regime="TRENDING")  # a known regime (F2/M10: unknown is data)
     g = _verdict.block_groups(v)
     assert [c.name for c in g["market"]] == ["short_regime"] and _verdict.safety_blocked(v) == ()
 

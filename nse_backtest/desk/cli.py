@@ -21,7 +21,7 @@ from .models import Action, DeskVerdict, Mode, Side, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 from .shortcheck import edge_line, skipped_line
-from .tradecard import DAILY_LOSS_NOTE, build_card
+from .tradecard import DAILY_LOSS_NOTE, build_card, ev_basis_note
 from .verdict import data_broken, is_quick, safety_blocked
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
@@ -101,6 +101,8 @@ def format_money(card, profile) -> list[str]:
                 f"  Per share: loss at stop {m(loss)}, profit at T1 {m(p1)}, profit at T2 {m(p2)}"
                 f"  reward:risk {card.rr_t1:.2f}"]
     ev = "n/a (no odds)" if card.expected_value is None else m(card.expected_value)
+    if card.expected_value is not None and (basis := ev_basis_note(card.verdict)):
+        ev += f" {basis}"
     lines = [f"Money ({card.qty} shares{', your quantity' if card.qty_is_override else ''}):",
              f"  max loss {m(card.max_loss)} ({card.gap_note[0].lower() + card.gap_note[1:]})",
              f"  profit at T1 {m(card.profit_t1)}  profit at T2 {m(card.profit_t2)}"
@@ -333,6 +335,8 @@ def _your_call_row(v: DeskVerdict, profile, limits) -> list[str]:
                 else "n/a")
     checked = "quick check" if is_quick(v) else "full check"
     why = f" — blocked by: {blocks}" if blocks else ""
+    if basis := ev_basis_note(v):
+        checked += f"; exp and EV {basis}"
     return [f"  {v.action.value:<4} {p.symbol:<12} {p.mode.value:<8} entry {m(p.entry)} ({to_entry} away)  "
             f"stop {m(p.stop)}  T1 {m(p.target_1)}  qty {qty}  max loss {loss}  exp {_r(e)}  EV {ev}  "
             f"[{checked}]{why}",

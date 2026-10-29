@@ -690,7 +690,7 @@ def _candidate_row(v: DeskVerdict) -> dict:
             "T2": profile.money(p.target_2), "Qty": str(card.qty if card else v.sizing.qty),
             "Max loss": _dash(card.max_loss if card else None), "Profit T1": _dash(card.profit_t1 if card else None),
             "Win odds": _pct(v.odds.p_target) if v.odds is not None else "n/a",
-            "Exp R": "n/a" if e is None else f"{e:+.2f}R",
+            "Exp R": "n/a" if e is None else f"{e:+.2f}R" + (" (1× slippage)" if p.is_short else ""),
             "Expected value": _dash(card.expected_value if card else None),
             "Why": why}
 
@@ -776,8 +776,9 @@ with tab_choose:
     st.caption("Every candidate from today's plan and the intraday scan, with the money at stake. The desk's "
                "TAKE / WAIT / SKIP is advice: you choose.")
     st.caption("Your call — ranked by the desk's own odds: TAKE, then WAIT, then SKIPs blocked only by the market or "
-               "the odds, then the rest; within each, the highest Monte Carlo expectancy (Exp R) first. A SKIP "
-               "stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing. A top "
+               "the odds, then the rest; within each, the highest Monte Carlo expectancy (Exp R) first, with shorts "
+               "whose pooled edge is not proven after the rest (a short's Exp R is at 1× slippage; its edge gate "
+               "uses 2×). A SKIP stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing. A top "
                "TAKE that the full check demoted is not replaced by the next quick one: open that one yourself.")
     pstate, istate = st.session_state.get(PLAN_KEY), st.session_state.get(SCAN_KEY)
     have_plan, have_scan = bool(pstate and "ok" in pstate), bool(istate and "ok" in istate)

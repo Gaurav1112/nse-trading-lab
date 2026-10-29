@@ -126,20 +126,39 @@ ADVICE_GROUPS = frozenset({"market", "odds"})
 
 
 def group_of(name: str, side: Side = Side.LONG) -> str:
-    """The group of a check name for a plan of ``side``; an unknown name is treated as a limit (red, never advice).
-    On a short, ban_list is "safety"."""
+    """The group of a check name for a plan of ``side``; an unknown name is treated as broken data (red, never advice,
+    never overridable). On a short, ban_list is "safety"."""
     if side is Side.SHORT and name in SHORT_SAFETY:
         return "safety"
-    return CHECK_GROUPS.get(name, "limits")
+    return CHECK_GROUPS.get(name, "data")
+
+
+_KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")
+REGIME_CHECKS = frozenset({"regime", "short_regime"})
+REGIME_UNKNOWN = "Market regime unknown (index data unavailable)"
+
+
+def regime_name(x) -> str | None:
+    """A regime value as the desk compares it: TRENDING / MIXED / HOSTILE (upper-cased, trimmed), else None."""
+    r = x.strip().upper() if isinstance(x, str) else ""
+    return r if r in _KNOWN_REGIMES else None
+
+
+def _group(v: DeskVerdict, c: models.Check) -> str:
+    """group_of, except that a regime check of a verdict whose regime is unknown (the index data failed) is "data":
+    a broken input to re-check, not the desk's market advice."""
+    if c.name in REGIME_CHECKS and regime_name(v.regime) is None:
+        return "data"
+    return group_of(c.name, v.plan.side)
 
 
 def block_groups(v: DeskVerdict) -> dict[str, list[models.Check]]:
     """The verdict's BLOCK and WARN checks by group, in check order; PASS checks are left out. Keys are always
-    "market", "odds", "data", "safety", "limits" in that order."""
+    "market", "odds", "data", "safety", "limits" in that order. An unknown regime's checks are "data"."""
     out: dict[str, list[models.Check]] = {g: [] for g in GROUPS}
     for c in v.checks:
         if c.status is not Status.PASS:
-            out[group_of(c.name, v.plan.side)].append(c)
+            out[_group(v, c)].append(c)
     return out
 
 
@@ -151,8 +170,15 @@ def safety_blocked(v: DeskVerdict) -> tuple[str, ...]:
 
 def data_broken(v: DeskVerdict) -> tuple[str, ...]:
     """The reasons of the verdict's "data" BLOCKs: non-empty means the inputs are broken and the verdict must be
-    re-checked before anyone chooses it."""
-    return tuple(c.reason for c in block_groups(v)["data"] if c.status is Status.BLOCK)
+    re-checked before anyone chooses it. An unknown regime's BLOCKs read as one REGIME_UNKNOWN reason."""
+    out: list[str] = []
+    for c in block_groups(v)["data"]:
+        if c.status is not Status.BLOCK:
+            continue
+        reason = REGIME_UNKNOWN if c.name in REGIME_CHECKS else c.reason
+        if reason not in out:
+            out.append(reason)
+    return tuple(out)
 
 
 def sat_out_refusal(v: DeskVerdict, profile: MarketProfile) -> str | None:
@@ -165,12 +191,11 @@ def sat_out_refusal(v: DeskVerdict, profile: MarketProfile) -> str | None:
         return "only long verdicts are logged as sat out"
     if is_quick(v):
         return "a quick (first-pass) verdict is never logged: run a full check"
+    if regime_name(v.regime) is None:  # missing regime data blocks fail-closed: that is not the desk choosing cash
+        return "the regime is unknown (missing data), not a known regime the desk sat out"
     blocks = {g: [c.name for c in cs if c.status is Status.BLOCK] for g, cs in block_groups(v).items()}
     if blocks.pop("market") != ["regime"] or any(blocks.values()):
         return "the market regime is not the only BLOCK"
-    regime = v.regime.strip().upper() if isinstance(v.regime, str) else ""
-    if regime not in _KNOWN_REGIMES:  # missing regime data blocks fail-closed: that is not the desk choosing cash
-        return "the regime is unknown (missing data), not a known regime the desk sat out"
     try:
         now = datetime.fromisoformat(v.created_at)
     except (TypeError, ValueError):
@@ -181,9 +206,6 @@ def sat_out_refusal(v: DeskVerdict, profile: MarketProfile) -> str | None:
     return None
 
 
-_KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")
-
-
 def regime_override_note(v: DeskVerdict, profile: MarketProfile, *, notional: float | None = None) -> str:
     """The override header for a verdict the market regime blocks, with the held-out cost of going against it on
     this position (``notional``, default the desk's sizing); "" when the regime check is not a BLOCK. The regime
@@ -191,8 +213,8 @@ def regime_override_note(v: DeskVerdict, profile: MarketProfile, *, notional: fl
     with no measured held-out figure, or no positive notional, gets the sentence without the number."""
     if not any(c.name == "regime" and c.status is Status.BLOCK for c in v.checks):
         return ""
-    regime = v.regime.strip().upper() if isinstance(v.regime, str) else ""
-    if regime not in _KNOWN_REGIMES:
+    regime = regime_name(v.regime)
+    if regime is None:
         return "YOUR OVERRIDE — against an unknown regime (treated as HOSTILE)"
     head = f"YOUR OVERRIDE — against the market regime ({regime})"
     pct = REGIME_HELD_OUT_PCT.get((profile.code, regime))

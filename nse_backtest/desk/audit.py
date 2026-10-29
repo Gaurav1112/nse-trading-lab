@@ -73,9 +73,11 @@ def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime |
     move that ran before the decision is never credited to it."""
     if v.action is Action.TAKE:
         raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
-    from .verdict import safety_blocked  # verdict imports this module's neighbours; keep the import local
+    from .verdict import data_broken, safety_blocked  # verdict imports this module's neighbours; keep it local
     if (why := safety_blocked(v)):
         raise ValueError(f"this short can't be taken ({'; '.join(why)}): no override")
+    if (why := data_broken(v)):
+        raise ValueError(f"the data is broken ({'; '.join(why)}): re-check, no override")
     tz = ZoneInfo(get_profile(v.plan.market).tz)
     if now is None:
         at = datetime.now(tz)
