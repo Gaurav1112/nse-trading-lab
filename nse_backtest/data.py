@@ -302,6 +302,8 @@ def _ticker_frame(data: pd.DataFrame, ticker: str, n_tickers: int) -> Optional[p
     sub = sub.dropna(how="all")
     if sub.empty:
         return sub
+    # a single-ticker yf.download sorts the price columns; the group_by='ticker' slice keeps history order
+    sub = sub.sort_index(axis=1)
     # the padding turns an int64 Volume into float64; restore it when every value is integral
     vol = sub.get("Volume")
     if isinstance(vol, pd.Series) and pd.api.types.is_float_dtype(vol):
@@ -358,9 +360,15 @@ def fetch_many_daily(
     max_age = _cache_max_age(end)
     for sym in by_symbol:
         cached = _read_fresh_cache(_cache_path(sym, exchange, start, end), max_age) if use_cache else None
-        if cached is not None and refetch_if is not None and refetch_if(sym, cached):
-            forced.add(sym)
-            cached = None
+        if cached is not None and refetch_if is not None:
+            try:
+                refetch = bool(refetch_if(sym, cached))
+            except Exception as e:  # noqa: BLE001 - an unusable cache file affects only its own symbol
+                log.warning("Cache for %s unusable (%s) — downloading instead", sym, e)
+                refetch = True
+            if refetch:
+                forced.add(sym)
+                cached = None
         if cached is None:
             pending.append(sym)
         else:
@@ -383,26 +391,35 @@ def fetch_many_daily(
                 raise ValueError("response has no ticker level")
         except Exception as e:  # noqa: BLE001 - fall back to the per-symbol path
             log.warning("Batch download of %s failed (%s) — fetching one by one", label, e)
-            for sym in pending:
-                try:
-                    got[sym] = fetch_nse(sym, start, end, exchange,
-                                         use_cache=use_cache and sym not in forced)
-                except Exception as e2:  # noqa: BLE001
-                    bad[sym] = f"{sym}: {e2}"
+            retry = list(pending)
         else:
+            # yfinance stores a ticker whose request failed as an empty frame (all-NaN after padding), so a
+            # partly failed batch is not empty and _yf_retry never retried it: retry such tickers one by one
+            retry = []
             for sym in pending:
                 ticker = ticker_of[sym]
+                raw_df = _ticker_frame(data, ticker, len(tickers))
+                if raw_df is None or raw_df.empty:
+                    retry.append(sym)
+                    continue
                 try:
-                    raw_df = _ticker_frame(data, ticker, len(tickers))
-                    if raw_df is None:
-                        raise ValueError(f"{ticker} missing from the batch response")
                     df = _clean_download(raw_df, ticker, start, end)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001 - real bars that clean to nothing: same as fetch_nse
                     bad[sym] = f"{sym}: {e}"
                     continue
                 if use_cache:
                     _write_cache(df, _cache_path(sym, exchange, start, end), sym)
                 got[sym] = df
+            if retry:
+                log.warning("No bars for %s in the batch download — retrying one by one", ", ".join(retry))
+        batch_failed = len(retry) == len(pending) and not got.keys() & set(pending)
+        for sym in retry:
+            try:
+                got[sym] = fetch_nse(sym, start, end, exchange, use_cache=use_cache and sym not in forced)
+            except Exception as e2:  # noqa: BLE001
+                where = "the batch download failed" if batch_failed else (
+                    f"no bars for {ticker_of[sym]} in the batch download")
+                bad[sym] = f"{sym}: {where}; per-symbol retry failed: {e2}"
 
     for sym, raws in by_symbol.items():
         for raw in raws:

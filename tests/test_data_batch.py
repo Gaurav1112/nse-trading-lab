@@ -19,14 +19,20 @@ def _bars(n=40, end="2026-02-27", base=100.0):
 
 
 def multi(frames: dict) -> pd.DataFrame:
-    """yfinance.download(tickers=[...], group_by='ticker') shape: (Ticker, Price) columns, union index."""
-    return pd.concat(list(frames.values()), axis=1, sort=True, keys=list(frames.keys()), names=["Ticker", "Price"])
+    """yfinance 1.4 download(tickers=[...], group_by='ticker') shape: (Ticker, Price) columns in history order
+    (no sort), union index, index name None."""
+    out = pd.concat(list(frames.values()), axis=1, sort=True, keys=list(frames.keys()), names=["Ticker", "Price"])
+    out.index.name = None
+    return out
 
 
 def single(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """yfinance.download(ticker) shape (group_by='column'): (Price, Ticker) columns."""
+    """yfinance 1.4 download(ticker) shape (group_by='column'): (Price, Ticker) columns sorted by Price,
+    index name None."""
     out = df.copy()
     out.columns = pd.MultiIndex.from_tuples([(c, ticker) for c in df.columns], names=["Price", "Ticker"])
+    out = out.sort_index(axis=1, level=0)
+    out.index.name = None
     return out
 
 
@@ -102,19 +108,27 @@ def test_single_uncached_symbol_with_ticker_level(monkeypatch):
     assert errors == {} and list(frames["BBB"]["Close"]) == list(b["Close"])
 
 
+def _batch_only(response):
+    """The batch call (a list of tickers) gets `response`; a per-symbol retry (one ticker string) gets nothing."""
+    return lambda args, kwargs: response.copy() if not isinstance(kwargs.get("tickers", args[0] if args else None),
+                                                                     str) else pd.DataFrame()
+
+
 def test_ticker_missing_from_response_is_an_error_entry(monkeypatch):
+    # fix round 1: a missing ticker is retried per symbol first; it is an error only when that fails too
     b = _bars(base=200)
-    _record(monkeypatch, multi({"BBB.NS": b}))
+    calls = _record(monkeypatch, _batch_only(multi({"BBB.NS": b})))
     frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
     assert "BBB" in frames and "CCC" not in frames
-    assert errors["CCC"].startswith("CCC: ")
+    assert errors["CCC"].startswith("CCC: ") and "per-symbol retry failed" in errors["CCC"]
+    assert len(calls) == 1 + 3  # the batch, then fetch_nse's 3 attempts for CCC
     assert not os.path.exists(data_mod._cache_path("CCC", "NS", START, END))
 
 
 def test_failed_ticker_all_nan_is_an_error_entry(monkeypatch):
     b = _bars(base=200)
     failed = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"], dtype=float)
-    _record(monkeypatch, multi({"BBB.NS": b, "CCC.NS": failed}))
+    _record(monkeypatch, _batch_only(multi({"BBB.NS": b, "CCC.NS": failed})))
     frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
     assert "BBB" in frames and errors.keys() == {"CCC"}
 
@@ -183,3 +197,96 @@ def test_fetch_nse_retry_still_uses_the_shared_policy(monkeypatch):
     with pytest.raises(ValueError, match="No data found"):
         data_mod.fetch_nse("BBB", START, END, "NS", use_cache=False)
     assert len(calls) == 3
+
+
+# ---- fix round 1: the REAL yf.download (yfinance.multi) driven by a fake Ticker.history, no network ----
+TZ = "Asia/Kolkata"
+
+
+def _hist(n, end, base):
+    idx = pd.bdate_range(end=end, periods=n, tz=TZ, name="Date")
+    c = base + np.arange(n, dtype=float)
+    return pd.DataFrame({"Open": c - 0.5, "High": c + 1.0, "Low": c - 1.0, "Close": c,
+                         "Volume": (np.arange(n) * 100 + 1000).astype("int64")}, index=idx)
+
+
+HIST = {"AAA.NS": _hist(40, "2026-02-27", 100), "BBB.NS": _hist(30, "2026-02-20", 200)}
+
+
+@pytest.fixture
+def real_yf(monkeypatch):
+    """Real yf.download; Ticker.history serves HIST. `fail` maps ticker -> number of failing calls (-1 = always)."""
+    import socket
+    def blocked(*a, **k):
+        raise OSError("network blocked in this test")
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    state = {"fail": {}, "calls": []}
+
+    def history(self, *a, **k):
+        state["calls"].append(self.ticker)
+        left = state["fail"].get(self.ticker, 0)
+        if left:
+            state["fail"][self.ticker] = left - 1 if left > 0 else left
+            raise RuntimeError("Too Many Requests. Rate limited.")
+        return HIST[self.ticker].copy()
+
+    monkeypatch.setattr(yf.Ticker, "history", history)
+    return state
+
+
+def test_real_yf_batch_frames_equal_fetch_nse(real_yf):
+    frames, errors = data_mod.fetch_many_daily(["AAA", "BBB"], START, END, "NS", use_cache=False)
+    assert errors == {}
+    for sym in ("AAA", "BBB"):
+        pd.testing.assert_frame_equal(frames[sym], data_mod.fetch_nse(sym, START, END, "NS", use_cache=False))
+
+
+def test_real_yf_ticker_failing_once_in_batch_is_retried_per_symbol(real_yf):
+    real_yf["fail"]["BBB.NS"] = 1  # fails inside the batch, works on the per-symbol retry
+    frames, errors = data_mod.fetch_many_daily(["AAA", "BBB"], START, END, "NS", use_cache=False)
+    assert errors == {} and set(frames) == {"AAA", "BBB"}
+    assert real_yf["calls"].count("BBB.NS") == 2 and real_yf["calls"].count("AAA.NS") == 1
+    pd.testing.assert_frame_equal(frames["BBB"], data_mod.fetch_nse("BBB", START, END, "NS", use_cache=False))
+
+
+def test_real_yf_ticker_failing_always_is_a_truthful_error(real_yf):
+    real_yf["fail"]["BBB.NS"] = -1
+    frames, errors = data_mod.fetch_many_daily(["AAA", "BBB"], START, END, "NS", use_cache=False)
+    assert set(frames) == {"AAA"} and set(errors) == {"BBB"}
+    msg = errors["BBB"]
+    assert msg.startswith("BBB: ") and "batch download" in msg and "per-symbol retry" in msg
+    assert not msg.startswith("BBB: No data found")  # not the bare 'check the symbol' text
+
+
+def test_malformed_bars_in_batch_stay_an_error_without_retry(monkeypatch):
+    b = _bars(base=200)
+    c = _bars(base=300).assign(High=1.0)  # every bar High < Low: real bars, all malformed
+    calls = _record(monkeypatch, multi({"BBB.NS": b, "CCC.NS": c}))
+    monkeypatch.setattr(data_mod, "fetch_nse", lambda *a, **k: pytest.fail("no per-symbol retry for bad bars"))
+    frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
+    assert "BBB" in frames and set(errors) == {"CCC"} and len(calls) == 1
+
+
+def test_missing_ticker_is_retried_per_symbol(monkeypatch):
+    b, c = _bars(base=200), _bars(base=300)
+    _record(monkeypatch, multi({"BBB.NS": b}))
+    seen = []
+    monkeypatch.setattr(data_mod, "fetch_nse",
+                        lambda sym, start, end=None, exchange="NS", use_cache=True: seen.append((sym, use_cache)) or c)
+    frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
+    assert errors == {} and seen == [("CCC", True)] and frames["CCC"] is c
+
+
+def test_unreadable_cache_only_affects_its_symbol(monkeypatch):
+    bad = pd.DataFrame({"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [10]},
+                       index=["not-a-date"])
+    bad.to_parquet(data_mod._cache_path("BAD", "NS", START, END))
+    calls = _record(monkeypatch, multi({"GOOD.NS": _bars(base=200), "BAD.NS": _bars(base=50)}))
+
+    def refetch_if(sym, df):
+        return pd.Timestamp(df.index[-1]).year == 2099  # raises on the non-date index
+    frames, errors = data_mod.fetch_many_daily(["GOOD", "BAD"], START, END, "NS", refetch_if=refetch_if)
+    assert errors == {} and set(frames) == {"GOOD", "BAD"}
+    assert sorted(t for t in calls[0][1]["tickers"]) == ["BAD.NS", "GOOD.NS"]
+    assert frames["BAD"]["Close"].iloc[0] == 50.0  # downloaded, the bad cache file ignored

@@ -128,7 +128,9 @@ def test_after_close_fallback_does_not_reread_the_stale_cache(monkeypatch, cache
 def test_one_bad_symbol_does_not_affect_others(monkeypatch, cache_dir):
     now = datetime(2026, 11, 9, 10, 0, tzinfo=TZ)
     only_today = _daily_to("2026-11-09", n=1)  # its only bar is today's partial bar -> no completed bars
-    _record(monkeypatch, multi({"INFY.NS": _daily_to("2026-11-06"), "NEW.NS": only_today}))
+    batch = multi({"INFY.NS": _daily_to("2026-11-06"), "NEW.NS": only_today})
+    # the batch call gets `batch`; GONE's per-symbol retry (fix round 1) gets nothing
+    _record(monkeypatch, lambda t: batch.copy() if len(t) > 1 else pd.DataFrame())
     frames, errors = loaders.load_daily_many(NSE, ["INFY", "NEW", "GONE", "../x"], now=now)
     assert set(frames) == {"INFY"}
     assert set(errors) == {"NEW", "GONE", "../x"} and "no completed bars" in errors["NEW"]
@@ -178,3 +180,36 @@ def test_load_frames_uses_batch_and_maps_failures_to_none(monkeypatch):
     assert out["OK"] is not None and out["BAD"] is None and out["WORSE"] is None
     assert list(out) == ["OK", "BAD", "WORSE"]
     assert warns == ["no data for BAD: no data", "no data for WORSE: boom"]
+
+
+# ---- fix round 1 ----
+def test_load_frames_through_the_real_batch_path(monkeypatch, cache_dir):
+    """No via_load_daily stub: load_frames -> load_daily_many -> fetch_many_daily -> (fake) yf.download."""
+    real_now = loaders._market_now
+    monkeypatch.setattr(loaders, "_market_now", lambda p, now=None: real_now(p, now or datetime(2026, 11, 9, 10, 0, tzinfo=TZ)))
+    ok = _daily_to("2026-11-06")
+
+    def download(*args, **kwargs):
+        t = kwargs.get("tickers", args[0] if args else None)
+        if isinstance(t, (list, tuple)):  # the batch call: only OK has data
+            return multi({"OK.NS": ok})
+        return pd.DataFrame()  # per-symbol retry of BAD: nothing
+    monkeypatch.setattr(yf, "download", download)
+    warns = []
+    out = session.load_frames(NSE, ["OK", "BAD"], warns.append)
+    assert list(out) == ["OK", "BAD"] and out["BAD"] is None
+    assert out["OK"].index[-1].date() == date(2026, 11, 6) and len(out["OK"]) > 0
+    assert len(warns) == 1 and warns[0].startswith("no data for BAD: BAD: ")
+
+
+def test_unreadable_cache_file_does_not_fail_the_batch(monkeypatch, cache_dir):
+    """probe_poison: a cache file that loads but has a non-date index affects only its own symbol."""
+    now = datetime(2026, 11, 9, 10, 0, tzinfo=TZ)
+    bad = pd.DataFrame({"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [10]},
+                       index=["not-a-date"])
+    data_mod.CACHE_DIR  # created by _cache_path
+    bad.to_parquet(data_mod._cache_path("BAD", "NS", "2022-11-09", "2026-11-10"))
+    _record(monkeypatch, multi({"GOOD.NS": _daily_to("2026-11-06")}))
+    frames, errors = loaders.load_daily_many(NSE, ["GOOD", "BAD"], now=now)
+    assert "GOOD" in frames and len(frames["GOOD"]) > 0
+    assert ("BAD" in frames) != ("BAD" in errors)  # BAD downloaded or errors on its own
