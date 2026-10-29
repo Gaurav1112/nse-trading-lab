@@ -159,6 +159,13 @@ def _short_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfil
                      entry_limit=fills.entry_limit_short(float(e), float(s), profile.tick), side=Side.SHORT)
 
 
+def opening_range_low(df: pd.DataFrame) -> float:
+    """The low of the last session's first bar: an auto short's entry trigger (and the pooled history's)."""
+    _validate(df)
+    last_ts = df.index[-1]
+    return float(df[df.index.normalize() == last_ts.normalize()].iloc[0]["Low"])
+
+
 OR_VOLUME_SESSIONS = 20
 
 

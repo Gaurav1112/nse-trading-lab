@@ -44,6 +44,9 @@ class CheckContext:
     short_edge: ShortEdge | None = None
     short_edge_why: str = ""
     regime_by_day: dict | None = field(default=None, compare=False)
+    # Shorts only: the last session's opening-bar low, the entry the pooled history replays (None = unknown -> the
+    # short is off the pooled rule). Set by service.check_trade from the bars; never hashed.
+    or_low: float | None = None
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -192,16 +195,22 @@ def short_edge_check(ctx: CheckContext, plan: TradePlan | None = None) -> Check:
         return _ck("short_edge", Status.WARN,
                    f"edge not proven on the desk's own history yet ({n:.0f} trades, {shown})")
     proven = f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)"
-    off_rule = _off_pooled_rule(plan)
+    off_rule = _off_pooled_rule(plan, ctx)
     if off_rule:  # the pooled replay proves the desk's own geometry only, not a user's stop or target
         return _ck("short_edge", Status.WARN, f"{proven}; {off_rule}")
     return _ck("short_edge", Status.PASS, proven)
 
 
-def _off_pooled_rule(plan: TradePlan | None) -> str:
-    """Why ``plan`` is not the geometry the pooled replay proves (OR-mid stop, T1 at 1.5R), or ""."""
+def _off_pooled_rule(plan: TradePlan | None, ctx: CheckContext | None = None) -> str:
+    """Why ``plan`` is not the geometry the pooled replay proves (entry at the OR low, OR-mid stop, T1 at 1.5R), or
+    "". The entry must be the opening-range low (``ctx.or_low``) within half a tick; an unknown OR low is off."""
     if plan is None:
         return ""
+    orl = _num(ctx.or_low) if ctx is not None else None
+    if orl is None:
+        return "opening-range low unknown: entry basis not verified"
+    if abs(plan.entry - orl) > ctx.profile.tick / 2 + 1e-9:
+        return "entry differs from the opening-range low the pooled history tested"
     if plan.stop_basis == "user":
         return "pooled figure uses the opening-range-mid stop"
     try:
