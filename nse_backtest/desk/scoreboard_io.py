@@ -25,8 +25,8 @@ from . import calendars as cal
 from .markets import get_profile
 from .models import Mode
 from .scoreboard import (
-    RECORD_OF_ACTION, SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale, check_price_scale,
-    exit_status, load_candidates,
+    RECORD_OF_ACTION, SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale,
+    check_price_scale, exit_status, load_candidates,
     logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 

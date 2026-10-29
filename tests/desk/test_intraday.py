@@ -67,3 +67,32 @@ def test_run_intraday_logs_scan_takes_to_the_data_dir_audit(tmp_path, monkeypatc
     monkeypatch.setattr(intraday, "check_trade", _fake_check({"AAA": Action.TAKE, "BBB": Action.SKIP}, []))
     session.run_intraday(NSE, Limits(capital=100_000), ["AAA", "BBB"], regime=None)
     assert [r["symbol"] for r in _rows(tmp_path / "desk_audit.jsonl")] == ["AAA"]
+
+
+def test_orb_scan_oserror_for_one_symbol_is_a_failure_others_still_return(tmp_path, monkeypatch):
+    ok = _fake_check({"AAA": Action.TAKE, "CCC": Action.TAKE}, [])
+
+    def check(df, sym, *a, **k):
+        if sym == "BAD":
+            raise OSError("audit disk full")
+        return ok(df, sym, *a, **k)
+    monkeypatch.setattr(intraday, "check_trade", check)
+    path = tmp_path / "audit.jsonl"
+    verdicts, failures = intraday.orb_scan(NSE, {s: pd.DataFrame() for s in ("AAA", "BAD", "CCC")},
+                                           Limits(capital=100_000), ctx(), audit_path=path)
+    assert [v.plan.symbol for v in verdicts] == ["AAA", "CCC"]
+    assert len(failures) == 1 and failures[0][0] == "BAD" and "audit disk full" in failures[0][1]
+
+
+def test_orb_scan_oserror_while_logging_a_take_is_that_symbols_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(intraday, "check_trade", _fake_check({"AAA": Action.TAKE, "CCC": Action.WAIT}, []))
+    calls = []
+
+    def append(v, path):
+        calls.append(v.plan.symbol)
+        raise OSError("read-only filesystem")
+    monkeypatch.setattr(intraday, "append_verdict", append)
+    verdicts, failures = intraday.orb_scan(NSE, {"AAA": pd.DataFrame(), "CCC": pd.DataFrame()},
+                                           Limits(capital=100_000), ctx(), audit_path=tmp_path / "a.jsonl")
+    assert calls == ["AAA"] and [v.plan.symbol for v in verdicts] == ["CCC"]
+    assert failures[0][0] == "AAA" and "read-only filesystem" in failures[0][1]

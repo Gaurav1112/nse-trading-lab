@@ -208,7 +208,8 @@ def cmd_plan(a, profile) -> int:
 
 def cmd_positions(a, profile) -> int:
     positions = loaders.market_positions(profile)
-    frames = session.load_frames(profile, sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")}), _stderr_warn)
+    open_symbols = sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")})
+    frames = session.load_frames(profile, open_symbols, _stderr_warn)
     actions = review_positions(positions, {k: v for k, v in frames.items() if v is not None}, profile)
     if a.json:
         _emit_json(actions)
@@ -280,6 +281,20 @@ def _num_r(x) -> str:
     return "n/a" if x is None else f"{x:+.2f}R"
 
 
+def _projected_line(outcomes, s) -> str:
+    """"Projected xR vs realised yR over n trades" for one (record, market, mode) group: the trades that had a
+    projection, so both sums cover the same trades."""
+    from .projections import projected_vs_real
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
+             (s.record, s.market, s.mode)]
+    _, _, pairs, n_without = projected_vs_real(group)
+    if not pairs:
+        return "  No projections to compare yet"
+    proj, real = sum(p for p, _ in pairs), sum(r for _, r in pairs)
+    extra = f" ({n_without} without a projection)" if n_without else ""
+    return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {len(pairs)} trades{extra}"
+
+
 def format_scoreboard(res, market_label: str) -> list[str]:
     """Text scoreboard: disclaimer first; a "Desk picks" and a "Your overrides" section (never pooled), each with
     per (market, mode) the verdict line first, then the numbers."""
@@ -291,7 +306,8 @@ def format_scoreboard(res, market_label: str) -> list[str]:
     if not res.outcomes and res.rejects:
         lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
     elif not res.outcomes:
-        lines.append(f"No TAKE verdicts logged yet for {market_label} — run `plan` or `check` to build a record.")
+        lines.append(f"No desk picks or overrides logged yet for {market_label} — run plan, check or the intraday "
+                     "scan, or choose a trade")
     for record, label in RECORD_LABELS.items() if res.outcomes else ():
         stats = [s for s in res.stats if s.record == record]
         lines += ["", label]
@@ -307,7 +323,8 @@ def format_scoreboard(res, market_label: str) -> list[str]:
                       f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
                       f"  95% CI of mean realised {ci}  max drawdown {dd}",
                       f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
-                      f"prediction coverage {cov}"]
+                      f"prediction coverage {cov}",
+                      _projected_line(res.outcomes, s)]
     if res.outcomes:
         lines += ["", "Trades:",
                   f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
@@ -320,7 +337,8 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} {o.status.value:<16} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} "
+                         f"{o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
             lines.append("  (R in brackets = open trade marked to the last close; not counted in the stats)")
@@ -351,7 +369,8 @@ def cmd_scoreboard(a, profile) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m nse_backtest.desk",
-                                 description="Trade desk: sized TAKE / WAIT / SKIP decisions for NSE and US. Places nothing.")
+                                 description="Trade desk: sized TAKE / WAIT / SKIP decisions for NSE and US. "
+                                             "Places nothing.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):

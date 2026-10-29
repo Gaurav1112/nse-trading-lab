@@ -843,8 +843,8 @@ def test_load_candidates_take_is_desk_override_is_override_others_ignored():
 
 
 def test_load_candidates_dedupe_is_per_record():
-    rows = [_row("TAKE", "t"), _row("OVERRIDE", "t"),  # same ticket, same instant: two records, two candidates
-            _row("OVERRIDE", "o2", created="2026-10-27T11:00:00+05:30")]  # same session, same record: deduped
+    rows = [_row("TAKE", "t"), _row("OVERRIDE", "t", desk_action="WAIT"),  # same ticket, same instant: two records, two candidates
+            _row("OVERRIDE", "o2", created="2026-10-27T11:00:00+05:30", desk_action="WAIT")]  # same session, same record: deduped
     cands, _ = load_candidates(rows)
     assert sorted(c.record for c in cands) == ["desk", "override"]
     desk, over = sorted(cands, key=lambda c: c.record)
@@ -874,3 +874,21 @@ def test_score_stats_record_is_the_last_field_defaulting_to_desk():
     f = fields(ScoreStats)
     assert f[-1].name == "record" and f[-1].default == "desk"
     assert summarize(_outs([1.0]))[0].record == "desk"
+
+
+def test_c8_override_of_a_take_verdict_is_rejected():
+    base = dict(market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103, qty=10,
+                input_hash="h", created_at="2026-10-26T10:00:00+05:30", action="OVERRIDE")
+    rows = [dict(base, desk_action="TAKE"), dict(base, symbol="W", desk_action="WAIT"),
+            dict(base, symbol="S", desk_action="SKIP"), dict(base, symbol="N")]
+    cands, rejects = load_candidates(rows)
+    assert sorted(c.symbol for c in cands) == ["S", "W"]
+    assert len(rejects) == 2 and all("override of a TAKE verdict" in why for _, why in rejects)
+
+
+def test_c8_two_scans_of_the_same_take_are_one_candidate():
+    base = dict(action="TAKE", market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103, qty=10,
+                input_hash="h")
+    cands, rejects = load_candidates([dict(base, created_at="2026-10-26T10:00:00+05:30"),
+                                      dict(base, created_at="2026-10-26T10:30:00+05:30", input_hash="h2")])
+    assert len(cands) == 1 and rejects == [] and cands[0].record == "desk"

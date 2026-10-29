@@ -18,6 +18,8 @@ import streamlit as st
 
 from components import desk_card, theme
 from nse_backtest.desk import loaders, session
+from nse_backtest.desk.charts import projected_vs_real_chart
+from nse_backtest.desk.projections import projected_vs_real
 from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
@@ -428,7 +430,23 @@ def _score_banner(s) -> None:
         st.info(text)
 
 
-def _render_record(stats) -> None:
+def _render_projected_vs_real(outcomes, s) -> None:
+    """Projected vs realised R for one (record, market, mode) group, or an info line without any projection."""
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
+             (s.record, s.market, s.mode)]
+    cum_proj, cum_real, pairs, n_without = projected_vs_real(group)
+    st.markdown(f"**Projected vs realised R — {s.mode.value}**")
+    if not pairs:
+        st.info("No projections to compare yet")
+        return
+    st.plotly_chart(projected_vs_real_chart(cum_proj, cum_real, pairs, n_without), width="stretch",
+                    key=f"pvr_{s.record}_{s.market}_{s.mode.value}")
+    other = sum(o.realised_r for o in group if o.candidate.mc_expectancy_r is None and o.realised_r is not None)
+    st.caption(f"{n_without} resolved trade{'s' if n_without != 1 else ''} without a projection"
+               + (f" (realised {other:+.2f}R, not on the chart)." if n_without else "."))
+
+
+def _render_record(stats, outcomes=()) -> None:
     """One record's verdict banners first, then its numbers and charts (records are never pooled)."""
     for s in stats:
         _score_banner(s)
@@ -445,16 +463,10 @@ def _render_record(stats) -> None:
             if s.cumulative_r:
                 st.markdown(f"**Cumulative R — {s.mode.value}**")
                 st.line_chart(pd.DataFrame({"cumulative R": list(s.cumulative_r)}))
+            _render_projected_vs_real(outcomes, s)
 
 
 def _render_scoreboard(res, profile, warnings=()) -> None:
-    if res.outcomes:
-        for record, label in RECORD_LABELS.items():
-            st.subheader(label)
-            stats = [s for s in res.stats if s.record == record]
-            if not stats:
-                st.caption(f"No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
-            _render_record(stats)
     for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
         st.warning(w)
     if res.rejects:
@@ -463,7 +475,15 @@ def _render_scoreboard(res, profile, warnings=()) -> None:
     if getattr(res, "note", None):
         st.info(res.note)
     if not res.outcomes:
-        st.info(f"No TAKE verdicts logged yet for {profile.code} — build a plan or check a trade to start a record.")
+        st.info(f"No desk picks or overrides logged yet for {profile.code} — run plan, check or the intraday scan, "
+                "or choose a trade")
+    else:
+        for record, label in RECORD_LABELS.items():
+            st.subheader(label)
+            stats = [s for s in res.stats if s.record == record]
+            if not stats:
+                st.caption(f"No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+            _render_record(stats, res.outcomes)
     if res.outcomes:
         st.dataframe(pd.DataFrame([{
             "Date": o.candidate.created_at.astimezone(ZoneInfo(profile.tz)).date().isoformat(),

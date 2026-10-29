@@ -123,6 +123,8 @@ def _parse_row(row: dict) -> Candidate:
     record = RECORD_OF_ACTION.get(row.get("action"))
     if record is None:
         raise ValueError(f"not a scored action {row.get('action')!r}")
+    if record == "override" and row.get("desk_action") not in ("WAIT", "SKIP"):
+        raise ValueError(f"override of a TAKE verdict (desk_action {row.get('desk_action')!r})")
     for k in ("created_at", "market", "symbol", "mode", "input_hash"):
         if not row.get(k):
             raise ValueError(f"missing {k}")
