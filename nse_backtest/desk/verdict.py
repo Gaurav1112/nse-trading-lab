@@ -12,13 +12,11 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
-import re
-
 from . import calendars as cal
 from . import fills
+from . import models
 from .checks import REGIME_HELD_OUT_PCT, signed_pct
 from .markets import MarketProfile
-from . import models
 from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan, summary_fields
 from .sizing import loss_at_stop
 
@@ -112,24 +110,25 @@ def data_broken(v: DeskVerdict) -> tuple[str, ...]:
     return tuple(c.reason for c in block_groups(v)["data"] if c.status is Status.BLOCK)
 
 
-_REGIME_RE = re.compile(r"^Market regime ([A-Z]+)\b")
+_KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")
 
 
 def regime_override_note(v: DeskVerdict, profile: MarketProfile, *, notional: float | None = None) -> str:
     """The override header for a verdict the market regime blocks, with the held-out cost of going against it on
-    this position (``notional``, default the desk's sizing); "" when the regime check is not a BLOCK. A regime
-    with no held-out figure (or no positive notional) gets the sentence without the number."""
-    reg = next((c for c in v.checks if c.name == "regime" and c.status is Status.BLOCK), None)
-    if reg is None:
+    this position (``notional``, default the desk's sizing); "" when the regime check is not a BLOCK. The regime
+    name is the verdict's regime value (unknown: "an unknown regime (treated as HOSTILE)"). A (market, regime)
+    with no measured held-out figure, or no positive notional, gets the sentence without the number."""
+    if not any(c.name == "regime" and c.status is Status.BLOCK for c in v.checks):
         return ""
-    m = _REGIME_RE.match(reg.reason or "")
-    regime = m.group(1) if m else "UNKNOWN"
+    regime = v.regime.strip().upper() if isinstance(v.regime, str) else ""
+    if regime not in _KNOWN_REGIMES:
+        return "YOUR OVERRIDE — against an unknown regime (treated as HOSTILE)"
     head = f"YOUR OVERRIDE — against the market regime ({regime})"
-    pct = REGIME_HELD_OUT_PCT.get(regime)
+    pct = REGIME_HELD_OUT_PCT.get((profile.code, regime))
     n = v.sizing.notional if notional is None else notional
     if pct is None or not (isinstance(n, (int, float)) and math.isfinite(n) and n > 0):
         return head
-    return (f"{head}: the desk's held-out longs here averaged {signed_pct(pct)}% per trade ≈ "
+    return (f"{head}: the desk's held-out longs here averaged {signed_pct(pct)}% per trade ≈ a loss of "
             f"{profile.money(abs(pct) / 100 * n)} on this position")
 
 

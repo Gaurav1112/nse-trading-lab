@@ -182,7 +182,7 @@ def _bullets(checks) -> str:
     return "\n".join(f"- {c.status.value} {c.name} — {c.reason}" for c in checks)
 
 
-def _reasons(v: DeskVerdict, card, flips=()) -> None:
+def _reasons(v: DeskVerdict, flips=()) -> None:
     """Why the desk did not say TAKE, by kind: the market regime and the desk's odds are advice (amber); broken
     data and the owner's limits are real problems (red when they BLOCK, amber when they only WARN)."""
     if v.action is Action.TAKE:
@@ -496,7 +496,7 @@ def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header
     except Exception as e:  # noqa: BLE001 - invalid geometry or quantity: no money, no ticket
         st.error(f"Trade card unavailable: {_msg(e)}")
         return
-    _section("Reasons", _reasons, v, card, tuple(flips or ()))
+    _section("Reasons", _reasons, v, tuple(flips or ()))
     st.markdown("**Levels**")
     _section("Levels", _levels, card, profile)
     st.markdown("**Money**")

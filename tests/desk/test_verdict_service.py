@@ -277,9 +277,12 @@ def _h3_ctx(regime, **kw):
     return CheckContext(NSE, Limits(capital=1_000_000), NOW, **base)
 
 
-def _h3_verdict(regime="HOSTILE", **kw):
-    cs = run_checks(P, S, None, _h3_ctx(regime, **kw), 100.0)
-    return decide(P, S, None, cs, NSE, 100.0, NOW)
+def _h3_verdict(regime="HOSTILE", profile=NSE, **kw):
+    """A verdict as check_trade builds it: decide over run_checks, carrying the regime value it was checked in."""
+    plan = replace(P, market=profile.code)
+    ctx = replace(_h3_ctx(regime, **kw), profile=profile)
+    cs = run_checks(plan, S, None, ctx, 100.0)
+    return replace(decide(plan, S, None, cs, profile, 100.0, NOW), regime=regime)
 
 
 def test_h3_input_hash_of_an_unchanged_long_verdict_is_pinned():
@@ -334,17 +337,43 @@ def test_h3_regime_check_text_and_override_note_share_one_held_out_figure():
     v = _h3_verdict("HOSTILE")
     reg = next(c for c in v.checks if c.name == "regime")
     assert reg.reason == "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"
-    assert _checks.REGIME_HELD_OUT_PCT == {"HOSTILE": -1.61}
+    assert _checks.REGIME_HELD_OUT_PCT == {("NSE", "HOSTILE"): -1.61}
     x = NSE.money(0.0161 * S.notional)
     assert _verdict.regime_override_note(v, NSE) == (
         "YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% per "
-        f"trade ≈ {x} on this position")
+        f"trade ≈ a loss of {x} on this position")
     y = NSE.money(0.0161 * 40 * 100)
-    assert _verdict.regime_override_note(v, NSE, notional=4_000.0).endswith(f"≈ {y} on this position")
+    assert _verdict.regime_override_note(v, NSE, notional=4_000.0).endswith(f"≈ a loss of {y} on this position")
+
+
+def test_h3_fix1_us_hostile_has_no_measured_figure_anywhere():
+    """The −1.61% is NSE's held-out result: a US HOSTILE check and override never quote it."""
+    us = _h3_verdict("HOSTILE", profile=US)
+    reg = next(c for c in us.checks if c.name == "regime")
+    assert reg.status is Status.BLOCK
+    assert reg.reason == "Market regime HOSTILE: swing longs historically lose here"
+    assert _verdict.regime_override_note(us, US) == "YOUR OVERRIDE — against the market regime (HOSTILE)"
 
 
 def test_h3_override_note_without_a_held_out_figure_or_a_regime_block():
     unknown = _h3_verdict(None)  # regime unknown is treated as HOSTILE and blocks swing longs
-    assert _verdict.regime_override_note(unknown, NSE) == "YOUR OVERRIDE — against the market regime (UNKNOWN)"
+    assert _verdict.regime_override_note(unknown, NSE) == ("YOUR OVERRIDE — against an unknown regime "
+                                                           "(treated as HOSTILE)")
     assert _verdict.regime_override_note(_h3_verdict("TRENDING"), NSE) == ""
     assert _verdict.regime_override_note(_h3_verdict("MIXED"), NSE) == ""  # a WARN is advice, not a block
+
+
+def test_h3_fix3_regime_name_comes_from_the_value_not_the_check_text():
+    v = _h3_verdict("HOSTILE")
+    odd = replace(v, checks=tuple(replace(c, reason="sit out") if c.name == "regime" else c for c in v.checks))
+    assert _verdict.regime_override_note(odd, NSE).startswith(
+        "YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs")
+
+
+def test_h3_fix3_check_trade_carries_the_regime_value(tmp_path):
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=1_000_000),
+                    CheckContext(NSE, Limits(capital=1_000_000), NOW, regime=" hostile "),
+                    audit_path=tmp_path / "a.jsonl")
+    assert v.regime == "HOSTILE"
+    assert check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=1_000_000),
+                       CheckContext(NSE, Limits(capital=1_000_000), NOW), audit_path=tmp_path / "a.jsonl").regime is None

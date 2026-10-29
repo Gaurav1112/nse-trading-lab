@@ -995,7 +995,7 @@ def test_h3_card_market_and_odds_are_amber_data_and_limits_red(monkeypatch, tmp_
               Check("monte_carlo", Status.BLOCK, "Simulated expectancy -0.20R is negative"),
               Check("liquidity", Status.BLOCK, "turnover too low"),
               Check("live_price", Status.WARN, "Price is the last close"))
-    at, calls, v = _h3_card(monkeypatch, tmp_path, checks)
+    at, calls, v = _h3_card(monkeypatch, tmp_path, checks, regime="HOSTILE")
     warn, err = _texts(at.warning), _errors(at)
     assert "Market says sit out" in warn and H3_HOSTILE in warn and H3_FLIP in warn
     assert "Simulated expectancy -0.20R is negative" in warn
@@ -1008,7 +1008,7 @@ def test_h3_card_market_and_odds_are_amber_data_and_limits_red(monkeypatch, tmp_
     qty = int(next(n for n in at.number_input if n.label == "Quantity").value)
     x = NSE.money(0.0161 * qty * v.plan.entry)
     assert ("YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% "
-            f"per trade ≈ {x} on this position") in _texts(at.warning)
+            f"per trade ≈ a loss of {x} on this position") in _texts(at.warning)
     assert len(calls["override"]) == 1
 
 

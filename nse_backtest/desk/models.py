@@ -134,6 +134,9 @@ class DeskVerdict:
     # True only for the daily plan's first pass (last close, no live quote, no earnings, no robustness, not audited):
     # see verdict.is_quick. Not part of the input hash or the audit row.
     first_pass: bool = False
+    # The market regime value the checks ran in (TRENDING / MIXED / HOSTILE; None = unknown). Not part of the input
+    # hash: the regime check already carries it.
+    regime: str | None = None
 
     def blocks(self) -> list[Check]:
         return [c for c in self.checks if c.status is Status.BLOCK]

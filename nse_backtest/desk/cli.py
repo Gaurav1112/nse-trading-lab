@@ -178,7 +178,7 @@ def cmd_check(a, profile) -> int:
         if refused:
             d["override_refused"] = refused
         _emit_json(d)
-        return 1 if broken else 0
+        return 1 if refused else 0
     lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
     if not taken and card.reasons:
         lines += ["", f"The desk said {v.action.value} because:"] + [f"  {r}" for r in card.reasons]
@@ -194,11 +194,12 @@ def cmd_check(a, profile) -> int:
         lines += ["Override logged — it is scored under \"Your overrides\", apart from the desk's picks."]
     elif refused:
         lines += ["", refused]
-        if broken:
-            _finish(lines)
-            return 1
+        _finish(lines)
+        return 1
     elif choose:
         lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
+    elif (broken_now := data_broken(v)):  # no override is offered on broken data
+        lines += ["", f"Data is broken ({'; '.join(broken_now)}) — re-check before choosing."]
     else:
         now = " now" if v.action is Action.WAIT else ""
         lines += ["", f"The desk says {v.action.value}. Add --choose to take it{now} anyway "
@@ -497,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--qty", type=int, help="your quantity instead of the desk's size (limit breaches are listed)")
     c.add_argument("--choose", action="store_true",
                    help="take a WAIT/SKIP anyway: print the override ticket and log it as your override "
-                        "(refused, exit 1, while the data is broken)")
+                        "(refused, exit 1, while the data is broken or outside the intraday entry window)")
     c.set_defaults(fn=cmd_check)
     for name, fn, h in (("plan", cmd_plan, "today's plan"), ("positions", cmd_positions, "review open positions"),
                         ("intraday", cmd_intraday, "opening-range scan")):

@@ -244,7 +244,7 @@ def test_cli_choose_refuses_an_intraday_override_outside_the_window(desk, monkey
     from zoneinfo import ZoneInfo
     monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, *hhmm, tzinfo=ZoneInfo("Asia/Kolkata")))
     _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("window", Status.BLOCK, "x"),)))
-    assert cli.main(["check", "ABC", "--choose"]) == 0
+    assert cli.main(["check", "ABC", "--choose"]) == 1  # H3 fix: a refused --choose exits 1
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
     assert f"--choose refused: an intraday override is only taken inside the entry window; it is {why}" in out
@@ -280,15 +280,19 @@ def test_h3_cli_choose_refuses_when_data_is_broken(desk, monkeypatch, capsys, tm
     assert d["override_logged"] is False and "data is broken" in d["override_refused"]
     assert _audit_rows(tmp_path) == []
     assert cli.main(["check", "ABC"]) == 0  # without --choose it is just the verdict
+    out = capsys.readouterr().out
+    assert "Add --choose" not in out
+    assert ("Data is broken (Data is stale: misses 2 sessions; Price is at or below the stop) — re-check before "
+            "choosing") in out
 
 
 def test_h3_cli_regime_override_states_the_held_out_cost(desk, monkeypatch, capsys, tmp_path):
-    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(HOSTILE,)))
+    _fake(monkeypatch, replace(v("ABC", Action.SKIP, checks=(HOSTILE,)), regime="HOSTILE"))
     assert cli.main(["check", "ABC", "--choose", "--qty", "12"]) == 0
     out = capsys.readouterr().out
     x = NSE.money(0.0161 * 12 * 100)
     assert ("YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% "
-            f"per trade ≈ {x} on this position") in out
+            f"per trade ≈ a loss of {x} on this position") in out
     assert len(_audit_rows(tmp_path)) == 1
 
 

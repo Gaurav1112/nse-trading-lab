@@ -670,3 +670,10 @@ def test_h3_ban_list_warns_a_swing_long_cash_delivery_is_allowed():
     c = _c("ban_list", ban=b)
     assert c.status is Status.WARN
     assert c.reason == "ABC is in the F&O ban — derivatives only; cash delivery allowed"
+
+
+def test_h3_fix2_ban_list_warns_an_intraday_long_too():
+    b = BanList(frozenset({"ABC"}), "ok", None, "")
+    c = _c("ban_list", p=_intra(), ban=b)
+    assert c.status is Status.WARN
+    assert c.reason.startswith("ABC is in the F&O ban — derivatives only; cash")
