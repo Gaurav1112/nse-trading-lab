@@ -454,13 +454,17 @@ def day_trades_5d(journal: list[dict], today: date, profile: MarketProfile | Non
     return n
 
 
-def fno_underlyings(profile: MarketProfile, now: datetime | None = None) -> frozenset[str] | None:
-    """NSE's F&O underlyings (who may be shorted intraday); None for a market without one or when the list
-    cannot be verified (the short_eligibility check then BLOCKs)."""
+def fno_underlyings(profile: MarketProfile, now: datetime | None = None
+                    ) -> tuple[frozenset[str] | None, date | None]:
+    """(NSE's F&O underlyings — who may be shorted intraday —, the date that list is from); (None, None) for a market
+    without one or when the list cannot be verified (the short_fno check then BLOCKs). The day is the market's
+    (IST), never the machine's."""
     if profile.code != "NSE":
-        return None
-    now = now or datetime.now(ZoneInfo(profile.tz))
-    return nse_lists.fetch_fno_underlyings(data_dir() / "cache", now.date())
+        return None, None
+    tz = ZoneInfo(profile.tz)
+    now = now or datetime.now(tz)
+    today = now.astimezone(tz).date() if now.tzinfo is not None else now.date()
+    return nse_lists.fetch_fno_underlyings(data_dir() / "cache", today)
 
 
 def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | None = None,

@@ -43,7 +43,7 @@ LIM = Limits(capital=500_000)  # fictional
 
 def short_ctx(**kw):
     base = dict(regime="HOSTILE", governor_can_trade=True, ban=BanList(frozenset(), "ok", "2026-10-29", ""),
-                earnings_checked=True, turnover_20d=1e11, today_gap_pct=0.1, fno=frozenset({"FICT"}),
+                earnings_checked=True, turnover_20d=1e11, today_gap_pct=0.1, fno=frozenset({"FICT"}), fno_as_of=NOW.date(),
                 short_edge=ShortEdge.from_trades(250, 0.12))
     base.update(kw)
     return CheckContext(NSE, LIM, NOW, **base)
@@ -266,3 +266,51 @@ def test_m4_short_expected_value_is_labelled_with_its_slippage_basis():
     from nse_backtest.desk.tradecard import ev_basis_note
     assert ev_basis_note(_vv(side=Side.SHORT)) == "at 1× slippage (the edge gate uses 2×)"
     assert ev_basis_note(_vv()) == ""
+
+
+# ---------------------------------------------------------------- M5: F&O list freshness
+
+def test_m5_fetch_returns_the_list_and_its_date(tmp_path):
+    from datetime import date
+    from nse_backtest.desk.nse_lists import fetch_fno_underlyings
+    from tests.desk.test_nse_lists import LOTS
+
+    def boom(u):
+        raise OSError("down")
+    syms, as_of = fetch_fno_underlyings(tmp_path, date(2026, 10, 29), fetch=lambda u: LOTS)
+    assert "ALPHA" in syms and as_of == date(2026, 10, 29)
+    syms, as_of = fetch_fno_underlyings(tmp_path, date(2026, 11, 2), fetch=boom)
+    assert "ALPHA" in syms and as_of == date(2026, 10, 29)  # the cached copy says how old it is
+    assert fetch_fno_underlyings(tmp_path, date(2026, 11, 6), fetch=boom) == (None, None)  # over 7 days
+
+
+def test_m5_short_fno_warns_on_a_cached_list_and_blocks_an_old_one():
+    from datetime import date
+    from nse_backtest.desk.checks import run_checks
+    from tests.desk.test_checks import ODDS, SIZE, sby, sctx, splan
+    today = NOW.date()
+    c = sby(run_checks(splan(), SIZE, ODDS, sctx(fno_as_of=today), current_price=100.0))["short_fno"]
+    assert c.status is Status.PASS
+    c = sby(run_checks(splan(), SIZE, ODDS, sctx(fno_as_of=date(2026, 10, 27)), current_price=100.0))["short_fno"]
+    assert (c.status, c.reason) == (Status.WARN, "F&O list from 2026-10-27 (live fetch failed)")
+    c = sby(run_checks(splan(), SIZE, ODDS, sctx(fno_as_of=date(2026, 10, 20)), current_price=100.0))["short_fno"]
+    assert c.status is Status.BLOCK and "older than 7 days" in c.reason
+    c = sby(run_checks(splan(), SIZE, ODDS, sctx(fno_as_of=None), current_price=100.0))["short_fno"]
+    assert (c.status, c.reason) == (Status.WARN, "F&O list date unknown — verify on NSE")
+
+
+def test_m11_loaders_fno_uses_the_market_date(monkeypatch, tmp_path):
+    from datetime import date, timezone
+    from nse_backtest.desk import loaders, nse_lists
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    asked = []
+    monkeypatch.setattr(nse_lists, "fetch_fno_underlyings", lambda d, today: asked.append(today) or (None, None))
+    # 20:00 UTC on Oct 29 is 01:30 IST on Oct 30
+    loaders.fno_underlyings(NSE, datetime(2026, 10, 29, 20, 0, tzinfo=timezone.utc))
+    assert asked == [date(2026, 10, 30)]
+
+
+def test_m11_fo_mktlots_parses_quoted_csv_cells():
+    from nse_backtest.desk.nse_lists import parse_fno_underlyings
+    text = 'UNDERLYING,SYMBOL,OCT-26\n"Nifty, 50",NIFTY,75\nAlpha Ltd,"ALPHA",500\n'
+    assert parse_fno_underlyings(text) == frozenset({"NIFTY", "ALPHA"})

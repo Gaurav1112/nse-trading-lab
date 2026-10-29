@@ -693,7 +693,8 @@ def splan(market="NSE", t1=97.0):
 
 def sctx(**kw):
     base = dict(regime="HOSTILE", fno=FNO, or_rel_volume=2.0, price_is_live=True, quote_as_of=NOW,
-                ban=BanList(frozenset(), "ok", "2026-10-29", ""), or_low=100.0)  # splan's entry is the OR low
+                ban=BanList(frozenset(), "ok", "2026-10-29", ""), or_low=100.0,  # splan's entry is the OR low
+                fno_as_of=NOW.date())  # today's F&O list (F2/M5)
     base.update(kw)
     return ctx(**base)
 

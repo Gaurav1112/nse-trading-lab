@@ -37,6 +37,7 @@ class CheckContext:
     # Shorts only (longs never read these): NSE's F&O underlyings (None = could not verify -> short_fno
     # BLOCKs) and the opening bar's volume over its 20-session median (None = not measured -> relative_volume WARNs).
     fno: frozenset[str] | None = None
+    fno_as_of: date | None = None  # the date the F&O list is from (not today = a cached copy; None = unknown -> WARN)
     or_rel_volume: float | None = None
     or_rel_volume_why: str = ""  # why or_rel_volume is None (shown in the WARN)
     # The pooled ORB-short edge for today (shortcheck; None = unavailable -> short_edge WARNs and caps at WAIT), why it
@@ -256,15 +257,27 @@ def _short_regime(prof: MarketProfile, regime: str) -> Check:
     return _ck("short_regime", Status.PASS, "HOSTILE NSE day: ORB shorts allowed")
 
 
-def _short_fno(prof: MarketProfile, sym: str, fno: frozenset[str] | None) -> Check:
-    """F&O membership (circuit-lock / auction risk outside it): a safety BLOCK, never overridable."""
+FNO_LIST_MAX_AGE_DAYS = 7  # nse_lists.FNO_LOTS_MAX_AGE: an older cached F&O list is not trusted
+
+
+def _short_fno(prof: MarketProfile, sym: str, fno: frozenset[str] | None, as_of: date | None = None,
+               today: date | None = None) -> Check:
+    """F&O membership (circuit-lock / auction risk outside it): a safety BLOCK, never overridable. A list from an
+    earlier day (the live fetch failed) WARNs with its date; one older than 7 days BLOCKs; an undated list WARNs."""
     B = Status.BLOCK
     if prof.code != "NSE":
         return _ck("short_fno", B, "Shorts are NSE only (no F&O list)")
     if fno is None:
         return _ck("short_fno", B, "could not verify F&O eligibility")
+    if as_of is not None and today is not None and (today - as_of).days > FNO_LIST_MAX_AGE_DAYS:
+        return _ck("short_fno", B, f"could not verify F&O eligibility: the F&O list from {as_of} is older than "
+                                   f"{FNO_LIST_MAX_AGE_DAYS} days")
     if sym not in fno:
         return _ck("short_fno", B, f"{sym} is not an F&O stock: intraday shorts are F&O stocks only")
+    if as_of is None:
+        return _ck("short_fno", Status.WARN, "F&O list date unknown — verify on NSE")
+    if today is not None and as_of != today:
+        return _ck("short_fno", Status.WARN, f"F&O list from {as_of} (live fetch failed)")
     return _ck("short_fno", Status.PASS, f"{sym} is an F&O stock")
 
 
@@ -590,7 +603,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 18-20 shorts only: is it a short day, may this stock be shorted, and has the breakdown volume behind it
     if short:
         out.append(_short_regime(prof, r))
-        out.append(_short_fno(prof, sym, ctx.fno))
+        out.append(_short_fno(prof, sym, ctx.fno, ctx.fno_as_of, now.date()))
         out.append(_relative_volume(ctx.or_rel_volume, ctx.or_rel_volume_why))
 
     return out

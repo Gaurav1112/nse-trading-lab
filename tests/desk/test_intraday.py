@@ -168,7 +168,7 @@ def _run(monkeypatch, tmp_path, regime, profile=NSE, fno=frozenset({"AAA"})):
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
     asked = []
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: asked.append(p.code) or fno)
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: asked.append(p.code) or (fno, None))
     seen: list = []
     monkeypatch.setattr(intraday, "check_trade", _side_check(seen))
     warns: list = []

@@ -263,7 +263,7 @@ def _index_hostile():
 def offline_short(tmp_path, monkeypatch):
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(session, "universe", lambda p: ["AAA", "BBB", "CCC"])
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA", "BBB"}))
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: (frozenset({"AAA", "BBB"}), None))
     monkeypatch.setattr(loaders, "load_regime", lambda p: _index_hostile())
     loaded = []
 
@@ -287,10 +287,10 @@ def test_run_shortcheck_pools_the_fno_universe_and_caches_for_the_day(offline_sh
 
 
 def test_run_shortcheck_fails_closed_without_the_fno_list_or_the_index(offline_short, monkeypatch, tmp_path):
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: None)
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: (None, None))
     with pytest.raises(ValueError, match="could not verify F&O eligibility"):
         session.run_shortcheck(NSE, now=NOW)
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA"}))
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: (frozenset({"AAA"}), None))
 
     def boom(p):
         raise OSError("down")
@@ -360,7 +360,7 @@ def test_cli_shortcheck_json(offline_short, cli_now, capsys):
 
 
 def test_cli_shortcheck_not_proven_says_why(offline_short, cli_now, capsys, monkeypatch):
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA"}))
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: (frozenset({"AAA"}), None))
     assert cli.main(["shortcheck"]) == 0
     out = capsys.readouterr().out
     assert "trades 100" in out and "proven no" in out
@@ -371,7 +371,7 @@ def test_cli_shortcheck_not_proven_says_why(offline_short, cli_now, capsys, monk
 def test_cli_shortcheck_errors(offline_short, cli_now, capsys, monkeypatch):
     assert cli.main(["shortcheck", "--market", "US"]) == 2
     assert "NSE only" in capsys.readouterr().err
-    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: None)
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: (None, None))
     assert cli.main(["shortcheck"]) == 2
     assert "could not verify F&O eligibility" in capsys.readouterr().err
 

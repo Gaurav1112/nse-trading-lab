@@ -2,6 +2,8 @@
 Never raises from fetch."""
 from __future__ import annotations
 
+import csv
+import io
 import os
 import re
 import tempfile
@@ -114,16 +116,20 @@ FNO_LOTS_MAX_AGE = timedelta(days=7)  # the list changes rarely; an older cached
 def parse_fno_underlyings(text: str) -> frozenset[str]:
     """The SYMBOL column of NSE's fo_mktlots.csv (index and stock underlyings). Repeated section headers
     ("Derivatives on Individual Securities, Symbol, ...") are skipped. Anything unexpected raises ValueError."""
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if not lines:
+    try:
+        rows = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]  # quoted cells may hold commas
+    except csv.Error as e:
+        raise ValueError(f"unexpected F&O list format ({e})") from e
+    if not rows:
         raise ValueError("empty F&O list")
-    header = [c.strip().upper() for c in lines[0].split(",")]
+    header = [c.strip().upper() for c in rows[0]]
     if "SYMBOL" not in header:
         raise ValueError("unexpected F&O list format (no SYMBOL column)")
     col = header.index("SYMBOL")
     out = set()
-    for ln in lines[1:]:
-        cells = [c.strip() for c in ln.split(",")]
+    for row in rows[1:]:
+        cells = [c.strip() for c in row]
+        ln = ",".join(row)
         if len(cells) <= col:
             raise ValueError(f"unexpected F&O list row: {ln!r}")
         sym = cells[col].upper()
@@ -137,11 +143,11 @@ def parse_fno_underlyings(text: str) -> frozenset[str]:
     return frozenset(out)
 
 
-def fetch_fno_underlyings(cache_dir: Path, today: date,
-                          fetch: Callable[[str], str] | None = None) -> frozenset[str] | None:
-    """The F&O underlyings, live from NSE (cached atomically); on a failed fetch the cached copy if it is at most
-    FNO_LOTS_MAX_AGE old. None when neither is available: the caller must treat F&O eligibility as unverified
-    (fail closed). Never raises."""
+def fetch_fno_underlyings(cache_dir: Path, today: date, fetch: Callable[[str], str] | None = None
+                          ) -> tuple[frozenset[str] | None, date | None]:
+    """(the F&O underlyings, the date that list is from): live from NSE (cached atomically, dated today); on a failed
+    fetch the cached copy and its own date if it is at most FNO_LOTS_MAX_AGE old. (None, None) when neither is
+    available: the caller must treat F&O eligibility as unverified (fail closed). Never raises."""
     cache_dir = Path(cache_dir)
     fetch = fetch or _default_fetcher
     try:
@@ -152,14 +158,14 @@ def fetch_fno_underlyings(cache_dir: Path, today: date,
             cached = (cache_dir / "fo_mktlots.csv").read_text(encoding="utf-8")
             as_of = date.fromisoformat((cache_dir / "fo_mktlots.date").read_text(encoding="utf-8").strip())
             if not (timedelta(0) <= today - as_of <= FNO_LOTS_MAX_AGE):
-                return None
-            return parse_fno_underlyings(cached)
+                return None, None
+            return parse_fno_underlyings(cached), as_of
         except Exception:  # noqa: BLE001
-            return None
+            return None, None
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write(cache_dir / "fo_mktlots.csv", text)
         _atomic_write(cache_dir / "fo_mktlots.date", today.isoformat())
     except OSError:
         pass  # the live list is still good; the next failed fetch just has no cache
-    return symbols
+    return symbols, today

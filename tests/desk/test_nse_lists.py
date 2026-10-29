@@ -140,7 +140,13 @@ def test_lr_default_fetcher_raises_when_body_exceeds_cap(monkeypatch):
 # ---- H5a: the F&O underlyings list (fo_mktlots.csv), fail-closed ----
 from pathlib import Path  # noqa: E402
 
-from nse_backtest.desk.nse_lists import FNO_LOTS_URL, fetch_fno_underlyings, parse_fno_underlyings  # noqa: E402
+from nse_backtest.desk.nse_lists import FNO_LOTS_URL, parse_fno_underlyings  # noqa: E402
+from nse_backtest.desk.nse_lists import fetch_fno_underlyings as _fetch_dated  # noqa: E402
+
+
+def fetch_fno_underlyings(*a, **k):
+    """The symbols alone (F2/M5: the fetch also returns the list's date; tests/desk/test_f2_review checks it)."""
+    return _fetch_dated(*a, **k)[0]
 
 LOTS = (Path(__file__).parent / "fixtures" / "fo_mktlots_sample.csv").read_text()
 

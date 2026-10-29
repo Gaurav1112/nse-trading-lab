@@ -529,7 +529,7 @@ def test_h5a_check_trade_short_end_to_end(tmp_path):
     from nse_backtest.desk.models import Side
     df, k = _breakdown_frame()
     now = datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
-    c = _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"}))
+    c = _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"}), fno_as_of=now.date())
     path = tmp_path / "a.jsonl"
     v = check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit_path=path,
                     replays=500, robustness=False)
@@ -564,7 +564,7 @@ def test_h5c_scoreboard_scores_short_rows_as_shorts(tmp_path):
     from nse_backtest.desk.models import Side
     now = datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
     v = check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000),
-                    _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"})), side=Side.SHORT, audit=False)
+                    _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"}), fno_as_of=now.date()), side=Side.SHORT, audit=False)
     path = tmp_path / "a.jsonl"
     append_override(v, path, now=now)
     row = json.loads(path.read_text().splitlines()[-1])
@@ -624,7 +624,8 @@ def _short_check(df, mc=0.2, **ctxkw):
     from unittest import mock
     from nse_backtest.desk import timemachine
     from nse_backtest.desk.models import Side
-    c = _pin_ctx(now=_short_now(), regime="HOSTILE", fno=frozenset({"ABC"}), **ctxkw)
+    c = _pin_ctx(now=_short_now(), regime="HOSTILE", fno=frozenset({"ABC"}), fno_as_of=_short_now().date(),
+                 **ctxkw)
     real = timemachine.odds
     fake = real if mc is None else (lambda *a, **k: replace(real(*a, **k), mc_expectancy_r=mc))
     with mock.patch.object(timemachine, "odds", fake):

@@ -194,13 +194,13 @@ def _recent_days(profile, now: datetime | None) -> list[date]:
 def _with_fno(ctx, profile, on_warning: Warn):
     """The short-side context: the F&O list, today's pooled edge (from the daily cache) and the regime of each recent
     day (for the short odds)."""
-    fno = loaders.fno_underlyings(profile, ctx.now)
+    fno, fno_as_of = loaders.fno_underlyings(profile, ctx.now)
     if fno is None:
         _warn(on_warning, "NSE F&O list unavailable: could not verify F&O eligibility, so every short is blocked")
     edge, why = short_edge_today(profile, ctx.now)
     if edge is None:
         _warn(on_warning, f"short edge check unavailable ({why}): every short stays at most WAIT")
-    return replace(ctx, fno=fno, short_edge=edge, short_edge_why=why,
+    return replace(ctx, fno=fno, fno_as_of=fno_as_of, short_edge=edge, short_edge_why=why,
                    regime_by_day=regime_history(profile, _recent_days(profile, ctx.now), on_warning))
 
 
@@ -227,7 +227,7 @@ def run_shortcheck(profile, *, refresh: bool = False, on_warning: Warn = None, o
         edge, _ = shortcheck.load_edge(path, profile, today)
         if edge is not None:
             return ShortcheckResult(edge, today, shortcheck.cached_symbols(path), True)
-    fno = loaders.fno_underlyings(profile, now)
+    fno, _ = loaders.fno_underlyings(profile, now)
     if fno is None:
         raise ValueError("could not verify F&O eligibility: the pooled short history needs NSE's F&O list")
     syms = [s for s in universe(profile) if s in fno]
