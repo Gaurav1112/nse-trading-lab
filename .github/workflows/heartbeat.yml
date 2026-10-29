@@ -5,6 +5,9 @@ on:
     - cron: '*/15 3-11 * * 1-5'
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -17,9 +20,13 @@ jobs:
           DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
         run: |
           # Nothing to watch until the signals repo is configured: skip cleanly instead of failing every 15 minutes.
-          if [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+          # Exactly one of the two secrets set is a misconfiguration, not "not set up yet": fail loudly.
+          if [ -z "$SIGNALS_REPO_URL" ] && [ -z "$DEPLOY_KEY" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::heartbeat skipped: set the SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY secrets to enable it"
+          elif [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::heartbeat misconfigured: only one of SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY is set"
+            exit 1
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
@@ -30,7 +37,7 @@ jobs:
           python-version: '3.11'
       - name: Install pywebpush
         if: steps.gate.outputs.configured == 'true'
-        run: pip install pywebpush py-vapid requests
+        run: pip install "pywebpush>=1.14.0,<3" "py-vapid>=1.9.0,<2" "requests>=2.32.4,<3"  # same ranges as requirements.txt, except requests: no fyers pin here
       - name: Setup SSH for signals repo
         if: steps.gate.outputs.configured == 'true'
         env:
@@ -62,7 +69,8 @@ jobs:
           h = json.loads(Path("/tmp/signals/state/pipeline_health.json").read_text())
           ts = h.get("last_run_ts")
           if ts is None:
-              sys.exit(0)
+              print("health file has no last_run_ts")
+              sys.exit(1)
           last = datetime.fromisoformat(ts)
           age = datetime.now(timezone.utc) - last
           if age <= timedelta(minutes=15):
@@ -74,11 +82,15 @@ jobs:
               sys.exit(1)
           subs = json.loads(subs_path.read_text())
           payload = json.dumps({"title": "🛑 Pipeline dead", "body": f"Last run {int(age.total_seconds()/60)} min ago"})
+          failed = 0
           for s in subs:
               try:
                   webpush(subscription_info=s, data=payload,
                           vapid_private_key=os.environ["VAPID_PRIVATE_KEY_PEM"],
                           vapid_claims={"sub": os.environ["VAPID_CONTACT"]})
-              except Exception as e:
-                  print(f"push failed: {e}")
+              except Exception:  # the exception text can carry endpoints or keys: count only
+                  failed += 1
+          print(f"Pipeline dead; {failed} of {len(subs)} pushes failed")
+          if failed == len(subs):  # nobody was alerted (no subscribers counts too)
+              sys.exit(1)
           PYEOF

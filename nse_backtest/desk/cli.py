@@ -11,10 +11,12 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
-from . import loaders, session
+from . import audit, loaders, session
+from . import calendars as cal
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Mode
+from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
+from .tradecard import DAILY_LOSS_NOTE, build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
@@ -26,7 +28,7 @@ PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
 def to_jsonable(x):
     """Dataclasses, enums, dates, numpy scalars and non-finite floats to JSON-safe values."""
     if dataclasses.is_dataclass(x) and not isinstance(x, type):
-        return {f.name: to_jsonable(getattr(x, f.name)) for f in dataclasses.fields(x)}
+        return {k: to_jsonable(v) for k, v in summary_fields(x).items()}  # bulky fields (Odds.mc_rs) left out
     if isinstance(x, Enum):
         return to_jsonable(x.value)
     if isinstance(x, dict):
@@ -59,7 +61,7 @@ def _r(x) -> str:
     return "n/a" if x is None else f"{x:+.2f}R"
 
 
-def format_verdict(v: DeskVerdict, profile) -> list[str]:
+def format_verdict(v: DeskVerdict, profile, *, ticket: bool = True) -> list[str]:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     lines = [v.headline, ""]
     lines.append(f"Plan ({p.mode.value}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
@@ -80,8 +82,35 @@ def format_verdict(v: DeskVerdict, profile) -> list[str]:
             lines.append(f"Candle-noise expectancy range: {_r(o.noise_expectancy_min)} to {_r(o.noise_expectancy_max)}")
     lines += ["", "Checks:"]
     lines += [f"  {c.status.value} {c.name} — {c.reason}" for c in v.checks]
-    if v.ticket:
+    if ticket and v.ticket:
         lines += ["", "Ticket (type it in yourself):"] + [f"  {t}" for t in v.ticket]
+    return lines
+
+
+def format_money(card, profile) -> list[str]:
+    """The card's money block: max loss, profit at T1/T2, reward:risk, expected value and any limit breaches."""
+    m = profile.money
+    if card.qty == 0:
+        loss, p1, p2 = card.per_share
+        return [f"Money: unavailable — {card.unavailable_reason} (--qty N).",
+                f"  Per share: loss at stop {m(loss)}, profit at T1 {m(p1)}, profit at T2 {m(p2)}"
+                f"  reward:risk {card.rr_t1:.2f}"]
+    ev = "n/a (no odds)" if card.expected_value is None else m(card.expected_value)
+    lines = [f"Money ({card.qty} shares{', your quantity' if card.qty_is_override else ''}):",
+             f"  max loss {m(card.max_loss)} ({card.gap_note[0].lower() + card.gap_note[1:]})",
+             f"  profit at T1 {m(card.profit_t1)}  profit at T2 {m(card.profit_t2)}"
+             + (f" ({card.fill_note})" if card.fill_note else ""),
+             f"  reward:risk {card.rr_t1:.2f}  expected value {ev}"
+             + (f" ({card.fill_note})" if card.fill_note and card.expected_value is not None else ""),
+             f"  notional {m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital), "
+             f"at risk {card.pct_capital_at_risk:.1f}% of capital, costs {m(card.cost)}"]
+    if card.entry_limit is not None and card.max_loss_at_trigger is not None:
+        lines.append(f"  max loss if filled at the trigger {m(card.max_loss_at_trigger)} (the max loss above "
+                     f"assumes the worst fill, at the limit {m(card.entry_limit)})")
+    if card.breaches:
+        lines += ["  Breaks your limits:"] + [f"    - {b}" for b in card.breaches]
+        if any("daily loss limit" in b for b in card.breaches):
+            lines.append(f"  {DAILY_LOSS_NOTE}")
     return lines
 
 
@@ -108,14 +137,65 @@ def _limits(profile, as_json: bool = False):
 
 # ---------------------------------------------------------------- commands
 
+def market_now(profile) -> datetime:
+    """The market's wall clock (tests patch this)."""
+    return datetime.now(ZoneInfo(profile.tz))
+
+
+def _log_override(v: DeskVerdict, card) -> None:
+    """The owner's override row, with the quantity they chose."""
+    audit.append_override(replace(v, sizing=card.sizing))
+
+
 def cmd_check(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
+    if a.qty is not None and a.qty < 1:
+        raise ValueError(f"qty must be a whole number of at least 1, got {a.qty}")
     v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
                           target=a.target, on_warning=_stderr_warn)
+    taken = v.action is Action.TAKE
+    choose = bool(a.choose) and not taken
+    refused = None
+    if choose and v.plan.mode is Mode.INTRADAY:  # the scoreboard would score it as logged outside the window
+        why = cal.outside_entry_window(profile, market_now(profile))
+        if why is not None:
+            refused = f"--choose refused: an intraday override is only taken inside the entry window; it is {why}."
+            choose = False
+    card = build_card(v, profile, limits, qty=a.qty, override_confirmed=choose)
+    logged = False
+    if choose and card.ticket:
+        _log_override(v, card)
+        logged = True
     if a.json:
-        _emit_json(v)
+        d = to_jsonable(v)
+        d["card"] = {k: val for k, val in to_jsonable(card).items() if k != "verdict"}
+        d["override_logged"] = logged
+        if refused:
+            d["override_refused"] = refused
+        _emit_json(d)
         return 0
-    return _finish(warn + format_verdict(v, profile))
+    lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
+    if not taken and card.reasons:
+        lines += ["", f"The desk said {v.action.value} because:"] + [f"  {r}" for r in card.reasons]
+    if v.action is Action.WAIT and v.ticket:  # the desk's own conditional ticket, no override needed
+        lines += ["", "Desk's conditional ticket (type it in yourself only if it triggers):"]
+        lines += [f"  {t}" for t in v.ticket]
+    if taken:
+        lines += ["", "Ticket (type it in yourself):"] + [f"  {t}" for t in card.ticket]
+        if a.choose:
+            lines += ["", "--choose ignored: the desk already says TAKE."]
+    elif card.ticket:
+        lines += ["", f"{card.ticket_header} (type it in yourself):"] + [f"  {t}" for t in card.ticket]
+        lines += ["Override logged — it is scored under \"Your overrides\", apart from the desk's picks."]
+    elif refused:
+        lines += ["", refused]
+    elif choose:
+        lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
+    else:
+        now = " now" if v.action is Action.WAIT else ""
+        lines += ["", f"The desk says {v.action.value}. Add --choose to take it{now} anyway "
+                      "(logged as your override)."]
+    return _finish(lines)
 
 
 def _format_row(v: DeskVerdict, *, why: bool = False) -> str:
@@ -151,7 +231,8 @@ def cmd_plan(a, profile) -> int:
 
 def cmd_positions(a, profile) -> int:
     positions = loaders.market_positions(profile)
-    frames = session.load_frames(profile, sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")}), _stderr_warn)
+    open_symbols = sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")})
+    frames = session.load_frames(profile, open_symbols, _stderr_warn)
     actions = review_positions(positions, {k: v for k, v in frames.items() if v is not None}, profile)
     if a.json:
         _emit_json(actions)
@@ -223,30 +304,61 @@ def _num_r(x) -> str:
     return "n/a" if x is None else f"{x:+.2f}R"
 
 
+def _projected_line(outcomes, s) -> str:
+    """"Projected xR vs realised yR over n trades" for one (record, market, mode) group: the trades that had a
+    projection, so both sums cover the same trades."""
+    from .projections import projected_vs_real, resolved_without_r
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
+             (s.record, s.market, s.mode)]
+    _, _, pairs, n_without = projected_vs_real(group)
+    n_no_r = resolved_without_r(group)
+    no_r = f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R, left out" if n_no_r else ""
+    if not pairs:
+        return "  No projections to compare yet" + (f" ({no_r})" if no_r else "")
+    proj, real = sum(p for p, _ in pairs), sum(r for _, r in pairs)
+    parts = [x for x in (f"{n_without} without a projection" if n_without else "", no_r) if x]
+    extra = f" ({'; '.join(parts)})" if parts else ""
+    n = len(pairs)
+    return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
+
+
 def format_scoreboard(res, market_label: str) -> list[str]:
-    """Text scoreboard: disclaimer first; per (market, mode) the verdict line first, then the numbers."""
+    """Text scoreboard: disclaimer first; a "Desk picks" and a "Your overrides" section (never pooled), each with
+    per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
+    from .scoreboard import RECORD_LABELS
     lines = [SCOREBOARD_DISCLAIMER, SCOREBOARD_COVERAGE]
     if getattr(res, "note", None):
         lines.append(res.note)
+    if res.rejects:
+        n = len(res.rejects)
+        lines += [f"Rejected {n} audit line{'s' if n != 1 else ''}:"]
+        lines += [f"  line {ln}: {why}" for ln, why in res.rejects]
     if not res.outcomes and res.rejects:
         lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
     elif not res.outcomes:
-        lines.append(f"No TAKE verdicts logged yet for {market_label} — run `plan` or `check` to build a record.")
-    for s in res.stats:
-        win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
-        ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
-        dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
-        cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
-        lines += ["", f"{s.market} {s.mode.value}: {s.verdict}",
-                  f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
-                  f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
-                  f"  95% CI of mean realised {ci}  max drawdown {dd}",
-                  f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
-                  f"prediction coverage {cov}"]
+        lines.append(f"No desk picks or overrides logged yet for {market_label} — run plan, check or the intraday "
+                     "scan, or choose a trade")
+    for record, label in RECORD_LABELS.items() if res.outcomes else ():
+        stats = [s for s in res.stats if s.record == record]
+        lines += ["", label]
+        if not stats:
+            lines.append(f"  No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+        for s in stats:
+            win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
+            ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
+            dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
+            cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
+            lines += [f"{s.market} {s.mode.value}: {s.verdict}",
+                      f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
+                      f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
+                      f"  95% CI of mean realised {ci}  max drawdown {dd}",
+                      f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
+                      f"prediction coverage {cov}",
+                      _projected_line(res.outcomes, s)]
     if res.outcomes:
         lines += ["", "Trades:",
-                  f"  {'date':<10} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
+                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
                   f"{'exit':>14} {'real R':>8} {'MC R':>8}  note"]
         for o in res.outcomes:
             c = o.candidate
@@ -256,14 +368,11 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} {o.status.value:<16} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} "
+                         f"{o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
             lines.append("  (R in brackets = open trade marked to the last close; not counted in the stats)")
-    if res.rejects:
-        n = len(res.rejects)
-        lines += ["", f"Rejected {n} audit line{'s' if n != 1 else ''}:"]
-        lines += [f"  line {ln}: {why}" for ln, why in res.rejects]
     if res.cache_note:
         lines += ["", f"Cache: {res.cache_note}"]
     return lines
@@ -287,7 +396,8 @@ def cmd_scoreboard(a, profile) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m nse_backtest.desk",
-                                 description="Trade desk: sized TAKE / WAIT / SKIP decisions for NSE and US. Places nothing.")
+                                 description="Trade desk: sized TAKE / WAIT / SKIP decisions for NSE and US. "
+                                             "Places nothing.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
@@ -301,6 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--entry", type=float)
     c.add_argument("--stop", type=float)
     c.add_argument("--target", type=float)
+    c.add_argument("--qty", type=int, help="your quantity instead of the desk's size (limit breaches are listed)")
+    c.add_argument("--choose", action="store_true",
+                   help="take a WAIT/SKIP anyway: print the override ticket and log it as your override")
     c.set_defaults(fn=cmd_check)
     for name, fn, h in (("plan", cmd_plan, "today's plan"), ("positions", cmd_positions, "review open positions"),
                         ("intraday", cmd_intraday, "opening-range scan")):

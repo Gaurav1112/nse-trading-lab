@@ -58,12 +58,14 @@ The Trade Desk turns a stock you are looking at into one sized decision: **TAKE*
 for **NSE** (₹, IST) and **US** (US$, ET) stocks. Each market keeps its own settings, journal rows and
 money formatting; amounts are never mixed across markets.
 
-Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Today's Plan, Check a Trade,
-My Positions, Intraday, Scoreboard), or from the terminal:
+Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Choose a Trade, Today's Plan,
+Check a Trade, My Positions, Intraday, Scoreboard), or from the terminal:
 
 ```bash
 python3.13 -m nse_backtest.desk check RELIANCE            # one stock, swing
 python3.13 -m nse_backtest.desk check AAPL --market US --mode intraday
+python3.13 -m nse_backtest.desk check RELIANCE --qty 20     # the money for your own quantity
+python3.13 -m nse_backtest.desk check RELIANCE --choose     # take a WAIT/SKIP anyway (logged as your override)
 python3.13 -m nse_backtest.desk plan                      # today's TAKE / WATCH lists
 python3.13 -m nse_backtest.desk positions                 # HOLD / TIGHTEN_STOP / EXIT
 python3.13 -m nse_backtest.desk scoreboard                # paper record of logged TAKEs (all markets)
@@ -71,10 +73,94 @@ python3.13 -m nse_backtest.desk scoreboard --market US --json
 ```
 
 - **TAKE**: no check blocks and the current price (live quote, else the last close with a WARN) is
-  within about 1% of the planned entry. You get a ticket to type into your broker yourself.
+  within about 1% of the planned entry (intraday: at or below the stop-limit's limit price). You get a
+  ticket to type into your broker yourself.
 - **WAIT**: nothing blocks, but the price is below the entry (buy only above the trigger) or has run more
-  than 1% past it (buy only on a pullback). The ticket is shown as "IF TRIGGERED".
+  than 1% past it (intraday: above the stop-limit's limit, so the order would not fill). The ticket is
+  shown as "IF TRIGGERED".
 - **SKIP**: at least one check BLOCKs (named in the headline), or there is no usable current price.
+
+### Choose a Trade
+
+The first tab lists every candidate the desk has seen today: the Today's Plan TAKE and WATCH lists and the
+Intraday-tab scan (build them on their own tabs, or press the load button on this tab). A table shows, per
+candidate, the desk's verdict, entry, stop, targets, quantity, max loss, profit at T1 and the win odds. Pick one
+to open its trade card:
+
+- **Money** (at the desk's size, or at a quantity you type in): max loss, profit at T1, profit at T2,
+  reward:risk, expected value, and the share of capital deployed and at risk.
+  - Max loss = quantity × (worst entry − stop) + round-trip costs with the exit at the stop. The worst entry is
+    the entry for swing and the stop-limit's limit for intraday (an intraday entry can fill anywhere up to its
+    limit), and the desk sizes on that same figure. Intraday cards also show the max loss if filled at the
+    trigger. The verdict headline's "loss at stop" is the same number. A gap through the stop can lose more,
+    and the card says so.
+  - Profit at T1 (T2) = quantity × (target − entry) − round-trip costs with the exit at that target.
+  - Expected value = Monte Carlo expectancy in R × quantity × (entry − stop). It is blank when there are no odds.
+    Intraday, it and the account projection assume a fill at the trigger; the card says how much less a fill
+    at the limit can make (or, when the ticket is a plain limit because the price is already above the trigger,
+    about quantity × (current price − entry) less).
+  - If the desk sized 0 shares (for example the stop is too wide for your risk limit) there is no total to
+    show, so the card gives the per-share loss and profit at T1 and T2 and asks for a quantity.
+- **Breaches**: a quantity you type in that goes past your risk-per-trade, position-size or daily-loss limit is
+  listed in red. Risk per trade compares the max loss (costs included) with your limit, the sizer's own rule.
+  The daily-loss line compares this trade alone with the limit; losses already taken today are checked by the
+  daily-loss check. The desk still shows the numbers; the decision is yours.
+- **The override gate**: for a WAIT or SKIP the ticket stays hidden until you tick "I choose this anyway". The
+  ticket is then headed "YOUR OVERRIDE — the desk said SKIP" and the choice is logged once per verdict (one
+  row, with the quantity at the first tick; changing the quantity afterwards adds no rows). The CLI does the
+  same with `check --choose` (which always runs a fresh check). The override row is stamped with the time you
+  chose (the verdict's own time is kept as `verdict_created_at`), and the scoreboard replays it from then, so a
+  move that ran before your decision is never credited to it. A WAIT also shows the desk's own conditional
+  ticket ("IF TRIGGERED") without needing an override.
+- **Age**: the candidates table has a "Built" column and every card says "built HH:MM (n min ago)". An intraday
+  verdict older than 15 minutes, or shown past the entry cutoff, has no ticket and no override box: it shows a
+  Re-check button that runs the full check again and replaces the card's verdict. Swing tickets stay, with the
+  age shown.
+- **Outcome money**: the Monte Carlo replays turned into money (5th to 95th percentile, median, P(target),
+  P(stop), P(time exit)) and a histogram marking the stop and targets.
+- **Price chart**: recent candles with entry, stop and targets, plus a band built from the stock's own past
+  moves over the trade's hold (intraday: the bars left until flat-by).
+- **Account projection**: the same trade repeated for 10, 20 or 50 trades (20 by default), each
+  drawn from the Monte Carlo replays (else the setup history), at a fixed money risk and no compounding:
+  the 5th, 50th and 95th percentile of the account and the share of runs with a 10% drawdown or a loss.
+- Every projection is a range of the stock's past behaviour, **not a forecast**.
+
+Check a Trade from the terminal prints the same Money block:
+`python3.13 -m nse_backtest.desk check RELIANCE --qty 20` uses your quantity instead of the desk's size
+(breaches are listed), and `--choose` prints and logs the override ticket for a WAIT or SKIP.
+
+### Tickets
+
+Swing: `BUY n SYMBOL CNC LIMIT {entry}` with a GTT OCO for the stop and T1 (US: a LIMIT with a GTC bracket).
+Intraday entries are **stop-limit orders**, so a spike through the entry cannot fill you far above your plan:
+
+- NSE: `BUY n SYMBOL MIS SL trigger {entry} limit {entry_limit}`; US: `BUY n SYMBOL STOP-LIMIT stop {entry}
+  limit {entry_limit}`.
+- When the price is already at or above the trigger (a broker rejects a stop buy whose trigger is below the last
+  traded price), the entry is a plain limit at the same limit price instead: NSE `BUY n SYMBOL MIS LIMIT
+  {entry_limit}`, US `BUY n SYMBOL LIMIT {entry_limit} — bracket …, DAY`. The fill rule below covers both.
+- The limit is the entry plus the smaller of 0.25R and 0.5% of the entry, rounded up to the tick
+  (R = entry − stop).
+- A line says "Cancel the entry if not filled by HH:MM": the end of the last entry bar (the market's last entry
+  time + 15 minutes, as the odds and the scoreboard count it). On an early-close day both that time and the
+  square-off / flat-by time are pulled in to 15 minutes before the close. The stop and target orders and the
+  flat-by time follow.
+- The Time Machine odds, the Scoreboard and the live check all use the same fill rule and entry window
+  (`nse_backtest/desk/fills.py`). A WAIT shows the desk's own ticket as "IF TRIGGERED".
+
+### Research panel
+
+Under each card, "Load news & earnings" fetches context. It is **display only and never a vote**: it cannot
+change a verdict, a size or a check.
+
+- **US**: recent headlines and 8-K filings from the vendored `trader-news` skill and the latest earnings
+  change from `trader-analyst`. Both query SEC EDGAR, which needs a contact string in the environment before you
+  start the app or the CLI: `export SEC_USER_AGENT="Your Name you@example.com"` (use your own name and email).
+  Without it the SEC part is skipped and the panel says so.
+- **NSE**: the next earnings date and recent dividends and splits, from data the desk has already loaded. There
+  is no news feed for NSE. If dividends and splits cannot be loaded the earnings date still shows, with a note.
+- A failed fetch shows "Research unavailable" with the reason, and pressing the button retries. Results are
+  cached for 30 minutes.
 
 ### The 17 checks
 
@@ -110,28 +196,62 @@ The odds come from the stock's own bars, not from a model. A block-bootstrap Mon
 entry, stop, target and hold thousands of times (fixed seed, stop wins a bar that touches both), giving
 P(target), P(stop) and expectancy in R after costs. A setup history replays every past time the same setup
 fired on that stock. Robustness tests shuffle the trade order (drawdown, losing streaks) and jitter the
-candles to see whether the edge survives noise.
+candles to see whether the edge survives noise. For intraday setups the history and the simulation fill the
+entry with the same stop-limit rule as the ticket, inside the same entry window.
 
 ### The Scoreboard
 
-The Scoreboard checks whether the desk's own TAKEs made money. It reads every TAKE in
-`desk_audit.jsonl` (written by Check a Trade, in the page or the CLI, and by Today's Plan) and replays
-each one against the prices that followed, as if the ticket had been typed in exactly. It is the
-desk's paper record, **not your real P&L**: it knows nothing about the orders you actually placed.
-It is read-only and places nothing.
-Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet.
+The Scoreboard checks whether the desk's own TAKEs made money, and whether your overrides of the desk
+(a WAIT or SKIP you chose anyway) do better or worse. It reads every TAKE and OVERRIDE in
+`desk_audit.jsonl` (TAKEs are written by Check a Trade, in the page or the CLI, by Today's Plan and by
+the Intraday-tab scan) and replays each one against the prices that followed, as if the ticket had been
+typed in exactly. TAKEs are scored as **Desk picks** and overrides as **Your overrides**: two separate
+records, never pooled. It is a paper record, **not your real P&L**: it knows nothing about the orders you
+actually placed. It is read-only and places nothing.
+Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; your overrides are scored as a separate record.
 
 Open the **Scoreboard** tab and press "Load scoreboard", or run
 `python3.13 -m nse_backtest.desk scoreboard [--market NSE|US|ALL] [--json]` (default ALL).
 
-- One TAKE per stock, mode and session is counted (the first one logged).
+- One TAKE per stock, mode and session is counted (the first one logged); likewise one override.
 - Fills and exits are conservative. Swing: a one-session LIMIT at the entry, filled if the day's low
   reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
   default) and a time exit at the last close. A swing TAKE logged while its fill session was open is
-  filled from the 15-minute bars after the verdict (the day's earlier low happened before the order).
-  Intraday: a BUY LIMIT, as the ticket prints it: 15-minute bars after the verdict, filled when the low
-  reaches the entry, at the bar's open if lower, flat by the session's flat-by time. When a bar touches
+  filled from the 15-minute bars after the verdict (the day's earlier low happened before the order; the bar
+  containing the verdict follows the ambiguous-fill rule below).
+  Intraday: a BUY stop-limit, as the ticket prints it (trigger at the entry, limit = entry + the smaller
+  of 0.25R and 0.5%, rounded up to the tick): 15-minute bars after the verdict; the first bar whose high
+  reaches the trigger fills at its open or the trigger, whichever is higher, when it opens at or below the
+  limit; a bar opening above the limit leaves a resting limit, filled at the limit when price trades back
+  to it. Only bars inside the entry window count (the ticket says to cancel the entry if not filled by
+  then); a later fill is `not_filled`. On the fill bar a stop touch exits at the stop. Flat by the
+  session's flat-by time. The Time Machine's intraday history uses the same rule. When a bar touches
   both stop and target, the stop wins.
+- A replay starts at the later of the verdict's time and its quote's time (the ticket can't be typed
+  before the quote it was based on). The 15-minute bar that contains that start counts, for swing and intraday, but a fill that only that
+  bar made possible is ambiguous: the touch may have come before the verdict. Such a fill is kept only if it
+  loses (or exits at 0R or below), and its target never counts. If it would win, the order is replayed from the
+  later bars, and a later fill counts only if its R is no better than the containing-bar fill's: a counted
+  result is never better than either possible history. Otherwise it is `not_filled` ("fill only possible on the
+  bar the TAKE was logged in — counted only if it loses"). A missing containing bar makes the trade
+  `data_unavailable`. A stop-limit row with no logged price whose containing bar is inside the entry window and
+  traded wholly between the trigger and the limit is a certain fill there, at the limit; one whose containing bar
+  only straddles the trigger fills at the worst consistent price, the lower of that bar's high and the limit.
+- Intraday rows logged at or above the trigger printed a LIMIT ticket. Priced up to the limit (desk TAKE or
+  override), it fills at the logged price only when that price is trusted (below). Priced above the limit, it is
+  a resting limit at the limit price. A LIMIT row logged outside the entry window, or a stop-limit row logged
+  after the cancel time, is `not_filled`.
+- The logged price is trusted only when it was a fresh live quote (the audit row's `quote_live`: a quote from the
+  same session, at most 5 minutes old when the check used it; without a quote the desk logs the plan's last close)
+  and the 15-minute bar containing the quote's own time (`quote_as_of`) traded at it (between its low and 0.5%
+  above its high). Rows without a quote time are untrusted.
+  An untrusted price is ignored: the trade is scored as if no price had been logged (swing and stop-limit: the
+  containing-bar rules above; a LIMIT ticket: a resting limit), though which ticket was printed still follows it.
+  A live price outside that bar's range contradicts the bars and makes the trade `data_unavailable`.
+- One small optimism is accepted: a trusted live price (desk TAKE or override, up to the limit) fills at that
+  price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price
+  runs above the limit while the ticket is being typed it may not fill at all (about 1% of trusted rows in a
+  simulation).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.
@@ -193,7 +313,8 @@ clearing-holiday table.
   `.claude/skills/VENDORED.md`). They are never inputs to a desk verdict.
 
 Example (fictional): a TAKE might read `TAKE ABC — BUY 40 @ ₹1,000.00, loss at stop ≈ ₹980.00 (a gap
-can lose more)`: the loss at the stop includes costs, and a gap through the stop can lose more.
+can lose more)`: the loss at the stop includes costs (intraday: at a fill up to the order's limit), and a gap
+through the stop can lose more.
 
 > **Disclaimer:** the Trade Desk is a paper-trading and education tool, not financial advice. Its odds
 > are a reality check, not a forecast. Paper-trade until your record matches the odds.
@@ -206,6 +327,13 @@ client is created, so it is not needed to run them):
 ```bash
 python3.13 -m pytest -o addopts=""
 ```
+
+Dependencies are pinned to yfinance 1.x and pandas 3.x in `requirements.txt`; install from it in a fresh
+virtual environment and run the same command there before relying on a change.
+
+**Known accepted risk:** `requests` stays at 2.31.0, because every fyers-apiv3 release (3.1.7 to 3.2.0) pins
+`requests==2.31.0`. That version has CVE-2024-35195 and CVE-2024-47081, fixed in 2.32.4. The heartbeat workflow,
+which does not install fyers, uses `requests>=2.32.4`. Revisit when fyers-apiv3 relaxes its pin.
 
 ## Project Structure
 

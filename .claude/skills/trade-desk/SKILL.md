@@ -7,7 +7,7 @@ description: >-
   "size this trade", "what should I trade today", "review my positions", "any intraday setups",
   "set my capital / max loss", "is the desk working?", "how have the desk's picks done?". Never places
   orders.
-argument-hint: "[check SYMBOL | plan | positions | intraday | settings | scoreboard] [--market NSE|US]"
+argument-hint: "[check SYMBOL [--qty N] [--choose] | plan | positions | intraday | settings | scoreboard] [--market NSE|US]"
 ---
 
 # trade-desk
@@ -16,7 +16,9 @@ Run from the repo root with `python3.13 -m nse_backtest.desk <command>`:
 
     check RELIANCE --market NSE                     # default swing plan at last close
     check AAPL --market US --entry 231 --stop 226   # the user's own plan
-    check INFY --mode intraday                      # opening-range breakout
+    check INFY --mode intraday                      # opening-range breakout (stop-limit entry)
+    check RELIANCE --qty 20                         # money for the user's own quantity
+    check RELIANCE --choose                         # user takes a WAIT/SKIP anyway; logged as an override
     plan --market NSE                               # today's plan: regime, TAKE, WATCH
     positions --market US
     intraday --market NSE
@@ -33,8 +35,17 @@ realised R vs predicted MC R and the 95% interval, then the count of `data_unava
 Never tell the user to delete `desk_scoreboard.json`: intraday results older than about 60 days exist
 only there.
 
+`check` prints a Money block: max loss (intraday: at a fill up to the stop-limit's limit, with a second line
+for a fill at the trigger), profit at T1 and T2, reward:risk and expected value for the quantity (the desk's, or `--qty N`; limit breaches are listed). If the desk sized 0 shares it shows the
+per-share figures and asks for `--qty`. `--choose` only on the user's explicit say-so: it prints the
+override ticket for a WAIT or SKIP and logs it as the user's override (scored apart from the desk's
+picks). It does nothing for a TAKE. Intraday tickets are stop-limit orders (a plain limit at the same limit price
+when the price is already at or above the trigger) with a "cancel the entry if not filled by" time; relay
+that line.
+
 Rules for Claude:
-- Report the verdict line first, then every BLOCK and WARN in plain words, then the ticket.
+- When presenting a trade, give the money first: max loss, then profit at T1 and T2 (and say a gap can
+  lose more than the max loss). Then the verdict line, every BLOCK and WARN in plain words, then the ticket.
 - Never soften a SKIP or a negative expectancy. "No trade" is a valid answer; say what would change it.
 - Never place, modify or cancel an order, and never call a broker order tool. The user types the
   ticket into Kite or their US broker themselves.

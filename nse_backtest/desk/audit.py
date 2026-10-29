@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from .models import DeskVerdict
+from .markets import get_profile
+from .models import Action, DeskVerdict
 
 
 def data_dir() -> Path:
@@ -22,11 +25,9 @@ def data_dir() -> Path:
     return d
 
 
-def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
-    path = Path(path) if path is not None else data_dir() / "desk_audit.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _row(v: DeskVerdict) -> dict:
     p, o, s = v.plan, v.odds, v.sizing
-    rec = {
+    return {
         "created_at": v.created_at, "action": v.action.value, "symbol": p.symbol, "market": p.market,
         "mode": p.mode.value, "entry": p.entry, "stop": p.stop, "target_1": p.target_1,
         "qty": s.qty, "risk_amount": s.risk_amount,
@@ -38,7 +39,15 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
         "target_2": p.target_2, "last_bar": p.last_bar, "current_price": v.current_price,
         "stop_basis": p.stop_basis,
         "last_close": p.last_close,  # the plan's last daily Close: the scoreboard's price-scale check
+        "entry_limit": p.entry_limit,  # intraday stop-limit's limit price (None for swing)
+        "quote_live": v.quote_live,  # True only when current_price is a live quote (the scoreboard trusts only that)
+        "quote_as_of": v.quote_as_of,  # the quote's own time: the scoreboard tests the price against that bar
     }
+
+
+def _append(rec: dict, path: Path | None) -> Path:
+    path = Path(path) if path is not None else data_dir() / "desk_audit.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.fchmod(fd, 0o600)  # the mode above applies only to a new file
@@ -48,3 +57,26 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, default=str) + "\n")
     return path
+
+
+def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
+    return _append(_row(v), path)
+
+
+def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime | None = None) -> Path:
+    """The owner chose a WAIT/SKIP verdict anyway: the verdict's row with action OVERRIDE, the desk's own action
+    as desk_action and chosen_by "owner". The scoreboard scores these apart from the desk's TAKEs.
+
+    created_at is when the owner chose (``now``, default the wall clock, in the market's time zone), and the
+    verdict's own time is kept as verdict_created_at: the scoreboard replays an override from created_at, so a
+    move that ran before the decision is never credited to it."""
+    if v.action is Action.TAKE:
+        raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
+    tz = ZoneInfo(get_profile(v.plan.market).tz)
+    if now is None:
+        at = datetime.now(tz)
+    else:  # a naive now is market time, never the machine's local zone
+        at = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
+    at = at.isoformat()
+    return _append({**_row(v), "created_at": at, "verdict_created_at": v.created_at, "action": "OVERRIDE",
+                    "desk_action": v.action.value, "chosen_by": "owner"}, path)

@@ -6,7 +6,23 @@
       "mcp__kite__cancel_order",
       "mcp__kite__place_gtt_order",
       "mcp__kite__modify_gtt_order",
-      "mcp__kite__delete_gtt_order"
+      "mcp__kite__delete_gtt_order",
+      "mcp__kite__place_*",
+      "mcp__kite__modify_*",
+      "mcp__kite__cancel_*",
+      "mcp__kite__delete_*",
+      "mcp__kite__exit_*",
+      "mcp__kite__convert_*",
+      "mcp__kite__close_*",
+      "mcp__kite__create_*",
+      "mcp__kite__set_*",
+      "mcp__kite__update_*",
+      "mcp__kite__add_*",
+      "mcp__kite__remove_*",
+      "mcp__kite__start_*",
+      "mcp__kite__stop_*",
+      "mcp__kite__buy_*",
+      "mcp__kite__sell_*"
     ]
   }
 }

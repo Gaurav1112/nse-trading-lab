@@ -331,7 +331,8 @@ def test_market_filter_and_stats_never_combine(paths):
 
 # ---------------------------------------------------------------- CLI
 
-DISCLAIMER = "Paper record of the desk's TAKEs as if each ticket were followed exactly — not your real P&L."
+DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed exactly "
+              "— not your real P&L.")
 
 
 def _cli_env(tmp_path, monkeypatch, rows):
@@ -382,7 +383,7 @@ def test_cli_empty_audit_and_bad_market(tmp_path, monkeypatch, capsys):
     assert main(["scoreboard", "--market", "NSE"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == DISCLAIMER
-    assert any(x.startswith("No TAKE verdicts logged yet for NSE") for x in out)
+    assert any(x.startswith("No desk picks or overrides logged yet for NSE") for x in out)
     assert main(["scoreboard", "--market", "LSE"]) == 2
 
 
@@ -414,9 +415,9 @@ def test_page_scoreboard_tab_renders_verdict(monkeypatch, tmp_path):
     assert not at.exception and calls == ["NSE"]
     assert any("Not enough trades yet" in i.value for i in at.info)
     assert any(DISCLAIMER in c.value for c in at.caption)
-    order = [type(e).__name__ for e in at.tabs[4].children.values()]
+    order = [type(e).__name__ for e in at.tabs[5].children.values()]
     assert order.index("Info") < order.index("Dataframe")  # verdict banner before the stats table
-    assert order[0] == "Caption" and DISCLAIMER in list(at.tabs[4].children.values())[0].value
+    assert order[0] == "Caption" and DISCLAIMER in list(at.tabs[5].children.values())[0].value
 
 
 def test_page_scoreboard_error_is_shown(monkeypatch, tmp_path):
@@ -477,7 +478,7 @@ def test_same_day_not_filled_and_intraday_not_cached(paths):
     write_audit(paths[0], [row(datetime(2026, 10, 28, 9, 0, tzinfo=IST)),
                            row(datetime(2026, 10, 28, 9, 50, tzinfo=IST), symbol="XYZ", mode="intraday", h="i")])
     idx = pd.date_range("2026-10-28 09:15", "2026-10-28 15:15", freq="15min")
-    flat = pd.DataFrame({"Open": 101.0, "High": 101.5, "Low": 100.5, "Close": 101.2}, index=idx)  # R1: above the limit
+    flat = pd.DataFrame({"Open": 99.0, "High": 99.5, "Low": 98.5, "Close": 99.2}, index=idx)  # C1: never up to the trigger
     res = run(paths, Loader({"ABC": frame({"2026-10-28": (101, 102, 100.5, 101)})}), Loader({"XYZ": flat}),
               now=datetime(2026, 10, 28, 15, 40, tzinfo=IST))
     assert [o.status for o in res.outcomes] == [Status.NOT_FILLED, Status.NOT_FILLED]
@@ -583,6 +584,8 @@ def test_us_early_close_flat_by_at_io_level(paths):
     idx = pd.date_range("2026-11-27 09:30", "2026-11-27 12:45", freq="15min")
     bars = pd.DataFrame({"Open": 100.5, "High": 101.0, "Low": 99.5, "Close": 100.8}, index=idx)
     bars.loc[pd.Timestamp("2026-11-27 12:30"), "Close"] = 101.5
+    # F1 r5: the 10:00 bar contains the TAKE; below the trigger it keeps the fill on a later (confirmed) bar
+    bars.loc[pd.Timestamp("2026-11-27 10:00"), ["Open", "High", "Low", "Close"]] = (99.6, 99.9, 99.5, 99.8)
     bars.loc[pd.Timestamp("2026-11-27 12:45"), ["High", "Close"]] = (110.0, 109.0)  # at/after flat-by: ignored
     res = run(paths, intraday=Loader({"ABC": bars}), now=datetime(2026, 11, 30, 12, 0, tzinfo=ET))
     o = res.outcomes[0]
@@ -615,7 +618,7 @@ def test_cli_rejects_only_message(tmp_path, monkeypatch, capsys):
     assert main(["scoreboard", "--market", "NSE"]) == 0
     out = capsys.readouterr().out
     assert "No valid TAKE verdicts for NSE (2 unreadable — see below)" in out
-    assert "No TAKE verdicts logged yet" not in out
+    assert "logged yet" not in out
 
 
 # ---------------------------------------------------------------- review round R1
@@ -671,7 +674,7 @@ def test_r1_cache_matches_on_last_bar_and_last_close(paths):
     assert ld.calls and o.status is Status.UNAVAILABLE
 
 
-def _fill_day_bars(day="2026-10-16", first="10:15", over=None):
+def _fill_day_bars(day="2026-10-16", first="10:00", over=None):  # F1 r4: incl. the containing bar
     idx = pd.date_range(f"{day} {first}", f"{day} 15:15", freq="15min")
     bars = pd.DataFrame({"Open": 100.5, "High": 100.8, "Low": 100.3, "Close": 100.6}, index=idx)
     for t, v in (over or {}).items():
@@ -784,7 +787,8 @@ def test_r1_save_has_no_chmod_after_replace(tmp_path, monkeypatch):
 
 
 # ---- surfaces: coverage sentence, warnings and rejects on the page
-COVERAGE = "Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet."
+COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
+            "your overrides are scored as a separate record.")
 
 
 def test_r1_cli_disclaimer_line_2_and_note(tmp_path, monkeypatch, capsys):
@@ -806,7 +810,7 @@ def test_r1_page_shows_warnings_rejects_and_coverage(monkeypatch, tmp_path):
     at = _page(monkeypatch, tmp_path).run()
     at.button(key="desk_load_scoreboard").click().run()
     assert not at.exception
-    tab = at.tabs[4]
+    tab = at.tabs[5]
     warnings = [w.value for w in tab.warning]
     assert any("feed down" in w for w in warnings)
     assert any(w == "1 audit line could not be read" for w in warnings)
@@ -846,3 +850,276 @@ def test_r1_backup_without_hard_link_support_leaves_cache_untouched(paths, monke
     res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
     assert res.outcomes[0].status is Status.WON
     assert "could not be backed up" in res.cache_note and paths[1].read_text() == "{not json"
+
+
+# ---- C1: the stop-limit's limit price is part of the ticket a cached outcome must match
+def test_intraday_cached_outcome_needs_the_same_entry_limit(paths):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday")])
+    run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    (entry,) = _cached(paths).values()
+    assert entry["candidate"]["entry_limit"] == 100.5  # old row without it: computed, entry 100 / stop 98
+    write_audit(paths[0], [row(created, mode="intraday", entry_limit=100.3)])
+    res = run(paths, intraday=boom_loader(), now=datetime(2027, 1, 29, 12, 0, tzinfo=IST))
+    assert "cached result no longer matches the logged ticket (kept in cache)" in res.outcomes[0].note
+
+
+# ---- C2: desk picks and owner overrides are two records: separate candidates, cache slots and stats
+def _override(created, **kw):
+    return row(created, action="OVERRIDE", desk_action="SKIP", chosen_by="owner", **kw)
+
+
+def test_c2_desk_pick_and_override_of_the_same_ticket_are_two_records(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), _override(PRE_OPEN_16)])  # same hash, same instant, same session
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert sorted((o.candidate.record, o.status) for o in res.outcomes) == [("desk", Status.WON),
+                                                                            ("override", Status.WON)]
+    assert [(s.record, s.n) for s in res.stats] == [("desk", 1), ("override", 1)]
+    entries = json.loads(paths[1].read_text())["outcomes"]
+    assert sorted(e["candidate"]["record"] for e in entries.values()) == ["desk", "override"]
+    again = run(paths)  # both served from the cache: no loader may be called
+    assert sorted(o.candidate.record for o in again.outcomes) == ["desk", "override"]
+    assert [(s.record, s.n) for s in again.stats] == [("desk", 1), ("override", 1)]
+
+
+def test_c2_a_desk_cache_entry_is_never_served_as_an_override(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), _override(PRE_OPEN_16)])
+    run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    data = json.loads(paths[1].read_text())
+    desk_key = next(k for k, e in data["outcomes"].items() if e["candidate"]["record"] == "desk")
+    over_key = next(k for k in data["outcomes"] if k != desk_key)
+    data["outcomes"][over_key] = data["outcomes"][desk_key]  # a desk result under the override's slot
+    paths[1].write_text(json.dumps(data), encoding="utf-8")
+    ld = Loader({"ABC": frame(WIN_BARS)})
+    res = run(paths, ld)
+    assert ld.calls == [("NSE", "ABC")]  # the override was replayed, not served the desk's entry
+    assert sorted(o.candidate.record for o in res.outcomes) == ["desk", "override"]
+    assert json.loads(paths[1].read_text())["outcomes"][over_key]["candidate"]["record"] == "override"
+
+
+def test_c2_malformed_override_is_reported(paths):
+    write_audit(paths[0], [_override(PRE_OPEN_16, stop=101.0), row(PRE_OPEN_16, action="WAIT", h="w")])
+    res = run(paths)
+    assert res.outcomes == [] and res.rejects == [(1, "malformed OVERRIDE: invalid geometry stop=101.0 "
+                                                      "entry=100.0 target_1=103.0")]
+
+
+def test_c2_cli_prints_desk_picks_then_your_overrides_each_verdict_first(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [row(PRE_OPEN_16), _override(PRE_OPEN_16, symbol="XYZ", h="o")])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    d, o = out.index("Desk picks"), out.index("Your overrides")
+    assert d < o
+    assert out[d + 1].startswith("NSE swing: Not enough trades yet (1/30)")
+    assert out[o + 1].startswith("NSE swing: Not enough trades yet (1/30)")
+    trades = [x for x in out if " ABC " in x or " XYZ " in x]
+    assert any("desk" in x and "ABC" in x for x in trades) and any("override" in x and "XYZ" in x for x in trades)
+
+
+def test_c2_cli_says_when_there_are_no_overrides_yet(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [row(PRE_OPEN_16)])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    o = out.index("Your overrides")
+    assert out[o + 1] == "  No overrides logged yet."
+
+
+def test_c2_page_shows_the_two_records_under_separate_subheaders(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk.scoreboard import summarize
+    desk = _fake_result().outcomes
+    losing = [replace(desk[0], candidate=replace(desk[0].candidate, record="override", key=f"o{i}"),
+                      status=Status.LOST, exit_price=98.0, realised_r=-1.0) for i in range(30)]
+    outs = desk + losing
+    monkeypatch.setattr(session, "run_scoreboard",
+                        lambda market=None, **k: session.ScoreboardResult(outs, summarize(outs), [], None))
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    tab = at.tabs[5]
+    assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides"]
+    kids = [(type(e).__name__, e.value if type(e).__name__ in ("Subheader", "Info", "Error") else None)
+            for e in tab.children.values()]
+    d = kids.index(("Subheader", "Desk picks"))
+    o = kids.index(("Subheader", "Your overrides"))
+    assert kids[d + 1][0] == "Info" and "Not enough trades yet" in kids[d + 1][1]
+    assert kids[o + 1][0] == "Error" and "Losing" in kids[o + 1][1]  # the Losing verdict is always shown
+
+
+# ---------------------------------------------------------------- C8
+
+def test_c8_scan_logged_intraday_row_is_scored_as_a_desk_candidate(paths, monkeypatch):
+    from nse_backtest.desk.models import Action
+    from tests.desk.test_intraday import _fake_check
+    from nse_backtest.desk import intraday
+    from nse_backtest.desk.markets import get_profile
+    from nse_backtest.desk.models import Limits
+    from tests.desk.test_intraday import ctx
+    monkeypatch.setattr(intraday, "check_trade", _fake_check({"ABC": Action.TAKE}, []))
+    intraday.orb_scan(get_profile("NSE"), {"ABC": pd.DataFrame()}, Limits(capital=100_000), ctx(),
+                      audit_path=paths[0])
+    logged = [json.loads(x) for x in paths[0].read_text().splitlines()]
+    assert logged[0]["mode"] == "intraday" and logged[0]["action"] == "TAKE"
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}), Loader({"ABC": frame(WIN_BARS)}))
+    assert [(o.candidate.record, o.candidate.mode.value, o.candidate.symbol) for o in res.outcomes] == [
+        ("desk", "intraday", "ABC")]
+    assert [(s.record, s.mode.value) for s in res.stats] == [("desk", "intraday")]
+
+
+def _two_records_result():
+    from nse_backtest.desk.scoreboard import Candidate, Outcome, summarize
+    outs = []
+    for i, (rec, mc, r) in enumerate([("desk", 0.5, 1.0), ("desk", 0.4, -1.0), ("desk", None, 2.0),
+                                      ("override", 0.9, 0.5)]):
+        c = Candidate(datetime(2026, 10, 12 + i, 10, 0, tzinfo=IST), "NSE", f"S{i}", Mode.SWING, 100.0, 98.0, 103.0,
+                      15, 0.0, 10, mc, None, f"h{i}|x", record=rec)
+        outs.append(Outcome(c, Status.WON if r > 0 else Status.LOST, 100.0, "2026-10-16", 103.0, "2026-10-19", r,
+                            None, 1, ""))
+    return session.ScoreboardResult(outs, summarize(outs), [(3, "unreadable audit line")], "cache note", None)
+
+
+def test_c8_cli_prints_projected_vs_realised_per_record(monkeypatch, capsys):
+    from nse_backtest.desk.cli import format_scoreboard
+    lines = format_scoreboard(_two_records_result(), "NSE")
+    desk = next(i for i, x in enumerate(lines) if x == "Desk picks")
+    over = next(i for i, x in enumerate(lines) if x == "Your overrides")
+    pv = [i for i, x in enumerate(lines) if x.startswith("  Projected ")]
+    assert lines[pv[0]] == "  Projected +0.90R vs realised +0.00R over 2 trades (1 without a projection)"
+    assert lines[pv[1]] == "  Projected +0.90R vs realised +0.50R over 1 trade"
+    assert desk < pv[0] < over < pv[1]
+    verdict = next(i for i in range(desk, over) if lines[i].startswith("NSE swing:"))
+    assert verdict < pv[0]  # verdict line first
+
+
+def test_c8_cli_rejected_count_before_the_record_sections():
+    from nse_backtest.desk.cli import format_scoreboard
+    lines = format_scoreboard(_two_records_result(), "NSE")
+    rej = next(i for i, x in enumerate(lines) if x.startswith("Rejected 1 audit line"))
+    assert rej < lines.index("Desk picks") and rej < lines.index("Your overrides")
+    assert sum(x.startswith("Rejected ") for x in lines) == 1  # not repeated further down
+
+
+def test_c8_cli_no_projections_line():
+    from nse_backtest.desk.cli import format_scoreboard
+    res = _two_records_result()
+    res.outcomes[:] = [o for o in res.outcomes if o.candidate.record == "desk" and o.candidate.mc_expectancy_r is None]
+    res.stats[:] = [s for s in res.stats if s.record == "desk"]
+    text = "\n".join(format_scoreboard(res, "NSE"))
+    assert "  No projections to compare yet" in text
+
+
+def test_c8_cli_empty_text(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    assert ("No desk picks or overrides logged yet for NSE — run plan, check or the intraday scan, "
+            "or choose a trade") in capsys.readouterr().out
+
+
+def test_c8_page_shows_chart_per_record_and_warnings_first(monkeypatch, tmp_path):
+    monkeypatch.setattr(session, "run_scoreboard", lambda market=None, **k: _two_records_result())
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    kids = list(at.tabs[5].children.values())
+    charts = [i for i, e in enumerate(kids) if e.type == "plotly_chart"]
+    assert len(charts) == 2  # desk (3 resolved, 2 predicted) + override (1)
+    first_sub = next(i for i, e in enumerate(kids) if e.type == "subheader")
+    warn = next(i for i, e in enumerate(kids) if e.type == "warning" and "could not be read" in e.value)
+    assert warn < first_sub
+    assert any("without a projection" in c.value for c in at.caption)
+
+
+def test_f1_e4_page_caption_counts_resolved_trades_without_a_realised_r(monkeypatch, tmp_path):
+    from dataclasses import replace as _replace
+    res = _two_records_result()
+    broken = _replace(res.outcomes[0], realised_r=None)  # resolved (WON) but no realised R
+    res = _replace(res, outcomes=[broken] + list(res.outcomes[1:]))
+    monkeypatch.setattr(session, "run_scoreboard", lambda market=None, **k: res)
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    assert any("1 resolved trade without a realised R" in c.value for c in at.caption)
+
+
+def test_c8_page_no_projections_info(monkeypatch, tmp_path):
+    res = _two_records_result()
+    res.outcomes[:] = [o for o in res.outcomes if o.candidate.mc_expectancy_r is None]
+    res.stats[:] = __import__("nse_backtest.desk.scoreboard", fromlist=["summarize"]).summarize(res.outcomes)
+    monkeypatch.setattr(session, "run_scoreboard", lambda market=None, **k: res)
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    assert any("No projections to compare yet" in i.value for i in at.info)
+    assert not [e for e in at.tabs[5].children.values() if e.type == "plotly_chart"]
+
+
+def test_c8_page_empty_text(monkeypatch, tmp_path):
+    monkeypatch.setattr(session, "run_scoreboard",
+                        lambda market=None, **k: session.ScoreboardResult([], [], [], None, None))
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert any("No desk picks or overrides logged yet for NSE — run plan, check or the intraday scan, "
+               "or choose a trade" in i.value for i in at.info)
+
+
+# ---------------------------------------------------------------- F1 round 9: bool fields hit the cache
+
+@pytest.mark.parametrize("live", [True, False])
+def test_r9_rows_with_quote_live_are_served_from_the_cache(paths, live):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday", current_price=99.2, quote_live=live,
+                               quote_as_of=created.isoformat())])
+    first = run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    assert first.outcomes[0].status in (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
+    li = boom_loader()
+    res = run(paths, intraday=li, now=datetime(2027, 1, 10, 12, 0, tzinfo=IST))  # day +75: past the 60-day refetch
+    assert li.calls == [] and res.outcomes[0].status is first.outcomes[0].status, res.outcomes[0].note
+
+
+def test_r9_a_cached_bool_never_matches_another_value():
+    from dataclasses import replace as _replace
+    from nse_backtest.desk.scoreboard import load_candidates
+    from nse_backtest.desk.scoreboard_io import _candidate_record, _matches
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    (c,), _ = load_candidates([row(created, mode="intraday", current_price=99.2, quote_live=True)])
+    entry = {"candidate": _candidate_record(c)}
+    assert _matches(c, entry)
+    assert not _matches(_replace(c, quote_live=False), entry)
+    assert not _matches(_replace(c, quote_live=None), entry)
+    entry["candidate"]["quote_live"] = 1  # a number is not a bool
+    assert not _matches(c, entry)
+    entry["candidate"]["quote_live"] = True
+    entry["candidate"]["qty"] = True  # a bool is never a number
+    assert not _matches(c, entry)
+
+
+def test_swing_logged_before_open_with_quote_after_open_loads_fill_day_bars(tmp_path):
+    """The replay starts at the later of the TAKE and quote times, so the bar loader must use that start too."""
+    import json as _json
+    days = pd.bdate_range("2026-10-20", "2026-10-30")
+    daily_df = pd.DataFrame({"Open": 101.0, "High": 102.0, "Low": 99.5, "Close": 101.0}, index=days)
+    idx = pd.date_range("2026-10-27 09:15", "2026-10-27 15:15", freq="15min")
+    b15 = pd.DataFrame({"Open": 101.0, "High": 101.5, "Low": 99.8, "Close": 101.0}, index=idx)
+    calls = []
+
+    def load_intraday(*a, **k):
+        calls.append(1)
+        return b15
+
+    rec = {"created_at": "2026-10-27T09:12:00+05:30", "action": "TAKE", "symbol": "ABC", "market": "NSE",
+           "mode": "swing", "entry": 100.0, "stop": 98.0, "target_1": 103.0, "qty": 10, "risk_amount": 20.0,
+           "mc_expectancy_r": 0.3, "blocks": [], "warns": [], "input_hash": "a" * 64, "max_hold_bars": 5,
+           "cost_per_share": 0.0, "history_expectancy_r": None, "target_2": None, "last_bar": "2026-10-26",
+           "current_price": 100.5, "stop_basis": "x", "last_close": 101.0, "entry_limit": None,
+           "quote_live": True, "quote_as_of": "2026-10-27T09:16:00+05:30"}
+    audit = tmp_path / "a.jsonl"
+    audit.write_text(_json.dumps(rec) + "\n")
+    r = scoreboard_io.build_scoreboard("NSE", now=datetime(2026, 10, 31, 12, tzinfo=IST), audit_path=audit,
+                                       cache_path=tmp_path / "c.json", load_daily=lambda *a, **k: daily_df,
+                                       load_intraday=load_intraday, on_warning=None)
+    o = r.outcomes[0]
+    assert calls, "fill-day 15-minute bars were never loaded"
+    assert o.status is not Status.UNAVAILABLE, o.note

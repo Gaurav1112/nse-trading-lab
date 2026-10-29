@@ -1,13 +1,29 @@
 """Desk scoreboard core (pure: no network, no file I/O).
 
-Replays every logged TAKE verdict against what prices actually did, using conservative fill and exit rules,
-then summarises per (market, mode). It is the desk's paper record as if every TAKE were taken exactly per its
-ticket, not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
+Replays every logged TAKE verdict (record "desk") and every owner override of a WAIT/SKIP (record "override")
+against what prices actually did, using conservative fill and exit rules, then summarises per (record, market,
+mode): the two records are never pooled. It is a paper record as if every ticket were taken exactly as printed,
+not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
+
+A replay starts at max(created_at, quote_as_of): the ticket can't be typed before the quote it was
+based on. The bar containing that start counts (its remainder came after it), but a fill that only that bar made
+possible is ambiguous (the touch may have come before the TAKE): it is kept when it loses or exits at <= 0R, its
+target never counts, and when it would win the order is replayed from the later bars: a later fill counts only if
+its R is at most the containing-bar fill's (a counted result is never better than either possible history), else
+NOT_FILLED ("fill only possible on the bar the TAKE was logged in — counted only if it loses").
+The logged price (current_price) is used only when it is TRUSTED: a fresh live quote (quote_live True, with its own
+quote_as_of) inside [Low, High + 0.5%] of the 15-minute bar containing quote_as_of. Without a quote the desk logs the plan's last close, so an untrusted price (not live, or
+unknown in old rows) is ignored entirely: the row is scored with its branch's no-price model (swing and stop-limit:
+the ambiguous containing-bar rules; LIMIT tickets: the resting model). The branch itself still follows the ticket
+that was printed. A live price outside that range contradicts the bars: data_unavailable.
+The one accepted residual optimism: a trusted live price in [entry, limit] (desk TAKE or override) fills at that
+price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price runs
+above the limit while the ticket is typed it may not fill at all (about 1% of trusted rows in a simulation).
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Callable, Iterable
@@ -17,16 +33,19 @@ import numpy as np
 import pandas as pd
 
 from . import calendars as cal
+from . import fills
 from .costs import round_trip_cost
 from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 2  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
+SCOREBOARD_VERSION = 13  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
+RECORD_OF_ACTION = {"TAKE": "desk", "OVERRIDE": "override"}  # audit action -> scoreboard record
+RECORD_LABELS = {"desk": "Desk picks", "override": "Your overrides"}
 
 
 @dataclass(frozen=True)
@@ -43,9 +62,14 @@ class Candidate:
     qty: int
     mc_expectancy_r: float | None
     history_expectancy_r: float | None
-    key: str                    # f"{input_hash}|{created_at.isoformat()}"
+    key: str                    # f"{input_hash}|{created_at.isoformat()}", plus "|override" for an override
     last_bar: str | None = None     # the plan's last bar (ISO); None in rows logged before it was recorded
     last_close: float | None = None  # the plan's last daily Close; None in rows logged before R1
+    entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (None: computed from the tick)
+    record: str = "desk"        # "desk" (a logged TAKE) or "override" (the owner chose a WAIT/SKIP anyway)
+    current_price: float | None = None  # the price the verdict was decided at; None in rows logged before it
+    quote_live: bool | None = None  # current_price was a live quote; False: the last close; None: unknown (old row)
+    quote_as_of: datetime | None = None  # the quote's own time (tz-aware); None without one (old rows: untrusted)
 
 
 class Status(str, Enum):
@@ -91,6 +115,7 @@ class ScoreStats:
     unavailable: int
     verdict: str
     pred_coverage: float | None = None   # share of resolved trades carrying an MC prediction
+    record: str = "desk"                 # which record these stats are for: "desk" or "override", never both
 
 
 # ---------------------------------------------------------------- candidates
@@ -113,6 +138,11 @@ def _opt(row: dict, key: str) -> float | None:
 
 
 def _parse_row(row: dict) -> Candidate:
+    record = RECORD_OF_ACTION.get(row.get("action"))
+    if record is None:
+        raise ValueError(f"not a scored action {row.get('action')!r}")
+    if record == "override" and row.get("desk_action") not in ("WAIT", "SKIP"):
+        raise ValueError(f"override of a TAKE verdict (desk_action {row.get('desk_action')!r})")
     for k in ("created_at", "market", "symbol", "mode", "input_hash"):
         if not row.get(k):
             raise ValueError(f"missing {k}")
@@ -145,11 +175,49 @@ def _parse_row(row: dict) -> Candidate:
             raise ValueError("invalid computed cost_per_share")
     last_bar = row.get("last_bar")
     last_close = _opt(row, "last_close")
+    limit = None
+    if mode is Mode.INTRADAY:
+        raw = row.get("entry_limit")  # None in rows logged before the stop-limit ticket
+        if raw is not None:
+            try:
+                raw = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid entry_limit {row['entry_limit']!r}") from None
+            ceiling = fills.entry_limit(entry, stop, profile.tick) + profile.tick  # more = a corrupt value
+            if not (math.isfinite(raw) and entry <= raw <= ceiling + 1e-9):
+                raise ValueError(f"invalid entry_limit {row['entry_limit']!r}")
+        limit = fills.limit_or_default(raw, entry, stop, profile.tick)
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
-                     f"{row['input_hash']}|{created.isoformat()}",
+                     f"{row['input_hash']}|{created.isoformat()}" + ("|override" if record == "override" else ""),
                      str(last_bar) if last_bar not in (None, "") else None,
-                     last_close if last_close is not None and last_close > 0 else None)
+                     last_close if last_close is not None and last_close > 0 else None, limit, record,
+                     cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None,
+                     _quote_live(row), _quote_as_of(row))
+
+
+def _quote_as_of(row: dict) -> datetime | None:
+    raw = row.get("quote_as_of")
+    if not raw:
+        return None
+    try:
+        t = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def _quote_live(row: dict) -> bool | None:
+    """The row's quote_live; rows logged before it: False when current_price equals the logged last close (the
+    plan's fallback without a quote), else None (unknown). Both inferred values are untrusted: only True (with a
+    quote_as_of) makes the logged price usable."""
+    q = row.get("quote_live")
+    if isinstance(q, bool):
+        return q
+    cp, lc = row.get("current_price"), row.get("last_close")
+    if cp is not None and lc is not None and cp == lc:
+        return False
+    return None
 
 
 def default_session_of(market: str, created_at: datetime) -> date:
@@ -159,14 +227,15 @@ def default_session_of(market: str, created_at: datetime) -> date:
 
 def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime], date] | None = None
                     ) -> tuple[list[Candidate], list[tuple[dict, str]]]:
-    """TAKE rows only (others are silently not candidates). Malformed TAKE rows come back with a reason.
-    Deduped by (market, symbol, mode, session the order belongs to), keeping the earliest; the session defaults
-    to the market-local date of created_at, or is session_of(market, created_at) when given."""
+    """TAKE rows (record "desk") and OVERRIDE rows (record "override") only; others are silently not candidates.
+    Malformed TAKE/OVERRIDE rows come back with a reason. Deduped by (record, market, symbol, mode, session the
+    order belongs to), keeping the earliest, so a desk pick and an override never share a slot; the session
+    defaults to the market-local date of created_at, or is session_of(market, created_at) when given."""
     session_of = session_of or default_session_of
     good: list[Candidate] = []
     rejects: list[tuple[dict, str]] = []
     for row in rows:
-        if not isinstance(row, dict) or row.get("action") != "TAKE":
+        if not isinstance(row, dict) or row.get("action") not in RECORD_OF_ACTION:
             continue
         try:
             good.append(_parse_row(row))
@@ -175,7 +244,7 @@ def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime
     best: dict[tuple, Candidate] = {}
     for c in sorted(good, key=lambda c: c.created_at):
         d = session_of(c.market, c.created_at)
-        best.setdefault((c.market, c.symbol, c.mode, d), c)
+        best.setdefault((c.record, c.market, c.symbol, c.mode, d), c)
     return sorted(best.values(), key=lambda c: c.created_at), rejects
 
 
@@ -217,6 +286,32 @@ def _finish(c: Candidate, fill: float, fill_at, px: float, exit_at, held: int, n
     st = exit_status(c, px)
     return _outcome(c, st, note, fill=float(fill), fill_at=str(fill_at), exit_px=float(px), exit_at=str(exit_at),
                     r=_r(c, fill, px), held=held)
+
+
+CERTAIN_FILL_NOTE = "filled on the bar the TAKE was logged in (it traded inside the trigger-limit range)"
+AMBIGUOUS_FILL_NOTE = "fill only possible on the bar the TAKE was logged in — counted only if it loses"
+
+
+def _only_if_it_loses(c: Candidate, o: Outcome) -> Outcome:
+    """A fill that only the bar containing created_at made possible (the touch may have come before the TAKE) is
+    kept when it loses or exits at <= 0R, and is NOT_FILLED when it would win or exit positive."""
+    if o.status in (Status.WON, Status.LOST, Status.TIME) and o.realised_r is not None and o.realised_r > 1e-12:
+        return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE)
+    return o
+
+
+def _cap_fallback(c: Candidate, cont: Outcome, later: Outcome) -> Outcome:
+    """The ambiguous containing-bar fill ``cont`` would win, so the order is replayed from the later bars
+    (``later``). A counted result is never better than either history: a later final outcome counts only when its
+    R is at most cont's; a better one, or no later fill, is NOT_FILLED. OPEN / UNAVAILABLE pass through (they are
+    not counted; the cap applies again once they resolve)."""
+    if later.status in (Status.WON, Status.LOST, Status.TIME) and later.realised_r is not None:
+        if cont.realised_r is not None and later.realised_r <= cont.realised_r + 1e-12:
+            return later
+        return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE)
+    if later.status is Status.NOT_FILLED:
+        return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE)
+    return later
 
 
 def _all_finite(*arrs) -> bool:
@@ -325,11 +420,14 @@ def logged_mid_session(c: Candidate, fill_session: date) -> bool:
 MID_SESSION_NOTE = "TAKE logged mid-session; intraday bars needed for the fill day"
 
 
-def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why: str
-                       ) -> Outcome | tuple[float, pd.Timestamp]:
-    """The fill session of a TAKE logged mid-session, from 15-minute bars strictly after created_at: LIMIT filled
-    at the first bar with Low <= entry at min(Open, entry); after the fill only the stop can trigger that day.
-    Returns a final Outcome (NOT_FILLED, LOST or UNAVAILABLE) or (fill, fill_at) to continue on daily bars."""
+def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why: str,
+                       skip_containing: bool = False) -> Outcome | tuple[float, pd.Timestamp, bool]:
+    """The fill session of a TAKE logged mid-session, from the 15-minute bar containing created_at onward: LIMIT
+    filled at the first bar with Low <= entry, at min(Open, entry) (at the entry on the containing bar, whose Open
+    came before the TAKE); after the fill only the stop can trigger that day. ``skip_containing`` starts the search
+    after the containing bar. Returns a final Outcome (NOT_FILLED, LOST or UNAVAILABLE) or (fill, fill_at,
+    ambiguous) to continue on daily bars; ambiguous = only the containing bar filled it and the logged price was
+    above the entry."""
     if bars15 is None:
         return _outcome(c, Status.UNAVAILABLE, MID_SESSION_NOTE + (f" ({why})" if why else ""))
     profile = get_profile(c.market)
@@ -339,8 +437,11 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     mask = (idx.normalize() == pd.Timestamp(day)) & (idx > pd.Timestamp(created)) & \
            (np.array([t.time() < close for t in idx], dtype=bool) if len(idx) else True)
     sess = bars15[mask]
-    if sess.empty:
-        return _outcome(c, Status.UNAVAILABLE, f"{MID_SESSION_NOTE} (no 15-minute bars after the TAKE)")
+    bar0 = pd.Timestamp(created).floor("15min")  # the bar containing created_at: its rest is after the TAKE
+    if bar0 not in idx:
+        return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars on the fill day (no bar containing "
+                                               f"{created:%H:%M})")
+    sess = pd.concat([bars15.loc[[bar0]], sess])
     gap_after = _gap_after(sess.index, created)
     if gap_after is not None:
         return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars on the fill day (missing after {gap_after:%H:%M})")
@@ -350,19 +451,50 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     op, lo = sess["Open"].to_numpy(dtype=float), sess["Low"].to_numpy(dtype=float)
     if not _all_finite(op, lo, sess["High"].to_numpy(dtype=float), sess["Close"].to_numpy(dtype=float)):
         return _outcome(c, Status.UNAVAILABLE, "bad price data")
-    k = next((p for p in range(len(sess)) if lo[p] <= c.entry), None)
+    trust, qbar = _price_trust(c, bars15)
+    if trust == "contradiction":
+        return _contradiction(c, qbar)
+    k = next((p for p in range(1 if skip_containing else 0, len(sess)) if lo[p] <= c.entry), None)
     if k is None:
-        return _outcome(c, Status.NOT_FILLED, "limit not reached after the TAKE on the fill session")
-    fill, fill_at = min(op[k], c.entry), sess.index[k]
+        return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing
+                        else "limit not reached after the TAKE on the fill session")
+    # the containing bar's Open came before the TAKE: a fill there is at the limit price itself. It is ambiguous
+    # (the touch may have come before the TAKE) unless the logged price was already at or below the limit.
+    fill = c.entry if k == 0 else min(op[k], c.entry)
+    fill_at = c.created_at.isoformat() if k == 0 else sess.index[k]
+    trusted = trust == "trusted"
+    ambiguous = k == 0 and not (trusted and c.current_price <= c.entry)
     m = next((p for p in range(k, len(sess)) if lo[p] <= c.stop), None)
-    if m is not None:  # target on the fill day is ignored (as on a daily fill bar)
-        return _finish(c, fill, fill_at, min(op[m], c.stop), sess.index[m], 0, "stop touched on the fill day")
-    return float(fill), fill_at
+    if m is not None:  # target on the fill day is ignored (as on a daily fill bar); a loss is always kept
+        px = c.stop if m == 0 else min(op[m], c.stop)
+        return _finish(c, fill, fill_at, px, sess.index[m], 0, "stop touched on the fill day")
+    return float(fill), fill_at, ambiguous
+
+
+def _from_quote(c: Candidate) -> Candidate:
+    """The candidate replayed from max(created_at, quote_as_of): the order cannot exist before the quote the ticket
+    was based on. The logged row (its created_at, key and session) is unchanged on the returned Outcome."""
+    if c.quote_as_of is not None and c.quote_as_of > c.created_at:
+        return replace(c, created_at=c.quote_as_of)
+    return c
+
+
+def _as_logged(c: Candidate, o: Outcome) -> Outcome:
+    return o if o.candidate is c else replace(o, candidate=c)
 
 
 def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
                   session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
                   intraday_note: str = "") -> Outcome:
+    """See _resolve_swing_at; replayed from max(created_at, quote_as_of)."""
+    return _as_logged(c, _resolve_swing_at(_from_quote(c), daily, fill_session=fill_session, now=now,
+                                           session_closed_today=session_closed_today, bars15=bars15,
+                                           intraday_note=intraday_note))
+
+
+def _resolve_swing_at(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
+                      session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
+                      intraday_note: str = "") -> Outcome:
     """CNC LIMIT at entry for one session. Fill bar: filled iff Low <= entry at min(Open, entry); only the stop
     can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close.
     Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial.
@@ -398,7 +530,15 @@ def _resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now
         got = _fill_day_intraday(c, bars15, fill_session, intraday_note)
         if isinstance(got, Outcome):
             return got, None
-        fill, fill_at = got
+        fill, fill_at, ambiguous = got
+        o, used = _swing_after_fill(c, daily, dates, i, fill, fill_at)
+        if ambiguous and _only_if_it_loses(c, o) is not o:  # it would win: only a later bar can fill it for real
+            got = _fill_day_intraday(c, bars15, fill_session, intraday_note, skip_containing=True)
+            if isinstance(got, Outcome):
+                return _cap_fallback(c, o, got), None
+            later, used = _swing_after_fill(c, daily, dates, i, got[0], got[1])
+            return _cap_fallback(c, o, later), used
+        return o, used
     else:
         if not lo[i] <= c.entry:
             return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session"), None
@@ -406,6 +546,13 @@ def _resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now
         fill_at = daily.index[i]
         if lo[i] <= c.stop:  # target on the fill bar is ignored (intrabar order unknown)
             return _finish(c, fill, fill_at, min(op[i], c.stop), fill_at, 0, "stop touched on the fill bar"), None
+    return _swing_after_fill(c, daily, dates, i, fill, fill_at)
+
+
+def _swing_after_fill(c: Candidate, daily: pd.DataFrame, dates, i: int, fill: float, fill_at
+                      ) -> tuple[Outcome, date | None]:
+    """Daily bars after the fill session's bar i: exit, time exit or holding; a missing session is unavailable."""
+    op, hi, lo, cl = (daily[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
     last = min(i + c.max_hold_bars, len(daily) - 1)
     res = _walk(op, hi, lo, cl, i + 1, last, c.stop, c.target_1) if last > i else None
     if res is not None:
@@ -439,11 +586,112 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
     return None
 
 
-def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
-    """MIS LIMIT at entry over created_at's session, bars strictly after created_at and before flat_by: filled at
-    the first bar with Low <= entry at min(Open, entry) (a BUY LIMIT, as the ticket prints it); only the stop can
-    trigger on the fill bar."""
+PLAIN_PRICE_TOLERANCE = 0.005  # a logged price within 0.5% of the TAKE bar's range counts as traded there
+
+
+def _price_trust(c: Candidate, bars15: pd.DataFrame) -> tuple[str, object]:
+    """(state, the bar containing quote_as_of). State: "none" (no price), "untrusted" (not a live quote, unknown,
+    no quote time, or no bar at the quote time: ignored entirely), "trusted" (a live quote inside that bar's
+    [Low, High + 0.5%]) or "contradiction" (a live quote outside that range)."""
+    cp = c.current_price
+    if cp is None:
+        return "none", None
+    if c.quote_live is not True or c.quote_as_of is None:
+        return "untrusted", None
     tz = ZoneInfo(get_profile(c.market).tz)
+    qb = pd.Timestamp(c.quote_as_of.astimezone(tz).replace(tzinfo=None)).floor("15min")
+    if qb not in bars15.index:
+        return "untrusted", None
+    bar = bars15.loc[qb]
+    lo, hi = float(bar["Low"]), float(bar["High"])
+    return ("trusted" if lo <= cp <= hi + PLAIN_PRICE_TOLERANCE * cp else "contradiction"), bar
+
+
+def _contradiction(c: Candidate, bar) -> Outcome:
+    return _outcome(c, Status.UNAVAILABLE, f"logged live price {c.current_price} is outside the bar's range "
+                                           f"{float(bar['Low'])}-{float(bar['High'])}")
+
+
+def limit_model(c: Candidate, limit: float) -> str | None:
+    """Which entry the printed ticket was, from the logged price: "plain" (priced in [entry, limit], desk TAKE or
+    override: a marketable `BUY ... LIMIT` filled at about that price), "resting" (priced above the limit: a buy
+    limit at the limit placed at created_at), or None (no logged price, or below the trigger: the stop-limit)."""
+    cp = c.current_price
+    if cp is None or cp < c.entry:
+        return None
+    if cp > limit:
+        return "resting"
+    return "plain"  # marketable when typed in, desk TAKE or override alike
+
+
+def _limit_fill(c: Candidate, model: str, limit: float, frame: pd.DataFrame, profile, session_over: bool,
+                incomplete: bool, incomplete_note: str, day: date, skip_containing: bool = False) -> Outcome:
+    """Bar 0 of ``frame`` contains created_at; bars 1.. follow it (before flat-by). Plain: filled at the logged price
+    at created_at. Resting: filled at the limit (the worst case: the order and the price inside a bar are unknown)
+    on bar 0 if its Low reaches the limit, else on the first later bar inside the entry window that does. On the
+    fill bar a Low at or below the stop is LOST at the stop (we cannot tell whether it came after the fill) and a
+    target is never credited; later bars exit as usual (a gap through the stop at its Open)."""
+    op, hi, lo, cl = (frame[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    if not _all_finite(op, hi, lo, cl):
+        return _outcome(c, Status.UNAVAILABLE, "bad price data")
+    n, idx = len(frame), frame.index
+    if model == "plain":
+        k, fill, note = 0, float(c.current_price), "limit filled at the logged price"
+    else:
+        win = [j for j in range(1, n) if profile.no_entry_before <= idx[j].time() <= profile.no_entry_after]
+        k = 0 if (lo[0] <= limit and not skip_containing) else next((j for j in win if lo[j] <= limit), None)
+        fill, note = float(limit), "resting limit filled at the limit"
+        if k is None:
+            if not session_over:
+                return _outcome(c, Status.OPEN, "limit not filled yet")
+            if incomplete:
+                return _outcome(c, Status.UNAVAILABLE, incomplete_note)
+            return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing else
+                            f"not filled inside the entry window (cancel by {cal.entry_cancel_by(profile, day):%H:%M})")
+    fill_at = c.created_at.isoformat() if k == 0 else str(idx[k])
+    o = _exits_after_fill(c, k, fill, fill_at, op, hi, lo, cl, idx, session_over, incomplete, incomplete_note, note)
+    if model == "resting" and k == 0 and _only_if_it_loses(c, o) is not o:  # would win: only a later bar counts
+        return _cap_fallback(c, o, _limit_fill(c, model, limit, frame, profile, session_over, incomplete,
+                                               incomplete_note, day, skip_containing=True))
+    return o
+
+
+def _exits_after_fill(c: Candidate, k: int, fill: float, fill_at: str, op, hi, lo, cl, idx, session_over: bool,
+                      incomplete: bool, incomplete_note: str, note: str) -> Outcome:
+    """Exit of a fill on bar k: a Low at or below the stop on the fill bar is LOST at the stop (its target never
+    counts); later bars exit as usual; else a time exit at flat-by, or OPEN while the session runs."""
+    n = len(idx)
+    if lo[k] <= c.stop:  # conservative: the fill bar's low may have come after the fill; its target never counts
+        return _finish(c, fill, fill_at, c.stop, idx[k], 0, "stop touched on the fill bar")
+    res = _walk(op, hi, lo, cl, k + 1, n - 1, c.stop, c.target_1) if k + 1 <= n - 1 else None
+    if res is not None:
+        px, j = res
+        return _finish(c, fill, fill_at, px, idx[j], j - k, note)
+    if session_over:
+        if incomplete:
+            return _outcome(c, Status.UNAVAILABLE, incomplete_note)
+        return _finish(c, fill, fill_at, cl[n - 1], idx[n - 1], n - 1 - k, "time exit at flat-by")
+    return _outcome(c, Status.OPEN, "holding", fill=fill, fill_at=fill_at, mtm=_mtm(c, fill, cl[n - 1]),
+                    held=n - 1 - k)
+
+
+def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
+    """See _resolve_intraday_at; replayed from max(created_at, quote_as_of)."""
+    return _as_logged(c, _resolve_intraday_at(_from_quote(c), bars15, flat_by=flat_by, now=now))
+
+
+def _resolve_intraday_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
+    """A row logged at or above the trigger printed a LIMIT ticket: see limit_model and _limit_fill. Otherwise:
+    BUY stop-limit (trigger = entry, limit = entry_limit, as the ticket prints it) over created_at's session, from
+    the bar containing created_at to flat_by (that bar under the ambiguous-fill rule and its cap, see
+    _only_if_it_loses / _cap_fallback; a certain fill there when, without a logged price, it traded wholly inside
+    [trigger, limit]), later bars filled by fills.stop_limit_fill: never better than the
+    trigger, never worse than the limit, and only inside the desk's entry window [no_entry_before,
+    no_entry_after] like the Time Machine (the ticket says to cancel the entry after it). Only the stop can
+    trigger on the fill bar, exiting at the stop: the stop order exists only after the fill, so not at that bar's
+    Open. Later bars exit at min(Open, stop) on a gap."""
+    profile = get_profile(c.market)
+    tz = ZoneInfo(profile.tz)
     created = c.created_at.astimezone(tz).replace(tzinfo=None)
     now_l = now.astimezone(tz).replace(tzinfo=None)
     day = created.date()
@@ -452,42 +700,86 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     mask = (idx.normalize() == pd.Timestamp(day)) & (idx > pd.Timestamp(created)) & \
            (np.array([t.time() < flat_by for t in idx], dtype=bool) if len(idx) else True)
     sess = bars15[mask]
-    if sess.empty:
+    limit = fills.limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
+    model = limit_model(c, limit)
+    if model is not None and not (profile.no_entry_before <= created.time() < cal.entry_cancel_by(profile, day)):
+        return _outcome(c, Status.NOT_FILLED, "logged outside the entry window")
+    if model is None and created.time() >= cal.entry_cancel_by(profile, day):  # nothing left to fill in
+        return _outcome(c, Status.NOT_FILLED, "logged outside the entry window")
+    bar0 = pd.Timestamp(created).floor("15min")  # the bar containing created_at: its remainder is after it
+    has_bar0 = bar0 in idx and bar0.time() < flat_by
+    if created.time() >= profile.session_open and not has_bar0:
+        if sess.empty and not session_over:
+            return _outcome(c, Status.OPEN, "session still running")
+        if not sess.empty or session_over:
+            return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars (no bar containing {created:%H:%M})")
+    frame = pd.concat([bars15.loc[[bar0]], sess]) if has_bar0 else sess
+    if frame.empty:
         if not session_over:
             return _outcome(c, Status.OPEN, "session still running")
         return _outcome(c, Status.UNAVAILABLE, "no intraday bars for the session")
-    gap_after = _gap_after(sess.index, max(created, datetime.combine(day, get_profile(c.market).session_open)))
+    gap_after = _gap_after(frame.index, max(created, datetime.combine(day, profile.session_open)))
     if gap_after is not None:
         return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars (missing after {gap_after:%H:%M})")
-    op, hi, lo, cl = (sess[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    op, hi, lo, cl = (frame[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
     if not _all_finite(op, hi, lo, cl):
         return _outcome(c, Status.UNAVAILABLE, "bad price data")
-    last_start = sess.index[-1]
+    last_start = frame.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    k = next((p for p in range(len(sess)) if lo[p] <= c.entry), None)  # BUY LIMIT, as the ticket prints
-    if k is None:
+    trust, qbar = _price_trust(c, bars15) if has_bar0 else ("none", None)
+    if trust == "contradiction":
+        return _contradiction(c, qbar)
+    if model == "plain" and trust != "trusted":
+        model = "resting"  # a price that is not a live quote the bar traded at: never a certain fill
+    if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts
+        return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day)
+    in_win = [profile.no_entry_before <= t.time() <= profile.no_entry_after for t in frame.index]
+    price = c.current_price if trust == "trusted" else None  # an untrusted price is ignored entirely
+    o, ambiguous = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
+                                    incomplete, incomplete_note, skip_containing=False, price=price)
+    if ambiguous and _only_if_it_loses(c, o) is not o:  # an ambiguous containing-bar trigger that would win
+        later, _ = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
+                                    incomplete, incomplete_note, skip_containing=True, price=price)
+        o = _cap_fallback(c, o, later)
+    return o
+
+
+def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool, limit: float, profile, day: date,
+                     session_over: bool, incomplete: bool, incomplete_note: str, *, skip_containing: bool,
+                     price: float | None = None) -> tuple[Outcome, bool]:
+    """(outcome, ambiguous): ambiguous when only the bar containing created_at triggered the fill."""
+    got = None
+    if (has_bar0 and not skip_containing and in_win[0] and price is None
+            and lo[0] >= c.entry and hi[0] <= limit):
+        # no logged price, and the whole containing bar traded inside [trigger, limit]: the order was marketable
+        # whenever it was placed in that bar, a certain fill; at the limit, the worst price in the bar
+        return _exits_after_fill(c, 0, float(limit), c.created_at.isoformat(), op, hi, lo, cl, frame.index,
+                                 session_over, incomplete, incomplete_note, CERTAIN_FILL_NOTE), False
+    if has_bar0 and not skip_containing and in_win[0] and hi[0] >= c.entry and lo[0] <= limit:
+        # the trigger may have come in the containing bar's remainder: fill there (at the trigger, or at the limit
+        # when the whole bar traded above the trigger); only its stop counts, never its target
+        # no logged price: the worst price consistent with the bar (it may have been above the trigger at the
+        # TAKE); a logged price below the trigger: the trigger itself
+        fill0 = min(hi[0], limit) if price is None else (c.entry if lo[0] <= c.entry else limit)
+        got = (0, float(fill0))
+    else:
+        first = 1 if has_bar0 else 0
+        window = [p for p in range(first, len(frame)) if in_win[p]]
+        got = (fills.stop_limit_fill(op, hi, lo, window[0], window[-1], c.entry, limit)  # BUY stop-limit
+               if window else None)
+    if got is None:
         if not session_over:
-            return _outcome(c, Status.OPEN, "limit not reached yet")
+            return _outcome(c, Status.OPEN, "stop-limit not filled yet"), False
         if incomplete:
-            return _outcome(c, Status.UNAVAILABLE, incomplete_note)
-        return _outcome(c, Status.NOT_FILLED, "limit not reached before flat-by")
-    fill = min(op[k], c.entry)
-    fill_at = sess.index[k]
-    if lo[k] <= c.stop:
-        # a bar that opens below the stop fills at its open and is out at that open, never at the higher stop
-        return _finish(c, fill, fill_at, min(op[k], c.stop), fill_at, 0, "stop touched on the fill bar")
-    n = len(sess)
-    res = _walk(op, hi, lo, cl, k + 1, n - 1, c.stop, c.target_1) if k + 1 <= n - 1 else None
-    if res is not None:
-        px, j = res
-        return _finish(c, fill, fill_at, px, sess.index[j], j - k, "")
-    if session_over:
-        if incomplete:
-            return _outcome(c, Status.UNAVAILABLE, incomplete_note)
-        return _finish(c, fill, fill_at, cl[n - 1], sess.index[n - 1], n - 1 - k, "time exit at flat-by")
-    return _outcome(c, Status.OPEN, "holding", fill=float(fill), fill_at=str(fill_at),
-                    mtm=_mtm(c, fill, cl[n - 1]), held=n - 1 - k)
+            return _outcome(c, Status.UNAVAILABLE, incomplete_note), False
+        return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing else
+                        f"not filled inside the entry window (cancel by {cal.entry_cancel_by(profile, day):%H:%M})"), False
+    k, fill = got
+    ambiguous = has_bar0 and k == 0  # only the bar containing created_at triggered it
+    fill_at = c.created_at.isoformat() if ambiguous else str(frame.index[k])
+    return _exits_after_fill(c, k, float(fill), fill_at, op, hi, lo, cl, frame.index, session_over, incomplete,
+                             incomplete_note, ""), ambiguous
 
 
 # ---------------------------------------------------------------- statistics
@@ -517,7 +809,7 @@ def _mean(xs: list[float]) -> float | None:
     return float(np.mean(xs)) if xs else None
 
 
-def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: int) -> ScoreStats:
+def _stats(record: str, market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: int) -> ScoreStats:
     resolved = sorted((o for o in outs if o.status in (Status.WON, Status.LOST, Status.TIME)
                        and o.realised_r is not None), key=lambda o: o.candidate.created_at)
     rs = np.array([o.realised_r for o in resolved], dtype=float)
@@ -530,7 +822,7 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
     if n == 0:
         return ScoreStats(market, mode, 0, 0, None, None, mean_pred_mc, _mean(hist), _mean(gaps), None, None,
                           None, (), count(Status.NOT_FILLED), count(Status.OPEN), count(Status.UNAVAILABLE),
-                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0), None)
+                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0), None, record)
     rng = np.random.default_rng(seed)
     means = rng.choice(rs, size=(resamples, n), replace=True).mean(axis=1)
     ci_low, ci_high = (float(x) for x in np.percentile(means, [2.5, 97.5]))
@@ -543,12 +835,16 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
                       ci_low, ci_high, dd, tuple(float(x) for x in cum), count(Status.NOT_FILLED),
                       count(Status.OPEN), count(Status.UNAVAILABLE),
                       _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r, len(mc), count(Status.UNAVAILABLE)),
-                      len(mc) / n)
+                      len(mc) / n, record)
 
 
 def summarize(outcomes: Iterable[Outcome], *, seed: int = 19, resamples: int = 2000) -> list[ScoreStats]:
-    groups: dict[tuple[str, Mode], list[Outcome]] = {}
+    """Stats per (record, market, mode), desk picks first: a record's trades are never pooled with another's."""
+    groups: dict[tuple[str, str, Mode], list[Outcome]] = {}
     for o in outcomes:
-        groups.setdefault((o.candidate.market, o.candidate.mode), []).append(o)
-    return [_stats(m, md, groups[(m, md)], seed, resamples)
-            for m, md in sorted(groups, key=lambda k: (k[0], k[1].value))]
+        c = o.candidate
+        groups.setdefault((c.record, c.market, c.mode), []).append(o)
+    order = list(RECORD_LABELS)
+    return [_stats(r, m, md, groups[(r, m, md)], seed, resamples)
+            for r, m, md in sorted(groups, key=lambda k: (order.index(k[0]) if k[0] in order else len(order),
+                                                          k[0], k[1], k[2].value))]

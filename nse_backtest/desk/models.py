@@ -1,7 +1,7 @@
 """Desk data models and enums."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 
@@ -48,6 +48,7 @@ class TradePlan:
     last_close: float
     last_bar: str  # ISO timestamp of last bar used
     stop_basis: str  # "2×ATR" | "10-bar swing low" | "1×ATR floor" | "user" | "opening-range mid"
+    entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (swing: None)
 
     @property
     def risk_per_share(self) -> float:
@@ -67,6 +68,7 @@ class Sizing:
     costs: float
     size_halved: bool
     note: str
+    spread_per_side: float = 0.00075  # the bid-ask spread per side the sizer costed (costs.DEFAULT_SPREAD by default)
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,14 @@ class Odds:
     noise_expectancy_min: float | None
     noise_expectancy_max: float | None
     noise_negative_frac: float | None
+    # Per-replay R of the Monte Carlo (capped at timemachine.MC_RS_CAP). Bulky and derived: kept out of the
+    # input hash, the audit row and --json output (see summary_fields).
+    mc_rs: tuple[float, ...] = field(default=(), metadata={"serialize": False})
+
+
+def summary_fields(x) -> dict:
+    """A dataclass's fields as a shallow dict, without those marked ``metadata={"serialize": False}``."""
+    return {f.name: getattr(x, f.name) for f in fields(x) if f.metadata.get("serialize", True)}
 
 
 @dataclass(frozen=True)
@@ -119,6 +129,8 @@ class DeskVerdict:
     input_hash: str
     created_at: str
     cost_per_share: float | None = None  # per-share round-trip cost the odds used (None: no odds computed)
+    quote_live: bool | None = None  # True: current_price is a fresh live quote (<= 5 min old, same session)
+    quote_as_of: str | None = None  # the quote's own time (ISO, market tz); None without a quote
 
     def blocks(self) -> list[Check]:
         return [c for c in self.checks if c.status is Status.BLOCK]

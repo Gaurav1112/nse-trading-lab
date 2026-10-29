@@ -33,12 +33,16 @@ cd /Users/racit/PersonalProject/nse-trading-lab
 4. Build **Today's Plan**. Read the TAKE cards' checks: every WARN is something to confirm by hand.
    A "Price is the last close" WARN means the live price was not available — confirm it in your broker.
 5. Put WATCH triggers in as broker alerts, not orders. A WAIT is not a TAKE.
-6. For any stock you like, use **Check a Trade**. Type the ticket into your broker yourself; the desk
-   places nothing.
+6. Open **Choose a Trade** (the first tab). It lists every candidate with its max loss and profit at T1.
+   Pick one and read the money first: max loss, profit at T1 and T2. A WAIT or SKIP shows no ticket
+   unless you tick "I choose this anyway", and that choice is logged as your override. For any other
+   stock, use **Check a Trade**. Type the ticket into your broker yourself; the desk places nothing.
+   Intraday entries are stop-limit orders: cancel the entry if it is not filled by the time on the ticket.
 7. After the close, log every closed trade (with entry and exit dates) in the journal so the daily-loss,
    stop-out streak and PDT checks stay accurate.
 8. Once a week, open the **Scoreboard** tab (or run `python3.13 -m nse_backtest.desk scoreboard`) and
-   read the verdict. It replays the desk's own logged TAKEs, not your real trades. Until it says
+   read the verdict. It replays the desk's own logged TAKEs ("Desk picks") and, separately, the trades you chose
+   against its advice ("Your overrides"), not your real trades. Until it says
    "Matching the odds" on 30+ resolved trades, keep paper-trading. Do not delete
    `~/.nse-trading-lab/desk_scoreboard.json`: intraday results older than about 60 days live only there.
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,13 +24,33 @@ from .verdict import decide
 log = logging.getLogger(__name__)
 
 
+QUOTE_MAX_AGE = timedelta(minutes=5)
+
+
+def _quote_fields(quote: LiveQuote | None, created: datetime, used_at: datetime | None, profile) -> dict:
+    """quote_live and quote_as_of for the verdict. Live = the quote is from created_at's market session (same
+    market date, at or after the open) and at most 5 minutes old when used."""
+    if quote is None or not isinstance(quote.as_of, datetime) or quote.as_of.tzinfo is None:
+        return {"quote_live": False, "quote_as_of": None}
+    tz = ZoneInfo(profile.tz)
+    as_of = quote.as_of.astimezone(tz)
+    made = created.astimezone(tz) if created.tzinfo is not None else created.replace(tzinfo=tz)
+    used = (used_at or datetime.now(tz)).astimezone(tz)
+    age = used - as_of
+    live = (as_of.date() == made.date() and as_of.time() >= profile.session_open
+            and timedelta(minutes=-1) <= age <= QUOTE_MAX_AGE)
+    return {"quote_live": live, "quote_as_of": as_of.isoformat()}
+
+
 def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mode, limits: Limits,
                 ctx: CheckContext, *, entry: float | None = None, stop: float | None = None,
                 target: float | None = None, robustness: bool = True, replays: int = 10_000,
                 audit: bool = True, audit_path: Path | None = None,
-                quote: LiveQuote | None = None) -> DeskVerdict:
+                quote: LiveQuote | None = None, used_at: datetime | None = None) -> DeskVerdict:
     """`quote` is the live price; without one the verdict uses the plan's last close and the
-    live_price check WARNs. The context's live-price fields always follow `quote`, never the caller."""
+    live_price check WARNs. The context's live-price fields always follow `quote`, never the caller.
+    `used_at` (default: the wall clock) is when the quote is used: the verdict's quote_live is True only for a
+    quote from created_at's session at most 5 minutes old then (the scoreboard trusts the price only then)."""
     plan = build_plan(df, symbol, mode, profile, entry=entry, stop=stop, target=target)
     ctx = replace(ctx, price_is_live=quote is not None, quote_as_of=quote.as_of if quote is not None else None)
     current_price = quote.price if quote is not None else plan.last_close
@@ -43,7 +65,8 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
         log.warning("odds could not be computed for %s: %s", symbol, e)
         odds = None
     checks = run_checks(plan, sizing, odds, ctx, current_price=current_price)
-    v = replace(decide(plan, sizing, odds, checks, profile, current_price, ctx.now), cost_per_share=cps)
+    v = replace(decide(plan, sizing, odds, checks, profile, current_price, ctx.now), cost_per_share=cps,
+                **_quote_fields(quote, ctx.now, used_at, profile))
     if audit:
         append_verdict(v, audit_path if audit_path is not None else data_dir() / "desk_audit.jsonl")
     return v

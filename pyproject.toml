@@ -14,19 +14,20 @@ authors = [{ name = "NSE Trading Lab" }]
 # requirements.txt for deploys (Streamlit Cloud) but ``pip install -e .`` and
 # downstream packagers use these. Drift causes non-reproducible installs.
 dependencies = [
-    "yfinance>=0.2.40,<0.3",
-    "pandas>=2.1,<2.4",
+    "yfinance>=1.4,<2",
+    "pandas>=3.0,<4",
     "numpy>=1.24,<3",
     "matplotlib>=3.7,<4",
     "ta>=0.11.0,<0.12",
-    "streamlit>=1.32,<2",
-    "pyarrow>=14,<22",
+    "streamlit>=1.37,<2",
+    "pyarrow>=14.0.1,<25",
     "plotly>=5.18,<7",
     "fyers-apiv3>=3.1.7,<4",
+    "requests>=2.31,<3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0,<9", "pytest-cov>=5.0,<6"]
+dev = ["pytest>=8.0,<10", "pytest-cov>=5.0,<6"]
 
 [project.scripts]
 nse-lab = "app:main"

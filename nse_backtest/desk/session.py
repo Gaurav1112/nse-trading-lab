@@ -21,7 +21,7 @@ from . import scoreboard_io
 from .audit import data_dir
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
-from .models import DeskVerdict, Limits, Mode
+from .models import Action, DeskVerdict, Limits, Mode
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 
@@ -186,7 +186,8 @@ def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: 
 
 def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLVE,
                  on_warning: Warn = None) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
-    """Opening-range scan over 15m frames; (verdicts, failures) with load failures included."""
+    """Opening-range scan over 15m frames; (verdicts, failures) with load failures included. Every TAKE is
+    logged to the audit log, so the scoreboard scores it."""
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, regime=regime)
@@ -204,8 +205,32 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
                                     today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now, profile))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
-    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)
+    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes,
+                                  audit_path=data_dir() / scoreboard_io.AUDIT_FILE)  # scan TAKEs are scored
     return verdicts, load_failures + list(failures)
+
+
+def _expectancy(v: DeskVerdict) -> float | None:
+    e = v.odds.mc_expectancy_r if v.odds is not None else None
+    return e if isinstance(e, (int, float)) and e == e and abs(e) != float("inf") else None
+
+
+def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = ()) -> list[DeskVerdict]:
+    """Every verdict from the daily plan (TAKE and WATCH) and the intraday scan, one per (symbol, mode) (the first
+    seen wins), TAKE first, then by Monte Carlo expectancy (highest first; no odds last). The plan's skipped
+    symbols are (symbol, reason) only and are left to the caller."""
+    seen: set = set()
+    out: list[DeskVerdict] = []
+    for v in [*((plan.take + plan.watch) if plan is not None else ()), *scan_verdicts]:
+        k = (v.plan.symbol, v.plan.mode)
+        if k not in seen:
+            seen.add(k)
+            out.append(v)
+
+    def order(v: DeskVerdict):
+        e = _expectancy(v)
+        return (v.action is not Action.TAKE, e is None, -(e or 0.0))
+    return sorted(out, key=order)
 
 
 def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,

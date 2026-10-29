@@ -121,7 +121,7 @@ def iplan():
     return TradePlan("X", "NSE", Mode.INTRADAY, 102.0, 100.0, 105.0, 108.0, 1.0, 20, 102.0, "x", "opening-range mid")
 
 
-FLAT = (100, 101, 99, 100)
+FLAT = (100, 100.9, 99, 100)  # just under the 101 OR high: a stop at 101 triggers on High >= 101
 
 
 def test_intraday_breakout_after_no_entry_window_is_no_trade():
@@ -153,11 +153,18 @@ def test_intraday_session_without_open_bar_is_skipped():
 
 
 def test_intraday_degenerate_zero_range_open_is_skipped():
-    wide = [(f"{h:02d}:{m:02d}", *(100, 101, 99, 100)) for h, m in
-            [(9, 15), (9, 30), (9, 45), (10, 0), (10, 15), (10, 30), (10, 45), (11, 0), (11, 15), (11, 30)]]
+    wide = [("09:15", 100, 101, 99, 100)] + [(f"{h:02d}:{m:02d}", *FLAT) for h, m in
+            [(9, 30), (9, 45), (10, 0), (10, 15), (10, 30), (10, 45), (11, 0), (11, 15), (11, 30)]]
     bad = [("09:15", 100, 100, 100, 100), ("09:30", 100, 100.1, 100, 100.05), ("09:45", 100.05, 100.2, 100.0, 100.1)]
     df = intraday_frame(("2026-10-26", wide), ("2026-10-27", bad))
     assert setup_history(df, iplan()) == []
+
+
+def test_intraday_tiny_risk_below_a_tenth_of_atr_is_skipped():
+    wide = [("09:15", 100, 101, 99, 100)] + [(f"{h:02d}:{m:02d}", *FLAT) for h, m in
+            [(9, 30), (9, 45), (10, 0), (10, 15), (10, 30), (10, 45), (11, 0), (11, 15), (11, 30)]]
+    tiny = [("09:15", 100, 100.1, 100, 100.05), ("09:30", 100.05, 100.3, 100.0, 100.2)]  # fill 100.1, R = 0.05
+    assert setup_history(intraday_frame(("2026-10-26", wide), ("2026-10-27", tiny)), iplan()) == []
 
 
 def test_swing_risk_guard_keeps_normal_uptrend_trades():
@@ -244,10 +251,30 @@ def test_a9_breakout_is_first_window_bar_whose_high_clears_or_high():
     assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]  # T = 101 + 1.5
 
 
-def test_a9_gap_above_or_high_fills_at_open():
+def test_c1_gap_above_the_stop_limit_that_never_returns_is_no_trade():
+    # OR 99-101: stop 100, limit 101 + min(0.25 x 1, 0.5% x 101) = 101.25; price never trades back to it
     bars = [("09:15", 100, 101, 99, 100), ("09:30", 102, 102.2, 101.8, 102.1), ("09:45", 102.1, 106, 102, 105)]
-    # fill 102, stop 100, R = 2, target 105
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == []
+
+
+def test_c1_gap_above_the_stop_limit_fills_at_the_limit_when_price_returns():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 102, 102.2, 101.8, 102.1),
+            ("09:45", 101.6, 101.7, 101.2, 101.5), ("10:00", 101.3, 104, 101.2, 103.5)]
+    # filled at 101.25 on 09:45 (R = 1.25, target 103.125), target hit on 10:00
     assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]
+
+
+def test_c1_open_inside_the_limit_fills_at_open():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 101.2, 101.5, 101.1, 101.4), ("09:45", 101.4, 104, 101.3, 103.5)]
+    # fill 101.2 (between trigger 101 and limit 101.25), R = 1.2, target 103
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]
+
+
+def test_c1_fill_bar_stop_exits_at_the_stop_even_when_the_bar_opened_below_it():
+    # 09:30 opens 99.6 (below the stop 100), trades up through 101 (filled at 101), then back down to the stop:
+    # the stop order exists only after the fill, so it fills at the stop, never at the earlier open
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 99.6, 101.1, 99.5, 100.2), ("09:45", 100.2, 104, 100.1, 103.5)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(-1.0)]
 
 
 def test_a9_breakout_bar_touching_stop_is_a_stop_out():

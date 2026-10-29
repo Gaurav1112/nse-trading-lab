@@ -21,6 +21,7 @@ class MarketProfile:
     exchange: str  # "NS" for NSE, "" for US (fetch_nse exchange arg)
     min_turnover: float  # local currency, 20d median Close*Volume
     has_ban_list: bool
+    tick: float  # minimum price step (stop-limit prices are rounded to it)
 
     def yf_symbol(self, symbol: str) -> str:
         s = symbol.strip().upper()
@@ -41,9 +42,9 @@ class MarketProfile:
 
 
 NSE = MarketProfile("NSE", "₹", "Asia/Kolkata", time(9, 15), time(15, 30), time(9, 30),
-                    time(14, 30), time(15, 15), "^NSEI", "NS", 5e7, True)
+                    time(14, 30), time(15, 15), "^NSEI", "NS", 5e7, True, 0.05)
 US = MarketProfile("US", "$", "America/New_York", time(9, 30), time(16, 0), time(9, 45),
-                   time(15, 0), time(15, 55), "^GSPC", "", 2e7, False)
+                   time(15, 0), time(15, 55), "^GSPC", "", 2e7, False, 0.01)
 
 _PROFILES = {"NSE": NSE, "US": US}
 
