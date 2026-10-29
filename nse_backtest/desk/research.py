@@ -33,12 +33,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .textsafe import scrub
+
 DEFAULT_TIMEOUT = 10.0
 _US_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")  # same rule as news.py validate_ticker
 _SKILLS = Path(__file__).resolve().parents[2] / ".claude" / "skills"
 NEWS_PY = _SKILLS / "trader-news" / "news.py"
 FACTS_PY = _SKILLS / "trader-analyst" / "facts.py"
-_PATH_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"]*|(?<![\w.])(?:[A-Za-z]:)?[\\/][^\s'\"]*")
+MAX_STDOUT_BYTES = 2_000_000  # more than this from a skill script is refused, not parsed
 
 
 @dataclass(frozen=True)
@@ -62,12 +64,9 @@ class Unavailable:
     reason: str
 
 
-def _scrub(text: str) -> str:
-    """Drop directories from any path in text; keep file names."""
-    def one(m: re.Match) -> str:
-        t = m.group(0)
-        return t if "://" in t else re.split(r"[\\/]", t.rstrip("/\\"))[-1]
-    return _PATH_RE.sub(one, text)[:200]
+def _clean(text: str) -> str:
+    """A skill's message without directories (file names kept; http(s) URLs whole), at most 200 characters."""
+    return scrub(text, limit=200)
 
 
 _ENV_KEYS = ("PATH", "HOME", "SEC_USER_AGENT")
@@ -87,7 +86,9 @@ def run_skill(script: Path, args: list[str], *, timeout: float = DEFAULT_TIMEOUT
     except subprocess.TimeoutExpired:
         return Unavailable(f"timed out after {timeout:g}s")
     except OSError as e:
-        return Unavailable(_scrub(f"{script.name} could not start: {e.strerror or type(e).__name__}"))
+        return Unavailable(_clean(f"{script.name} could not start: {e.strerror or type(e).__name__}"))
+    if len(proc.stdout.encode("utf-8", "replace")) > MAX_STDOUT_BYTES:
+        return Unavailable("output too large")
     try:
         data = json.loads(proc.stdout)
     except ValueError:
@@ -97,7 +98,7 @@ def run_skill(script: Path, args: list[str], *, timeout: float = DEFAULT_TIMEOUT
         return data if isinstance(data, dict) else {"results": data}
     if proc.returncode != 0:
         lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
-        return Unavailable(_scrub(lines[-1].strip()) if lines else f"{script.name} exited {proc.returncode}")
+        return Unavailable(_clean(lines[-1].strip()) if lines else f"{script.name} exited {proc.returncode}")
     return Unavailable("bad output")
 
 
@@ -126,7 +127,7 @@ def us_research(symbol: str, *, runner=run_skill) -> Research | Unavailable:
         prefix = f"headlines for {symbol}:"
         failed = next((str(n) for n in news.get("notes") or [] if str(n).startswith(prefix)), None)
         if failed:
-            news = Unavailable(_scrub(failed))
+            news = Unavailable(_clean(failed))
             headline_failed = True
     if isinstance(news, Unavailable):
         news_err: str | None = news.reason

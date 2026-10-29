@@ -7,6 +7,7 @@ fail    write a path-laden message to stderr and exit 1
 garbage print non-JSON
 empty1  print a JSON object and exit 1 (news.py does this when nothing is new)
 env     print the sorted environment keys and the cwd
+big     print a JSON object just over 2,000,000 bytes
 """
 import json
 import os
@@ -31,3 +32,5 @@ elif mode == "empty1":
     sys.exit(1)
 elif mode == "env":
     print(json.dumps({"env": sorted(os.environ), "cwd": os.getcwd()}))
+elif mode == "big":
+    print(json.dumps({"pad": "x" * 2_000_000}))

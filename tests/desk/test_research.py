@@ -58,16 +58,16 @@ def test_run_skill_env_override_is_filtered(monkeypatch):
 
 
 def test_scrub_colon_glued_path():
-    out = research._scrub("cannot open error:/var/tmp/secret/x.py")
+    from nse_backtest.desk.textsafe import scrub  # F1 D2: research uses the shared helper
+    out = scrub("cannot open error:/var/tmp/secret/x.py")
     assert "x.py" in out and "/var" not in out and "secret" not in out
-    mixed = research._scrub("open error:/var/tmp/secret/x.py via https://data.sec.gov/a/b.json")
+    mixed = scrub("open error:/var/tmp/secret/x.py via https://data.sec.gov/a/b.json")
     assert "https://data.sec.gov/a/b.json" in mixed and "secret" not in mixed
 
 
-def test_scrub_keeps_urls_strips_paths():
-    assert research._scrub("HTTP 404 for https://data.sec.gov/api/x/CIK1.json") == \
-        "HTTP 404 for https://data.sec.gov/api/x/CIK1.json"
-    assert research._scrub("no file /var/tmp/abc/yahoo-ACME.xml") == "no file yahoo-ACME.xml"
+def test_run_skill_output_too_large():
+    """F1 D3: more than 2,000,000 bytes on stdout is refused, not parsed."""
+    assert run_skill(FAKE, ["big"]) == Unavailable("output too large")
 
 
 def test_run_skill_missing_script():
@@ -221,15 +221,17 @@ def test_isolation_no_desk_module_imports_research():
 
 
 def test_research_imports_only_markets_from_desk():
+    # F1 D2: textsafe (pure display helpers, no desk logic) is the one other desk module research may use
+    ok = ("markets", "textsafe")
     tree = ast.parse((DESK / "research.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if node.level:
-                assert mod in ("markets", "") and all(a.name == "markets" for a in node.names) or mod == "markets"
+                assert mod in ok or (mod == "" and all(a.name in ok for a in node.names))
             elif mod.startswith("nse_backtest.desk"):
-                assert mod == "nse_backtest.desk.markets" or (
-                    mod == "nse_backtest.desk" and all(a.name == "markets" for a in node.names))
+                assert mod in tuple(f"nse_backtest.desk.{m}" for m in ok) or (
+                    mod == "nse_backtest.desk" and all(a.name in ok for a in node.names))
         elif isinstance(node, ast.Import):
             assert not any(a.name.startswith("nse_backtest.desk") for a in node.names)
 

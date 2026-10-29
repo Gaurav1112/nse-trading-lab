@@ -79,7 +79,8 @@ def test_choose_tab_lists_scan_failures_under_the_table(monkeypatch, tmp_path):
     at = _page(monkeypatch, tmp_path).run()
     at.button(key="desk_choose_load").click().run()
     assert not at.exception
-    assert any("AAA" in w.value and reason in w.value for w in at.warning)
+    from tests.test_desk_page_smoke import _plain  # F1 D2: reasons are Markdown-escaped on the page
+    assert any("AAA" in w.value and reason in _plain(w.value) for w in at.warning)
 
 
 # ---------------------------------------------------------------- loaders.corporate_actions

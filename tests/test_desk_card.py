@@ -65,7 +65,8 @@ def test_swing_uses_last_120_daily_bars():
 
 def test_markdown_escape_and_url_encoding():
     assert desk_card.md_escape("a*b_[x](y)") == r"a\*b\_\[x\]\(y\)"
-    assert desk_card.safe_url("https://x.test/a(b)c d") == "https://x.test/a%28b%29c%20d"
+    assert desk_card.safe_url("https://x.test/a(b)c") == "https://x.test/a%28b%29c"
+    assert desk_card.safe_url("https://x.test/a(b)c d") is None  # F1 D2: a space (<= 0x20) is rejected
     assert desk_card.safe_url("javascript:alert(1)") is None
 
 

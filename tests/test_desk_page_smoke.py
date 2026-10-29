@@ -115,9 +115,9 @@ def test_positions_error_persists_across_reruns(monkeypatch, tmp_path):
         raise loaders.UserDataError("positions.json is corrupt")
     monkeypatch.setattr(loaders, "load_positions", bad)
     at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
-    assert any("positions.json is corrupt" in e.value for e in at.error)
+    assert any("positions.json is corrupt" in _plain(e.value) for e in at.error)
     at.run()
-    assert any("positions.json is corrupt" in e.value for e in at.error)
+    assert any("positions.json is corrupt" in _plain(e.value) for e in at.error)
     assert not any("No open" in i.value for i in at.info)
 
 
@@ -218,8 +218,14 @@ def test_intraday_scan_cache_key_has_date(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------------- fix round 2
 
+def _plain(text: str) -> str:
+    """Markdown-escaped page text (F1 D2: exception reasons go through textsafe.shown) as the reader sees it."""
+    import re
+    return re.sub(r"\\([\\`*_{}\[\]()#+\-.!|<>~$:])", r"\1", text)
+
+
 def _errors(at):
-    return " | ".join(e.value for e in at.error)
+    return _plain(" | ".join(e.value for e in at.error))
 
 
 def _plan_with(verdicts_watch=(), take=()):
@@ -508,7 +514,7 @@ def _pick(at, prefix):
 
 
 def _texts(els):
-    return " | ".join(e.value for e in els)
+    return _plain(" | ".join(e.value for e in els))
 
 
 def _choose_children(at):
@@ -715,7 +721,8 @@ def test_c7_research_items_and_reasons_are_shown(monkeypatch, tmp_path):
     assert seen == {}  # a success stays cached for 30 minutes
     text = _texts(at.markdown) + _texts(at.caption)
     assert "Dividend 5 per share" in text and "earnings date unknown" in text and "display only" in text.lower()
-    assert r"Q2 \*beats\* \[x\]\(y\)" in text and "(https://e.test/a%281%29)" in text
+    raw = " | ".join(m.value for m in at.markdown)  # the escaping itself, before _texts reads it back
+    assert r"Q2 \*beats\* \[x\]\(y\)" in raw and "(https://e.test/a%281%29)" in raw
 
 
 def test_c7_research_unavailable_result_reason_is_shown(monkeypatch, tmp_path):

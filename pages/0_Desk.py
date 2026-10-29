@@ -26,6 +26,7 @@ from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.positions import review_positions
+from nse_backtest.desk.textsafe import shown
 from nse_backtest.desk.tradecard import build_card
 
 st.set_page_config(page_title="Desk | Trading Lab", page_icon="🧭", layout="wide")
@@ -67,7 +68,7 @@ def _safe(label: str, fn, *args, **kw):
     try:
         return fn(*args, **kw), None
     except Exception as e:  # noqa: BLE001 - every failure must be readable, never a blank page
-        msg = f"{label}: {e}" if str(e) else f"{label}: {type(e).__name__}"
+        msg = f"{label}: {shown(e)}" if str(e) else f"{label}: {type(e).__name__}"
         st.error(msg)
         return None, msg
 
@@ -82,7 +83,7 @@ def _attempt(label: str, fn, *args, **kw) -> dict:
     try:
         return {"ok": fn(*args, **kw)}
     except Exception as e:  # noqa: BLE001 - every failure must be readable, never a blank page
-        return {"error": f"{label}: {e}" if str(e) else f"{label}: {type(e).__name__}"}
+        return {"error": f"{label}: {shown(e)}" if str(e) else f"{label}: {type(e).__name__}"}
 
 
 # ---------------------------------------------------------------- verdict card
@@ -148,7 +149,7 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, 
                 fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
                 st.plotly_chart(fig, width="stretch", key=f"hist_{key}")
             except Exception as e:  # noqa: BLE001
-                st.warning(f"Histogram unavailable: {e}")
+                st.warning(f"Histogram unavailable: {shown(e)}")
 
     st.markdown("**Checks**")
     checks = pd.DataFrame([{"Status": c.status.value, "Check": c.name, "Reason": c.reason} for c in v.checks])
@@ -205,7 +206,7 @@ with st.sidebar:
                 st.success("Saved.")
                 limits, fell_back = session.limits_with_status(profile)
             except Exception as e:  # noqa: BLE001 - validation errors are shown, nothing is saved
-                st.error(f"Not saved: {e}")
+                st.error(f"Not saved: {shown(e)}")
 
 
 # ---------------------------------------------------------------- header: regime
@@ -229,7 +230,7 @@ def _regime_state(profile):
 
 regime_df, tape, regime_err = _regime_state(profile)
 if tape is None:
-    st.warning("Regime unknown — treat as HOSTILE" + (f" ({regime_err})" if regime_err else ""))
+    st.warning("Regime unknown — treat as HOSTILE" + (f" ({shown(regime_err)})" if regime_err else ""))
 else:
     st.markdown(f"<span style='background:{tape.color};color:#000;padding:4px 12px;border-radius:6px;"
                 f"font-weight:700'>{tape.regime}</span> &nbsp; {tape.recommendation}", unsafe_allow_html=True)
@@ -324,9 +325,9 @@ with tab_check:
                                       stop=stop or None, target=target or None, regime=regime_name)
                 cstate = {"ok": v, "at": _now_hhmm(profile)}
             except ValueError as e:
-                cstate = {"error": str(e) or "Invalid input"}
+                cstate = {"error": shown(e) if str(e) else "Invalid input"}
             except Exception as e:  # noqa: BLE001
-                cstate = {"error": f"Check failed: {type(e).__name__}: {e}"}
+                cstate = {"error": f"Check failed: {type(e).__name__}: {shown(e)}"}
         st.session_state[result_key] = cstate  # a failure REPLACES any earlier success
     cstate = st.session_state.get(result_key)
     if cstate is not None:
@@ -414,7 +415,7 @@ with tab_intra:
         if failures:
             with st.expander(f"Not scanned ({len(failures)})"):
                 for s, why in failures:
-                    st.write(f"{s}: {why}")
+                    st.write(f"{s}: {shown(why)}")
     st.caption(DISCLAIMER)
 
 
@@ -468,7 +469,7 @@ def _render_record(stats, outcomes=()) -> None:
 
 def _render_scoreboard(res, profile, warnings=()) -> None:
     for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
-        st.warning(w)
+        st.warning(shown(w))
     if res.rejects:
         k = len(res.rejects)
         st.warning(f"{k} audit line{'s' if k != 1 else ''} could not be read")
@@ -497,9 +498,9 @@ def _render_scoreboard(res, profile, warnings=()) -> None:
             hide_index=True, width="stretch")
     with st.expander(f"Rejected audit lines ({len(res.rejects)})" + (" · cache note" if res.cache_note else "")):
         for ln, why in res.rejects:
-            st.write(f"line {ln}: {why}")
+            st.write(f"line {ln}: {shown(why)}")
         if res.cache_note:
-            st.warning(res.cache_note)
+            st.warning(shown(res.cache_note))
         if not res.rejects and not res.cache_note:
             st.caption("None.")
 
@@ -526,7 +527,7 @@ with tab_score:
         try:
             _render_scoreboard(sstate["ok"], profile, sstate.get("warnings", ()))
         except Exception as e:  # noqa: BLE001 - never a blank tab
-            st.error(f"Could not show the scoreboard: {type(e).__name__}: {e}")
+            st.error(f"Could not show the scoreboard: {type(e).__name__}: {shown(e)}")
     st.caption(DISCLAIMER)
 
 
@@ -558,7 +559,7 @@ def _candidate_row(v: DeskVerdict) -> dict:
 def _warn_scan_failures(istate, have_scan: bool) -> None:
     """Scan symbols that gave no verdict (no bars, or a TAKE withheld because it could not be logged)."""
     for sym, why in (istate["ok"][1] if have_scan else ()):
-        st.warning(f"Intraday {sym}: {why}")
+        st.warning(f"Intraday {sym}: {shown(why)}")
 
 
 def _skipped_row(sym: str, why: str) -> dict:
@@ -584,7 +585,7 @@ def _load_candidates(have_plan: bool, have_scan: bool) -> None:
 
 
 def _render_skipped(sym: str, why: str) -> None:
-    st.error(f"The desk skipped {sym} in today's plan: {why}")
+    st.error(f"The desk skipped {sym} in today's plan: {shown(why)}")
     ck = ("choose_check", market, _today(profile), _limits_key(limits), sym)
     if st.button("Check it", key="desk_choose_checkit"):
         with st.spinner(f"Checking {sym}..."):
@@ -592,7 +593,7 @@ def _render_skipped(sym: str, why: str) -> None:
                 st.session_state[ck] = {"ok": session.run_check(profile, sym, Mode.SWING, limits, regime=regime_name),
                                         "at": _now_hhmm(profile)}
             except Exception as e:  # noqa: BLE001
-                st.session_state[ck] = {"error": f"Check failed: {e or type(e).__name__}"}
+                st.session_state[ck] = {"error": f"Check failed: {shown(e) if str(e) else type(e).__name__}"}
     cst = st.session_state.get(ck)
     if cst is None:
         st.caption("Press Check it to run the full desk check and open the trade card.")
@@ -635,7 +636,7 @@ with tab_choose:
             labels = ([f"{v.action.value} {v.plan.symbol} · {v.plan.mode.value}" for v in verdicts]
                       + [f"SKIP {s} · swing (not checked)" for s, _ in skipped])
         except Exception as e:  # noqa: BLE001 - never a blank tab
-            st.error(f"Could not list the candidates: {type(e).__name__}: {e}")
+            st.error(f"Could not list the candidates: {type(e).__name__}: {shown(e)}")
             rows, labels = [], []
         if not rows:
             st.info("No candidates today — no trade is a valid answer.")
@@ -652,5 +653,5 @@ with tab_choose:
                     else:
                         _render_skipped(*skipped[i - len(verdicts)])
                 except Exception as e:  # noqa: BLE001 - never a blank tab
-                    st.error(f"Could not show the trade card: {type(e).__name__}: {e}")
+                    st.error(f"Could not show the trade card: {type(e).__name__}: {shown(e)}")
     st.caption(DISCLAIMER)

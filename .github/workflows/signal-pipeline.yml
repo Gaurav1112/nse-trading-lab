@@ -5,6 +5,9 @@ on:
     - cron: '*/5 3-10 * * 1-5'
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
   group: signal-pipeline
   cancel-in-progress: false
@@ -21,9 +24,13 @@ jobs:
           DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
         run: |
           # Without the signals repo there is nothing to run: skip cleanly instead of failing every 5 minutes.
-          if [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+          # Exactly one of the two secrets set is a misconfiguration, not "not set up yet": fail loudly.
+          if [ -z "$SIGNALS_REPO_URL" ] && [ -z "$DEPLOY_KEY" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::signal-pipeline skipped: set the SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY secrets to enable it"
+          elif [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::signal-pipeline misconfigured: only one of SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY is set"
+            exit 1
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi

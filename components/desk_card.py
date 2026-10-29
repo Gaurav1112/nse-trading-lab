@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import html
 import math
-import re
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -21,6 +20,7 @@ import streamlit as st
 from nse_backtest.desk import audit, charts, loaders, projections, research, session
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
+from nse_backtest.desk.textsafe import md_escape, safe_url, shown
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
@@ -37,7 +37,8 @@ RECHECK_KEY = "card_recheck"  # (RECHECK_KEY, key, input_hash) -> {"ok": fresh v
 
 
 def _msg(e: Exception) -> str:
-    return str(e) or type(e).__name__
+    """An exception as safe display text: no paths or home directory, no Markdown (textsafe.shown)."""
+    return shown(str(e) or type(e).__name__)
 
 
 def _section(label: str, fn, *args) -> None:
@@ -93,18 +94,6 @@ def stale_reason(v: DeskVerdict, profile, now: datetime) -> str | None:
 def age_line(v: DeskVerdict, profile, now: datetime) -> str:
     t, age = built_at(v, profile), age_minutes(v, profile, now)
     return "built at an unknown time" if t is None else f"built {t:%H:%M} ({age} min ago)"
-
-def md_escape(text) -> str:
-    """Backslash-escape Markdown punctuation so fetched text is shown as text, never as links or formatting."""
-    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~])", r"\\\1", str(text))
-
-
-def safe_url(url) -> str | None:
-    """http(s) URLs only, with the characters that end a Markdown link target percent-encoded."""
-    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
-        return None
-    return url.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
-
 
 def session_returns(bars) -> np.ndarray:
     """Within-session log returns of the Close: each session's first bar starts fresh, so no overnight gap."""
@@ -167,8 +156,8 @@ def _research(profile, sym: str):
         acts = loaders.corporate_actions(profile, sym)
         earnings = loaders.next_earnings(profile, sym)[0]
         return research.nse_research(sym, earnings=earnings, actions=acts)
-    except Exception as e:  # noqa: BLE001 - shown on the panel as the reason
-        return research.Unavailable(_msg(e))
+    except Exception as e:  # noqa: BLE001 - shown on the panel as the reason (escaped when shown)
+        return research.Unavailable(str(e) or type(e).__name__)
 
 
 # ---------------------------------------------------------------- sections
@@ -386,7 +375,7 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
         failed = isinstance(hit["res"], research.Unavailable)
         fresh = not failed
     if failed:
-        st.warning(f"Research unavailable: {hit['res'].reason} — press the button to try again.")
+        st.warning(f"Research unavailable: {shown(hit['res'].reason)} — press the button to try again.")
         return
     if not fresh:
         st.caption("Press the button to fetch (it can take ~20 seconds). Cached for 30 minutes.")
@@ -400,7 +389,7 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
         text = f"[{title}]({url})" if url else title
         st.markdown(f"- **{md_escape(it.kind)}** {md_escape(it.when or '')} — {text}")
     for n in res.notes:
-        st.caption(md_escape(n))
+        st.caption(shown(n))
 
 
 # ---------------------------------------------------------------- entry point

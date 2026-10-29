@@ -177,3 +177,47 @@ def test_b2_choose_table_has_a_built_column(monkeypatch, tmp_path):
     import re
     assert all(re.fullmatch(r"\d\d:\d\d", x) for x in df["Built"].iloc[:4])
     assert df[df["Symbol"] == "ZZZ"].iloc[0]["Built"] == "—"
+
+
+# ---------------------------------------------------------------- D2: safe error text on the card and page
+
+def _raw(els) -> str:
+    return " | ".join(e.value for e in els)
+
+
+def test_d2_card_errors_never_show_the_home_dir_or_markdown(monkeypatch, tmp_path):
+    from pathlib import Path
+    from nse_backtest.desk import audit, loaders
+    from nse_backtest.desk.models import Action, Check, Status
+    home = str(Path.home())
+    v = replace(_base(monkeypatch, tmp_path), action=Action.SKIP, checks=(Check("gap", Status.BLOCK, "wide"),))
+    at, _ = _card_page(monkeypatch, tmp_path, v)
+
+    def bad_override(*a, **k):
+        raise PermissionError(13, "Permission denied", f"{home}/.nse-trading-lab/desk_audit.jsonl")
+    monkeypatch.setattr(audit, "append_override", bad_override)
+    monkeypatch.setattr(loaders, "corporate_actions", lambda p, s: (_ for _ in ()).throw(
+        OSError(f"cache at file://{home}/x/cache.db is [locked](https://evil.test) for $5B")))
+    next(c for c in at.checkbox if c.label == "I choose this anyway").check().run()
+    next(b for b in at.button if b.label == "Load news & earnings").click().run()
+    raw, read = _raw(at.error) + _raw(at.warning), _texts(at.error) + _texts(at.warning)
+    assert "Override NOT logged" in read and "desk_audit.jsonl" in read
+    assert "Research unavailable" in read and "cache.db" in read
+    assert home not in read and home not in raw
+    assert "](https://evil.test)" not in raw and r"\$5B" in raw  # shown as text, never as a link or maths
+
+
+def test_d2_check_failed_text_is_scrubbed(monkeypatch, tmp_path):
+    from pathlib import Path
+    from nse_backtest.desk import session
+    home = str(Path.home())
+    _patch_ok(monkeypatch, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError(f"bars cache {home}/data/abc.parquet unreadable")
+    monkeypatch.setattr(session, "run_check", boom)
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.button(key="desk_check").click().run()
+    err = _texts(at.error)
+    assert "Check failed" in err and "abc.parquet" in err and home not in err and home not in _raw(at.error)

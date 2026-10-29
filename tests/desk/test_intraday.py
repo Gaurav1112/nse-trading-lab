@@ -97,3 +97,18 @@ def test_orb_scan_oserror_while_logging_a_take_is_that_symbols_failure(tmp_path,
     assert calls == ["AAA"] and [v.plan.symbol for v in verdicts] == ["CCC"]
     assert failures == [("AAA", "desk said TAKE but it could not be recorded (OSError: read-only filesystem), "
                                 "so it is withheld — fix the audit log and rescan")]
+
+
+def test_withheld_reason_never_shows_the_home_directory(tmp_path, monkeypatch):
+    """F1 D2: the withheld TAKE's reason is scrubbed (file name only)."""
+    from pathlib import Path
+    monkeypatch.setattr(intraday, "check_trade", _fake_check({"AAA": Action.TAKE}, []))
+    home = str(Path.home())
+
+    def append(v, path):
+        raise PermissionError(13, "Permission denied", f"{home}/.nse-trading-lab/desk_audit.jsonl")
+    monkeypatch.setattr(intraday, "append_verdict", append)
+    _, failures = intraday.orb_scan(NSE, {"AAA": pd.DataFrame()}, Limits(capital=100_000), ctx(),
+                                    audit_path=tmp_path / "a.jsonl")
+    (sym, why), = failures
+    assert sym == "AAA" and home not in why and "desk_audit.jsonl" in why and "withheld" in why
