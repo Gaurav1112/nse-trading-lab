@@ -39,8 +39,9 @@ only there.
 for a fill at the trigger), profit at T1 and T2, reward:risk and expected value for the quantity (the desk's, or `--qty N`; limit breaches are listed). If the desk sized 0 shares it shows the
 per-share figures and asks for `--qty`. `--choose` only on the user's explicit say-so: it prints the
 override ticket for a WAIT or SKIP and logs it as the user's override (scored apart from the desk's
-picks). It does nothing for a TAKE. Intraday tickets are stop-limit orders with a "cancel the entry if not
-filled by" time; relay that line.
+picks). It does nothing for a TAKE. Intraday tickets are stop-limit orders (a plain limit at the same limit price
+when the price is already at or above the trigger) with a "cancel the entry if not filled by" time; relay
+that line.
 
 Rules for Claude:
 - When presenting a trade, give the money first: max loss, then profit at T1 and T2 (and say a gap can

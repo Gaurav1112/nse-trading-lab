@@ -130,7 +130,7 @@ def test_intraday_not_filled_and_open():
     above_limit = _session({}, idle=(101, 101.5, 100.6, 101))  # C1: triggered above the 100.5 limit, never back
     for bars in (never_triggered, above_limit):
         o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-        assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
+        assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:45)"
         assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
 
 
@@ -815,7 +815,7 @@ def test_audit_writes_entry_limit(tmp_path):
 def test_intraday_trigger_after_the_entry_window_is_not_filled():
     late = _session({"14:45": (100.1, 100.4, 100.0, 100.3), "15:00": (100.3, 103.5, 100.2, 103)})
     o = resolve_intraday(_ic(), late, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
+    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:45)"
 
 
 def test_intraday_resting_limit_back_after_the_entry_window_is_not_filled():
@@ -823,7 +823,7 @@ def test_intraday_resting_limit_back_after_the_entry_window_is_not_filled():
     bars = _session({"14:15": (101, 101.5, 100.8, 101), "14:30": (101, 101.4, 100.7, 101),
                      "14:45": (100.6, 100.7, 100.2, 100.4)}, idle=(99, 99.5, 98.9, 99.2))
     o = resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
+    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:45)"
     inside = _session({"14:15": (101, 101.5, 100.8, 101), "14:30": (100.6, 100.7, 100.2, 100.4)})
     o = resolve_intraday(_ic(), inside, flat_by=time(15, 15), now=NOW)
     assert o.fill_price == pytest.approx(100.5) and o.fill_at.startswith("2026-10-27 14:30")

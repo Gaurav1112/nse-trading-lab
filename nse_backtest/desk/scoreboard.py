@@ -505,7 +505,7 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
         if incomplete:
             return _outcome(c, Status.UNAVAILABLE, incomplete_note)
         return _outcome(c, Status.NOT_FILLED,
-                        f"not filled inside the entry window (cancel by {profile.no_entry_after:%H:%M})")
+                        f"not filled inside the entry window (cancel by {cal.entry_cancel_by(profile, day):%H:%M})")
     k, fill = got
     fill_at = sess.index[k]
     if lo[k] <= c.stop:  # the stop order exists only after the fill: out at the stop, not at this bar's Open

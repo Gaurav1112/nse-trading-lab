@@ -7,7 +7,7 @@ from .costs import round_trip_cost
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Limits, Mode, Sizing, Status
 from .sizing import loss_at_stop, worst_entry
-from .verdict import ticket_lines
+from .verdict import market_day, ticket_lines
 
 GAP_NOTE = "A gap through the stop can lose more than this."
 DAILY_LOSS_NOTE = ("The daily-loss line compares this trade alone with the daily loss limit; losses already taken "
@@ -114,5 +114,6 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
         profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
         expected_value=ev, notional=notional,
         pct_capital_at_risk=risk_pct, pct_capital_deployed=deployed_pct, breaches=breaches,
-        ticket=ticket_lines(plan, sizing, profile) if shown else (),
+        ticket=(ticket_lines(plan, sizing, profile, current_price=v.current_price,
+                             day=market_day(v.created_at, profile)) if shown else ()),
         ticket_header=(f"YOUR OVERRIDE — the desk said {v.action.value}" if shown and not taken else ""))

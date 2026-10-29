@@ -67,3 +67,9 @@ def test_markdown_escape_and_url_encoding():
     assert desk_card.md_escape("a*b_[x](y)") == r"a\*b\_\[x\]\(y\)"
     assert desk_card.safe_url("https://x.test/a(b)c d") == "https://x.test/a%28b%29c%20d"
     assert desk_card.safe_url("javascript:alert(1)") is None
+
+
+def test_f1_c2_bars_left_uses_the_early_close_flat_by():
+    from nse_backtest.desk.markets import US
+    assert desk_card.bars_left(pd.Timestamp("2026-11-27 12:00"), US) == 2  # flat by 12:45: 12:15, 12:30
+    assert desk_card.bars_left(pd.Timestamp("2026-11-25 12:00"), US) == 15  # a normal day: flat by 15:55

@@ -42,11 +42,12 @@ def test_us_and_intraday_tickets():
     us = ticket_lines(replace(P, market="US"), S, US)
     assert us == ("BUY 250 ABC LIMIT 100.00 — bracket: stop-loss 98.00, take-profit 103.00, GTC",)
     mis = ticket_lines(PI, S, NSE)  # C1: the intraday entry is a stop-limit (SL) order
-    assert mis == ("BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "Cancel the entry if not filled by 14:30 IST",
+    # F1 C2: cancel at the end of the last entry bar (14:30 + 15 min; US 15:00 + 15 min)
+    assert mis == ("BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "Cancel the entry if not filled by 14:45 IST",
                    "SL-M SELL 250 ABC trigger 98.00", "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")
     us_mis = ticket_lines(replace(PI, market="US"), S, US)
     assert us_mis == ("BUY 250 ABC STOP-LIMIT stop 100.00 limit 100.50 — bracket: stop-loss 98.00, "
-                      "take-profit 103.00, DAY", "Cancel the entry if not filled by 15:00 ET", "Flat by 15:55 ET")
+                      "take-profit 103.00, DAY", "Cancel the entry if not filled by 15:15 ET", "Flat by 15:55 ET")
     # a plan built without a limit price gets the same formula (entry 100, stop 98, NSE tick)
     assert ticket_lines(replace(P, mode=Mode.INTRADAY), S, NSE)[0] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
 
@@ -158,3 +159,56 @@ def test_a5_live_price_below_stop_blocks_trade():
     v = check_trade(df, "ABC", NSE, Mode.SWING, Limits(capital=100_000), _ctx_ok(), replays=300,
                     robustness=False, audit=False, quote=_quote(1.0))
     assert v.action is Action.SKIP and "live_price" in [c.name for c in v.blocks()]
+
+
+# ---------------------------------------------------------------- F1 C: ticket correctness
+
+from datetime import date  # noqa: E402
+
+UPI = replace(PI, market="US")
+
+
+def test_c1_nse_price_at_or_above_trigger_is_a_plain_limit_at_the_limit_price():
+    """Kite rejects an SL buy whose trigger is below the last traded price."""
+    above = ticket_lines(PI, S, NSE, current_price=100.2, day=date(2026, 10, 29))
+    assert above[0] == "BUY 250 ABC MIS LIMIT 100.50"
+    assert ticket_lines(PI, S, NSE, current_price=100.0, day=date(2026, 10, 29))[0] == "BUY 250 ABC MIS LIMIT 100.50"
+    below = ticket_lines(PI, S, NSE, current_price=99.9, day=date(2026, 10, 29))
+    assert below[0] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
+    assert above[1:] == below[1:]
+
+
+def test_c1_us_price_at_or_above_trigger_is_a_limit_bracket():
+    above = ticket_lines(UPI, S, US, current_price=100.3, day=date(2026, 10, 29))
+    assert above[0] == "BUY 250 ABC LIMIT 100.50 — bracket: stop-loss 98.00, take-profit 103.00, DAY"
+    below = ticket_lines(UPI, S, US, current_price=99.0, day=date(2026, 10, 29))
+    assert below[0] == ("BUY 250 ABC STOP-LIMIT stop 100.00 limit 100.50 — bracket: stop-loss 98.00, "
+                        "take-profit 103.00, DAY")
+
+
+def test_c1_decide_and_card_and_override_use_the_current_price():
+    from nse_backtest.desk.tradecard import build_card
+    take = decide(PI, S, None, OK, NSE, 100.2, NOW)
+    assert take.action is Action.TAKE and take.ticket[0] == "BUY 250 ABC MIS LIMIT 100.50"
+    assert build_card(take, NSE, Limits(capital=1_000_000)).ticket[0] == "BUY 250 ABC MIS LIMIT 100.50"
+    wait = decide(PI, S, None, OK, NSE, 99.0, NOW)  # below the trigger: the conditional ticket is the stop-limit
+    assert wait.ticket[1] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
+    skip = replace(take, action=Action.SKIP)
+    over = build_card(skip, NSE, Limits(capital=1_000_000), override_confirmed=True)
+    assert over.ticket[0] == "BUY 250 ABC MIS LIMIT 100.50"
+    assert build_card(replace(skip, current_price=99.5), NSE, Limits(capital=1_000_000),
+                      override_confirmed=True).ticket[0] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
+
+
+def test_c2_cancel_line_is_the_end_of_the_last_entry_bar():
+    nse = ticket_lines(PI, S, NSE, current_price=99.0, day=date(2026, 10, 29))
+    assert nse[1] == "Cancel the entry if not filled by 14:45 IST" and nse[-1] == "Square off by 15:15 IST"
+    us = ticket_lines(UPI, S, US, current_price=99.0, day=date(2026, 10, 29))
+    assert us[1:] == ("Cancel the entry if not filled by 15:15 ET", "Flat by 15:55 ET")
+
+
+def test_c2_early_close_pulls_cancel_and_flat_by():
+    us = ticket_lines(UPI, S, US, current_price=99.0, day=date(2026, 11, 27))  # 13:00 close -> flat by 12:45
+    assert us[1:] == ("Cancel the entry if not filled by 12:45 ET", "Flat by 12:45 ET")
+    v = decide(UPI, S, None, OK, US, 99.0, datetime(2026, 11, 27, 10, 0, tzinfo=ZoneInfo("America/New_York")))
+    assert v.ticket[-2:] == ("Cancel the entry if not filled by 12:45 ET", "Flat by 12:45 ET")

@@ -19,6 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from nse_backtest.desk import audit, charts, loaders, projections, research, session
+from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
 
@@ -115,9 +116,9 @@ def session_returns(bars) -> np.ndarray:
 
 
 def bars_left(last_bar, profile) -> int:
-    """15-minute bars that still start before the plan's flat-by on the last bar's day."""
+    """15-minute bars that still start before the flat-by of the last bar's day (early closes pull it in)."""
     last = pd.Timestamp(last_bar)
-    flat = pd.Timestamp(datetime.combine(last.date(), profile.flat_by))
+    flat = pd.Timestamp(datetime.combine(last.date(), cal.flat_by_for(profile, last.date())))
     nxt = last + BAR_15M
     return 0 if nxt >= flat else math.ceil((flat - nxt) / BAR_15M)
 

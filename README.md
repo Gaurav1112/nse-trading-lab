@@ -133,10 +133,15 @@ Intraday entries are **stop-limit orders**, so a spike through the entry cannot 
 
 - NSE: `BUY n SYMBOL MIS SL trigger {entry} limit {entry_limit}`; US: `BUY n SYMBOL STOP-LIMIT stop {entry}
   limit {entry_limit}`.
+- When the price is already at or above the trigger (a broker rejects a stop buy whose trigger is below the last
+  traded price), the entry is a plain limit at the same limit price instead: NSE `BUY n SYMBOL MIS LIMIT
+  {entry_limit}`, US `BUY n SYMBOL LIMIT {entry_limit} — bracket …, DAY`. The fill rule below covers both.
 - The limit is the entry plus the smaller of 0.25R and 0.5% of the entry, rounded up to the tick
   (R = entry − stop).
-- A line says "Cancel the entry if not filled by HH:MM" (the market's last entry time); the stop and target
-  orders and the flat-by time follow.
+- A line says "Cancel the entry if not filled by HH:MM": the end of the last entry bar (the market's last entry
+  time + 15 minutes, as the odds and the scoreboard count it). On an early-close day both that time and the
+  square-off / flat-by time are pulled in to 15 minutes before the close. The stop and target orders and the
+  flat-by time follow.
 - The Time Machine odds, the Scoreboard and the live check all use the same fill rule and entry window
   (`nse_backtest/desk/fills.py`). A WAIT shows the desk's own ticket as "IF TRIGGERED".
 

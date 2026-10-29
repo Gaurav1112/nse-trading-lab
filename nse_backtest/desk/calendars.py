@@ -140,6 +140,17 @@ def flat_by_for(profile, d: date) -> time:
     return min(profile.flat_by, early)
 
 
+ENTRY_BAR = timedelta(minutes=15)  # the odds and scoreboard count fills in the bar that starts at no_entry_after
+
+
+def entry_cancel_by(profile, d: date) -> time:
+    """When an unfilled intraday entry is cancelled: the end of the last entry bar (no_entry_after + 15 min),
+    never after that day's flat-by (early closes)."""
+    d = _day(d)
+    end = (datetime.combine(d, profile.no_entry_after) + ENTRY_BAR).time()
+    return min(end, flat_by_for(profile, d))
+
+
 def _walk(profile, d: date, step: int) -> date:
     cur = _day(d)
     for _ in range(_MAX_WALK):
