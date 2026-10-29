@@ -236,6 +236,20 @@ def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now:
                     mtm=_mtm(c, fill, cl[last]), held=last - i)
 
 
+def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
+    """Time after which 15-minute bars are missing (None if the series is complete from `after`)."""
+    step = timedelta(minutes=15)
+    floor = datetime.combine(after.date(), time(0, 0)) + ((after - datetime.combine(after.date(), time(0, 0))) // step) * step
+    first_expected = floor + step
+    starts = [t.to_pydatetime() for t in index]
+    if starts[0] > first_expected:
+        return first_expected - step
+    for a, b in zip(starts, starts[1:]):
+        if b - a > step:
+            return a
+    return None
+
+
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
     """MIS LIMIT at entry over created_at's session, bars strictly after created_at and before flat_by."""
     tz = ZoneInfo(get_profile(c.market).tz)
@@ -251,6 +265,9 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
         if not session_over:
             return _outcome(c, Status.OPEN, "session still running")
         return _outcome(c, Status.UNAVAILABLE, "no intraday bars for the session")
+    gap_after = _gap_after(sess.index, max(created, datetime.combine(day, get_profile(c.market).session_open)))
+    if gap_after is not None:
+        return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars (missing after {gap_after:%H:%M})")
     op, hi, lo, cl = (sess[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
     if not _all_finite(op, hi, lo, cl):
         return _outcome(c, Status.UNAVAILABLE, "bad price data")

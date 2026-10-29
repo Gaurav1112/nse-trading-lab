@@ -86,6 +86,13 @@ def _bars(spec):
     return pd.DataFrame([r for _, *r in spec], index=idx, columns=["Open", "High", "Low", "Close"])
 
 
+def _session(over, first="09:45", last="15:00"):
+    """Contiguous 15-minute bars first..last inclusive; `over` maps "HH:MM" -> (O, H, L, C) overrides."""
+    idle = (99, 99.5, 98.9, 99.2)
+    rng = pd.date_range(f"2026-10-27 {first}", f"2026-10-27 {last}", freq="15min")
+    return _bars([(f"{t:%H:%M}", *over.get(f"{t:%H:%M}", idle)) for t in rng])
+
+
 def test_intraday_fill_and_target():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
     bars = _bars([("09:15", 99, 99.5, 98.5, 99), ("09:30", 99, 99.5, 98.9, 99.2),
@@ -98,15 +105,15 @@ def test_intraday_fill_and_target():
 
 def test_intraday_time_exit_ignores_bars_at_flat_by():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99.5, 100.1, 99, 99.5), ("10:00", 99.5, 100, 99, 100.5),
-                  ("15:00", 100.5, 101, 100, 101), ("15:15", 50, 200, 40, 60)])
+    bars = _session({"09:45": (99.5, 100.1, 99, 99.5), "10:00": (99.5, 100, 99, 100.5),
+                     "15:00": (100.5, 101, 100, 101), "15:15": (50, 200, 40, 60)}, last="15:15")
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
     assert o.status is Status.TIME and o.exit_price == 101 and o.realised_r == pytest.approx(0.5)
 
 
 def test_intraday_not_filled_and_open():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99, 99.9, 98.9, 99.5), ("15:00", 99, 99.9, 98.9, 99.5)])
+    bars = _session({})
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.NOT_FILLED
     live = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
@@ -210,10 +217,10 @@ def test_swing_partial_touch_today_not_used():
 
 def test_intraday_incomplete_session_bars_unavailable():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99, 99.9, 98.9, 99.5), ("10:45", 99, 99.9, 98.9, 99.5)])
+    bars = _session({}, last="10:45")
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
     assert o.status is Status.UNAVAILABLE and o.note == "incomplete session bars (last bar 10:45)"
-    bars = _bars([("09:45", 99.5, 100.1, 99, 99.5), ("10:45", 99.5, 100, 99, 100.5)])  # filled, would time-exit
+    bars = _session({"09:45": (99.5, 100.1, 99, 99.5)}, last="10:45")  # filled, would time-exit
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.UNAVAILABLE
 
 
@@ -229,11 +236,10 @@ def test_load_candidates_session_of():
     assert default_session_of("NSE", datetime(2026, 10, 26, 22, 0, tzinfo=ZoneInfo("UTC"))) == date(2026, 10, 27)
 
 
-@pytest.mark.parametrize("bad", [(110, 112, 99.5, 100), (101, float("nan"), 99.5, 100)])
-def test_swing_nan_fill_bar_unavailable(bad):
-    df = daily([bad if bad[0] == 110 else (101, 101.5, float("nan"), 100)])
-    df.iloc[0, 0] = float("nan") if bad[0] == 110 else df.iloc[0, 0]
-    assert resolve_swing(cand(), df, fill_session=FILL, now=NOW).status is Status.UNAVAILABLE
+@pytest.mark.parametrize("row", [(float("nan"), 101.5, 99.5, 100), (101, 101.5, float("nan"), 100)],
+                         ids=["nan-open", "nan-low"])
+def test_swing_nan_fill_bar_unavailable(row):
+    assert resolve_swing(cand(), daily([row]), fill_session=FILL, now=NOW).status is Status.UNAVAILABLE
 
 
 def test_swing_nan_walked_bar_unavailable():
@@ -244,8 +250,7 @@ def test_swing_nan_walked_bar_unavailable():
 
 def test_intraday_nan_unavailable():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99.5, 100.1, 99, 99.5), ("10:00", 99.5, float("nan"), 99, 100.5),
-                  ("15:00", 100.5, 101, 100, 101)])
+    bars = _session({"09:45": (99.5, 100.1, 99, 99.5), "10:00": (99.5, float("nan"), 99, 100.5)})
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.UNAVAILABLE
 
 
@@ -287,7 +292,7 @@ def test_swing_open_below_stop_exits_at_open():
 
 def test_intraday_stop_on_fill_bar_lost_at_stop():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99.5, 100.5, 97.5, 99), ("15:00", 99, 99.5, 98.5, 99)])
+    bars = _session({"09:45": (99.5, 100.5, 97.5, 99)})
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
     assert o.status is Status.LOST and o.exit_price == 98 and o.realised_r == pytest.approx(-1.0 - 0.0)
 
@@ -301,3 +306,47 @@ def test_win_pct_excludes_cost_eaten_wins():
     o = resolve_swing(c, daily([(101, 101.5, 99.5, 100.5), (100.5, 103.2, 100.1, 103)]), fill_session=FILL, now=NOW)
     assert o.status is Status.WON and o.realised_r < 0
     assert summarize([o])[0].wins == 0
+
+
+# ---- gaps in intraday bars: never a final status from incomplete data
+def _ic():
+    return cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
+
+
+def _without(bars, hhmm):
+    return bars.drop(pd.Timestamp(f"2026-10-27 {hhmm}"))
+
+
+def test_intraday_gap_hides_stop_then_target_unavailable():
+    bars = _session({"10:15": (100.3, 100.6, 100, 100.3), "11:00": (97, 97.5, 96, 97),
+                     "11:15": (100, 103.5, 100, 103)})
+    assert resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW).status is Status.LOST  # complete control: stop gap at 11:00
+    o = resolve_intraday(_ic(), _without(bars, "11:00"), flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note == "gap in intraday bars (missing after 10:45)"
+
+
+def test_intraday_gap_then_time_exit_unavailable():
+    bars = _session({"09:45": (99.5, 100.1, 99, 99.5)})
+    o = resolve_intraday(_ic(), _without(bars, "12:00"), flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("gap in intraday bars")
+
+
+def test_intraday_gap_while_unfilled_unavailable():
+    o = resolve_intraday(_ic(), _without(_session({}), "12:00"), flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note == "gap in intraday bars (missing after 11:45)"
+
+
+def test_intraday_first_bar_late_unavailable():
+    bars = _session({}, first="10:15")
+    o = resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("gap in intraday bars")
+
+
+def test_intraday_first_bar_one_slot_late_unavailable():
+    assert resolve_intraday(_ic(), _session({}, first="10:00"), flat_by=time(15, 15), now=NOW).status \
+        is Status.UNAVAILABLE
+
+
+def test_intraday_complete_session_resolves():
+    bars = _session({"09:45": (99.5, 100.1, 99, 99.5)})
+    assert resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW).status is Status.TIME
