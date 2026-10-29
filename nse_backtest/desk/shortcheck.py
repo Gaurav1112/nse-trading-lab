@@ -135,3 +135,12 @@ def load_edge(path: Path, profile: MarketProfile, day: date) -> tuple[ShortEdge 
         return _bad("proven flag does not match the numbers")
     return edge, ""
 
+
+
+def cached_symbols(path: Path) -> int | None:
+    """How many symbols the cached figure pooled (for display only); None when unreadable."""
+    try:
+        v = json.loads(Path(path).read_text(encoding="utf-8")).get("symbols")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+        return None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None

@@ -85,8 +85,8 @@ def test_h4_stale_skip_card_still_offers_recheck_only(monkeypatch, tmp_path):
 # ---- H5a: a short from the scan shows its SHORT badge and a sell ticket only on override ----
 def _short(monkeypatch, tmp_path, minutes_old=1):
     from nse_backtest.desk import fills
-    from nse_backtest.desk.checks import SHORT_EDGE_UNPROVEN
     from nse_backtest.desk.models import Side
+    SHORT_EDGE_UNPROVEN = "edge not proven on the desk's own history yet (143 trades, +0.05R)"  # H5b's gate text
     _clock(monkeypatch, T)
     base = _at(_intraday(_base(monkeypatch, tmp_path)), T, minutes_old)
     p = base.plan

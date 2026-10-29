@@ -711,15 +711,52 @@ def test_short_checks_baseline():
     assert names[-3:] == ["short_regime", "short_fno", "relative_volume"] and "short_edge" in names
     bad = [c for c in cs if c.status is not Status.PASS]
     assert [c.name for c in bad] == ["short_edge"]  # every short is capped until the edge is proven
-    assert bad[0].status is Status.WARN and bad[0].reason == SHORT_EDGE_UNPROVEN
-    assert SHORT_EDGE_UNPROVEN == "edge not proven on the desk's own history yet (gate arrives with the short history)"
+    assert bad[0].status is Status.WARN and bad[0].reason == SHORT_EDGE_UNPROVEN  # no pooled figure in the context
+    assert SHORT_EDGE_UNPROVEN == "edge check unavailable"
     assert sby(cs)["reward_risk"].reason == "Reward:risk 1:1.50 meets minimum 1:1.50"
     assert sby(cs)["regime"].status is Status.PASS
 
 
-def test_short_edge_hook_is_a_warn_until_the_gate_lands():
+def test_short_edge_without_a_pooled_figure_fails_closed():
     c = short_edge_check(sctx())
-    assert (c.name, c.status, c.reason) == ("short_edge", Status.WARN, SHORT_EDGE_UNPROVEN)
+    assert (c.name, c.status, c.reason) == ("short_edge", Status.WARN, "edge check unavailable")
+    c = short_edge_check(sctx(short_edge_why="cache unreadable (JSONDecodeError): run shortcheck again"))
+    assert c.status is Status.WARN
+    assert c.reason == "edge check unavailable (cache unreadable (JSONDecodeError): run shortcheck again)"
+
+
+# ---- H5b: the pooled edge gate ----
+from nse_backtest.desk.models import ShortEdge  # noqa: E402
+
+
+@pytest.mark.parametrize("n, exp, reason", [
+    (143, 0.0512, "edge not proven on the desk's own history yet (143 trades, +0.05R)"),
+    (250, -0.0812, "edge not proven on the desk's own history yet (250 trades, -0.08R)"),
+    (250, 0.0, "edge not proven on the desk's own history yet (250 trades, +0.00R)"),
+    (199, 0.9, "edge not proven on the desk's own history yet (199 trades, +0.90R)"),
+    (0, None, "edge not proven on the desk's own history yet (0 trades, no expectancy yet)"),
+])
+def test_short_edge_not_proven_warns_with_the_numbers(n, exp, reason):
+    c = short_edge_check(sctx(short_edge=ShortEdge.from_trades(n, exp)))
+    assert (c.status, c.reason) == (Status.WARN, reason)
+
+
+def test_short_edge_proven_passes():
+    c = short_edge_check(sctx(short_edge=ShortEdge.from_trades(200, 0.1234)))
+    assert c.status is Status.PASS
+    assert c.reason == "edge proven on the desk's own history (200 trades, +0.12R at 2× slippage, HOSTILE days)"
+
+
+def test_short_edge_never_trusts_a_proven_flag_the_numbers_do_not_support():
+    forged = ShortEdge(150, 0.5, True)
+    c = short_edge_check(sctx(short_edge=forged))
+    assert c.status is Status.WARN and "150 trades" in c.reason
+    assert short_edge_check(sctx(short_edge=ShortEdge(300, float("nan"), True))).status is Status.WARN
+
+
+def test_proven_short_runs_clean_through_all_checks():
+    cs = run_checks(splan(), SIZE, None, sctx(short_edge=ShortEdge.from_trades(240, 0.2)), current_price=100.0)
+    assert len(cs) == 18 and all(c.status is Status.PASS for c in cs)
 
 
 @pytest.mark.parametrize("override, reason", [

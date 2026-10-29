@@ -242,3 +242,15 @@ def test_cli_projected_line_surfaces_resolved_trades_without_r():
     outs = [outcome(0, 0.3, 1.5), outcome(1, 0.2, None, OStatus.LOST)]
     (s,) = summarize([outs[0]])
     assert _projected_line(outs, s).endswith(" over 1 trade (1 resolved trade without a realised R, left out)")
+
+
+def test_h5b_short_outcome_money_limit_slippage_is_the_sell_limit_below_the_entry():
+    """A short's worst fill is BELOW the trigger (sell limit 99.50 under 100): the slippage is qty x 0.50, not 0."""
+    from nse_backtest.desk.models import Side
+    sp = TradePlan("ABC", "NSE", Mode.INTRADAY, 100.0, 102.0, 97.0, 94.0, 1.0, 18, 100.0, "2026-10-29T09:30:00",
+                   "user", 99.5, Side.SHORT)
+    v = DeskVerdict(Action.TAKE, "h", sp, SIZING, ODDS, OK, (), None, 100.0, "x" * 64, "2026-10-29T10:00:00")
+    c = build_card(v, NSE, Limits(capital=10_000))
+    m = outcome_money(c)
+    assert m.limit_slippage == pytest.approx(c.qty * 0.5)
+    assert m.median == pytest.approx(float(np.percentile(np.asarray(ODDS.mc_rs) * c.qty * 2.0, 50)))

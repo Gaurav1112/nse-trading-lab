@@ -236,3 +236,89 @@ def test_edge_text():
         "143 trades, +0.05R at 2× slippage, HOSTILE days: not proven (needs at least 200 trades and a positive R)"
     assert shortcheck.edge_line(ShortEdge.from_trades(0, None)).startswith("0 trades, no expectancy yet")
     assert shortcheck.edge_line(ShortEdge.from_trades(240, 0.11)).endswith(": proven")
+
+
+# ---------------------------------------------------------------- session: run_shortcheck and the context it feeds
+from datetime import datetime  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from nse_backtest.desk import loaders, session  # noqa: E402
+
+NOW = datetime(2026, 10, 30, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+
+def _index_hostile():
+    idx = index_frame(n=500, end="2026-10-29")
+    idx["Close"] = 20000 * 0.999 ** np.arange(len(idx))  # a steady fall: HOSTILE every day
+    return idx
+
+
+@pytest.fixture
+def offline_short(tmp_path, monkeypatch):
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(session, "universe", lambda p: ["AAA", "BBB", "CCC"])
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA", "BBB"}))
+    monkeypatch.setattr(loaders, "load_regime", lambda p: _index_hostile())
+    loaded = []
+
+    def intraday(p, s):
+        loaded.append(s)
+        return frame(100, start="2026-06-01") if s == "AAA" else frame(100, start="2026-06-02")
+    monkeypatch.setattr(loaders, "load_intraday", intraday)
+    return loaded
+
+
+def test_run_shortcheck_pools_the_fno_universe_and_caches_for_the_day(offline_short, tmp_path):
+    res = session.run_shortcheck(NSE, now=NOW)
+    assert offline_short == ["AAA", "BBB"]  # CCC is not an F&O stock: not eligible, not pooled
+    assert res.edge.n == 200 and res.edge.proven and not res.cached and res.symbols == 2
+    assert json.loads((tmp_path / "desk_shortcheck.json").read_text())["day"] == "2026-10-30"
+    again = session.run_shortcheck(NSE, now=NOW)
+    assert again.cached and again.edge == res.edge and again.symbols == 2 and offline_short == ["AAA", "BBB"]
+    fresh = session.run_shortcheck(NSE, now=NOW, refresh=True)
+    assert not fresh.cached and offline_short == ["AAA", "BBB"] * 2
+    assert session.short_edge_today(NSE, NOW) == (res.edge, "")
+
+
+def test_run_shortcheck_fails_closed_without_the_fno_list_or_the_index(offline_short, monkeypatch, tmp_path):
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: None)
+    with pytest.raises(ValueError, match="could not verify F&O eligibility"):
+        session.run_shortcheck(NSE, now=NOW)
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA"}))
+
+    def boom(p):
+        raise OSError("down")
+    monkeypatch.setattr(loaders, "load_regime", boom)
+    with pytest.raises(ValueError, match="regime index unavailable"):
+        session.run_shortcheck(NSE, now=NOW)
+    assert not (tmp_path / "desk_shortcheck.json").exists()
+    with pytest.raises(ValueError, match="NSE only"):
+        session.run_shortcheck(US, now=NOW)
+
+
+def test_run_shortcheck_skips_a_symbol_without_bars(offline_short, monkeypatch):
+    def intraday(p, s):
+        if s == "BBB":
+            raise ValueError("no intraday data for BBB")
+        return frame(100, start="2026-06-01")
+    monkeypatch.setattr(loaders, "load_intraday", intraday)
+    warns = []
+    res = session.run_shortcheck(NSE, now=NOW, on_warning=warns.append)
+    assert res.edge.n == 100 and not res.edge.proven and res.failures == (("BBB", "no intraday data for BBB"),)
+    assert any("BBB" in w for w in warns)
+
+
+def test_short_context_carries_the_cached_edge_or_why_not(offline_short, tmp_path):
+    ctx = session.context_for(NSE, session.loaders.default_limits(NSE), regime="HOSTILE")
+    ctx = type(ctx)(**{**ctx.__dict__, "now": NOW})
+    warns = []
+    c = session._with_fno(ctx, NSE, warns.append)
+    assert c.short_edge is None and "not computed today" in c.short_edge_why
+    assert any("short edge check unavailable" in w for w in warns)
+    assert c.regime_by_day and set(c.regime_by_day.values()) == {"HOSTILE"}
+    session.run_shortcheck(NSE, now=NOW)
+    c = session._with_fno(ctx, NSE, None)
+    assert c.short_edge is not None and c.short_edge.proven and c.short_edge_why == ""
+    (tmp_path / "desk_shortcheck.json").write_text("{broken")
+    c = session._with_fno(ctx, NSE, None)
+    assert c.short_edge is None and "unreadable" in c.short_edge_why

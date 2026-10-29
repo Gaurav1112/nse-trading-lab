@@ -203,8 +203,8 @@ def input_hash(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, curre
 
 
 def short_edge_cap(plan: TradePlan, checks) -> str | None:
-    """Why a short verdict is held at WAIT, or None when its short_edge check PASSes; always None for a long. HOOK for H5b: the cap follows the short_edge check, so H5b's gate (checks.short_edge_check)
-    lifts it for a proven edge without touching decide. A short with no short_edge result is not proven."""
+    """Why a short verdict is held at WAIT, or None when its short_edge check PASSes (checks.short_edge_check: the
+    pooled ORB-short history is proven); always None for a long. A short with no short_edge result is not proven."""
     if plan.side is not Side.SHORT:
         return None
     edge = [c for c in checks if c.name == "short_edge"]

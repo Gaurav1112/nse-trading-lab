@@ -3,7 +3,7 @@ a PASS."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,7 +11,7 @@ import numpy as np
 
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
-from nse_backtest.desk.models import Check, Limits, Mode, Odds, Side, Sizing, Status, TradePlan
+from nse_backtest.desk.models import Check, Limits, Mode, Odds, ShortEdge, Side, Sizing, Status, TradePlan
 from nse_backtest.desk.nse_lists import BanList
 
 
@@ -38,6 +38,11 @@ class CheckContext:
     fno: frozenset[str] | None = None
     or_rel_volume: float | None = None
     or_rel_volume_why: str = ""  # why or_rel_volume is None (shown in the WARN)
+    # The pooled ORB-short edge for today (shortcheck; None = unavailable -> short_edge WARNs and caps at WAIT), why it
+    # is unavailable, and the market regime of each past day (the short odds replay HOSTILE days only).
+    short_edge: ShortEdge | None = None
+    short_edge_why: str = ""
+    regime_by_day: dict | None = field(default=None, compare=False)
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -163,15 +168,30 @@ def _entry_window(prof: MarketProfile, now: datetime) -> Check:
     return _ck("entry_window", P if known else W, f"{now:%H:%M} is inside the entry window {window}{sfx}")
 
 
-SHORT_EDGE_UNPROVEN = "edge not proven on the desk's own history yet (gate arrives with the short history)"
+SHORT_EDGE_UNAVAILABLE = "edge check unavailable"
+SHORT_EDGE_UNPROVEN = SHORT_EDGE_UNAVAILABLE  # the cap's reason when no pooled figure exists (verdict.short_edge_cap)
 SHORT_REL_VOLUME_MIN = 1.5
 
 
 def short_edge_check(ctx: CheckContext) -> Check:
-    """The ORB-short edge gate. HOOK for H5b: until the pooled ORB-short history (HOSTILE days, 2x slippage, at
-    least 200 trades, positive expectancy) exists, every short WARNs here and verdict.decide caps it at WAIT. H5b
-    replaces this body with the shortcheck.pooled_short_edge result (PASS only when proven)."""
-    return _ck("short_edge", Status.WARN, SHORT_EDGE_UNPROVEN)
+    """The ORB-short edge gate: PASS only when today's pooled ORB-short history (shortcheck.pooled_short_edge: the
+    eligible universe, HOSTILE days only, 2x slippage) has at least 200 trades and a positive expectancy. Otherwise a
+    WARN, and verdict.short_edge_cap holds the short at WAIT. ``proven`` is re-derived from the numbers, never
+    trusted. No figure for today (not computed, unreadable cache) = "edge check unavailable"."""
+    e = ctx.short_edge
+    if not isinstance(e, ShortEdge):
+        why = ctx.short_edge_why.strip() if isinstance(ctx.short_edge_why, str) else ""
+        return _ck("short_edge", Status.WARN, f"{SHORT_EDGE_UNAVAILABLE} ({why})" if why else SHORT_EDGE_UNAVAILABLE)
+    n, exp = _num(e.n), _num(e.expectancy_r)
+    if n is None or n < 0:
+        return _ck("short_edge", Status.WARN, f"{SHORT_EDGE_UNAVAILABLE} (trade count unreadable)")
+    shown = "no expectancy yet" if exp is None else f"{exp:+.2f}R"
+    sure = ShortEdge.from_trades(int(n), exp)
+    if not sure.proven:
+        return _ck("short_edge", Status.WARN,
+                   f"edge not proven on the desk's own history yet ({n:.0f} trades, {shown})")
+    return _ck("short_edge", Status.PASS,
+               f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)")
 
 
 def _short_regime(prof: MarketProfile, regime: str) -> Check:

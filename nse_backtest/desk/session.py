@@ -6,8 +6,8 @@ handed to an optional `on_warning` callback instead of being printed. Nothing he
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,10 +18,12 @@ from nse_backtest import tape_monitor
 from . import calendars as cal
 from . import loaders
 from . import scoreboard_io
+from . import shortcheck
 from .audit import data_dir
 from .daily import DailyPlan, daily_plan, plan_entry, today_gap_pct, turnover_20d
 from .intraday import orb_scan
-from .models import Action, DeskVerdict, Limits, Mode, Side
+from .markets import universe
+from .models import Action, DeskVerdict, Limits, Mode, ShortEdge, Side
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 from .verdict import ADVICE_GROUPS, group_of
@@ -152,11 +154,107 @@ def shorts_today(profile, regime) -> bool:
     return profile.code == "NSE" and isinstance(regime, str) and regime.strip().upper() == "HOSTILE"
 
 
+_REGIME_DAYS_BACK = 100  # calendar days of past regimes the short odds need (15-minute bars reach back ~60 days)
+
+
+def _market_today(profile, now: datetime | None = None) -> date:
+    tz = ZoneInfo(profile.tz)
+    if now is None:
+        return datetime.now(tz).date()
+    return now.astimezone(tz).date() if now.tzinfo is not None else now.date()
+
+
+def short_edge_today(profile, now: datetime | None = None) -> tuple[ShortEdge | None, str]:
+    """Today's pooled ORB-short edge from the daily cache: (edge, "") or (None, why). Never recomputed here: a
+    missing or unreadable cache fails closed (short_edge WARNs "edge check unavailable" and caps at WAIT)."""
+    if profile.code != "NSE":
+        return None, "shorts are NSE only"
+    try:
+        return shortcheck.load_edge(data_dir() / shortcheck.CACHE_FILE, profile, _market_today(profile, now))
+    except Exception as e:  # noqa: BLE001 - any read problem is "unavailable", never a pass
+        return None, f"cache unreadable ({type(e).__name__}): run shortcheck again"
+
+
+def regime_history(profile, days: Iterable[date], on_warning: Warn = None) -> dict[date, str] | None:
+    """shortcheck.regime_by_day over the regime index for ``days``; None (with a warning) when the index cannot be
+    loaded — the short history then has no HOSTILE day to replay."""
+    try:
+        df = loaders.load_regime(profile)
+    except Exception as e:  # noqa: BLE001
+        _warn(on_warning, f"regime history unavailable for the short odds: {e}")
+        return None
+    return shortcheck.regime_by_day(df, days)
+
+
+def _recent_days(profile, now: datetime | None) -> list[date]:
+    today = _market_today(profile, now)
+    return [d.date() for d in pd.bdate_range(today - timedelta(days=_REGIME_DAYS_BACK), today)]
+
+
 def _with_fno(ctx, profile, on_warning: Warn):
+    """The short-side context: the F&O list, today's pooled edge (from the daily cache) and the regime of each recent
+    day (for the short odds)."""
     fno = loaders.fno_underlyings(profile, ctx.now)
     if fno is None:
         _warn(on_warning, "NSE F&O list unavailable: could not verify F&O eligibility, so every short is blocked")
-    return replace(ctx, fno=fno)
+    edge, why = short_edge_today(profile, ctx.now)
+    if edge is None:
+        _warn(on_warning, f"short edge check unavailable ({why}): every short stays at most WAIT")
+    return replace(ctx, fno=fno, short_edge=edge, short_edge_why=why,
+                   regime_by_day=regime_history(profile, _recent_days(profile, ctx.now), on_warning))
+
+
+@dataclass(frozen=True)
+class ShortcheckResult:
+    edge: ShortEdge
+    day: date
+    symbols: int | None  # eligible symbols whose 15-minute bars were replayed (None: a cache that does not say)
+    cached: bool  # True: read from today's cache, not recomputed
+    failures: tuple[tuple[str, str], ...] = ()
+
+
+def run_shortcheck(profile, *, refresh: bool = False, on_warning: Warn = None, on_progress=None,
+                   now: datetime | None = None) -> ShortcheckResult:
+    """Today's pooled ORB-short edge over the eligible universe (the desk's universe in NSE's F&O list), HOSTILE
+    days only, at 2x slippage, cached for the day in the data dir. Uses today's cache unless ``refresh``. Raises
+    ValueError when it cannot be computed honestly (not NSE, no F&O list, no regime index, no bars at all); nothing
+    is cached then, so the gate stays closed."""
+    if profile.code != "NSE":
+        raise ValueError("ORB shorts are NSE only")
+    today = _market_today(profile, now)
+    path = data_dir() / shortcheck.CACHE_FILE
+    if not refresh:
+        edge, _ = shortcheck.load_edge(path, profile, today)
+        if edge is not None:
+            return ShortcheckResult(edge, today, shortcheck.cached_symbols(path), True)
+    fno = loaders.fno_underlyings(profile, now)
+    if fno is None:
+        raise ValueError("could not verify F&O eligibility: the pooled short history needs NSE's F&O list")
+    syms = [s for s in universe(profile) if s in fno]
+    if not syms:
+        raise ValueError("no symbol of the desk's universe is in NSE's F&O list")
+    try:
+        index_df = loaders.load_regime(profile)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"regime index unavailable, so no day can be called HOSTILE: {e}") from e
+    frames, failures = {}, []
+    for n, sym in enumerate(syms, 1):
+        if on_progress is not None:
+            try:
+                on_progress(n, len(syms), sym)
+            except Exception:  # noqa: BLE001 - progress display only
+                on_progress = None
+        try:
+            frames[sym] = loaders.load_intraday(profile, sym)
+        except Exception as e:  # noqa: BLE001 - a missing symbol adds no trades (it can only make proving harder)
+            failures.append((sym, str(e)))
+            _warn(on_warning, f"no intraday data for {sym}: {e}")
+    if not frames:
+        raise ValueError("no intraday bars for any eligible symbol")
+    days = sorted({d.date() for f in frames.values() for d in pd.unique(f.index.normalize())})
+    edge = shortcheck.pooled_short_edge(profile, frames, shortcheck.regime_by_day(index_df, days))
+    shortcheck.save_edge(path, profile, today, edge, symbols=len(frames), now=now)
+    return ShortcheckResult(edge, today, len(frames), False, tuple(failures))
 
 
 def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, stop=None, target=None,

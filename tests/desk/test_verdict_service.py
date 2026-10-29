@@ -533,7 +533,7 @@ def test_h5a_check_trade_short_end_to_end(tmp_path):
     v = check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit_path=path,
                     replays=500, robustness=False)
     assert v.plan.side is Side.SHORT and v.plan.entry == pytest.approx(100 * k)
-    assert v.plan.stop == pytest.approx(101 * k) and v.odds is None
+    assert v.plan.stop == pytest.approx(101 * k) and v.odds is not None  # H5b: short odds
     assert v.action is Action.WAIT and v.headline == f"WAIT ABC SHORT — {SHORT_EDGE_UNPROVEN}"
     names = {ck.name: ck for ck in v.checks}
     assert names["short_fno"].status is Status.PASS and names["short_regime"].status is Status.PASS
@@ -602,3 +602,67 @@ def test_h5a_fix_audit_refuses_a_safety_blocked_override(tmp_path):
     with pytest.raises(ValueError, match="can't be taken"):
         append_override(v, tmp_path / "a.jsonl", now=NOW)
     assert not (tmp_path / "a.jsonl").exists()
+
+
+# ---- H5b: short odds and the pooled edge gate end to end ----
+def _short_now():
+    return datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+
+def _short_check(df, **ctxkw):
+    from nse_backtest.desk.models import Side
+    c = _pin_ctx(now=_short_now(), regime="HOSTILE", fno=frozenset({"ABC"}), **ctxkw)
+    return check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit=False,
+                       replays=2000, robustness=False)
+
+
+def test_h5b_short_odds_are_the_mirrored_monte_carlo():
+    from nse_backtest.desk import timemachine
+    df, _ = _breakdown_frame()
+    v = _short_check(df)
+    o = v.odds
+    ratios = timemachine.bar_ratios(df.tail(timemachine._INTRADAY_LOOKBACK_BARS), Mode.INTRADAY, profile=NSE)
+    p = v.plan
+    want = timemachine.monte_carlo_rs_short(ratios, p.entry, p.stop, p.target_1, p.max_hold_bars,
+                                            cost_per_share=v.cost_per_share, replays=2000)
+    assert (o.p_target, o.p_stop, o.p_time, o.mc_expectancy_r) == want[:4]
+    assert o.history_n == 0  # no regime per day in the context: no HOSTILE day known, no history
+
+
+def test_h5b_short_history_on_the_stocks_own_hostile_days():
+    from nse_backtest.desk import timemachine
+    df, _ = _breakdown_frame()
+    days = {d.date(): "HOSTILE" for d in pd.unique(df.index.normalize())}
+    v = _short_check(df, regime_by_day=days)
+    want = timemachine.setup_history(df, v.plan, regime_by_day=days)
+    assert v.odds.history_n == len(want) and list(v.odds.history_rs) == pytest.approx(want)
+    mixed = _short_check(df, regime_by_day={d: "MIXED" for d in days})
+    assert mixed.odds.history_n == 0
+
+
+def test_h5b_an_unproven_short_stays_at_wait_with_the_numbers():
+    from nse_backtest.desk.models import ShortEdge
+    df, _ = _breakdown_frame()
+    v = _short_check(df, short_edge=ShortEdge.from_trades(143, 0.0512))
+    assert v.action is Action.WAIT
+    assert v.headline == "WAIT ABC SHORT — edge not proven on the desk's own history yet (143 trades, +0.05R)"
+    assert v.ticket == ()
+
+
+def test_h5b_a_proven_short_can_be_a_desk_take():
+    from nse_backtest.desk.models import ShortEdge
+    df, k = _breakdown_frame()
+    v = _short_check(df, short_edge=ShortEdge.from_trades(260, 0.11))
+    edge = {c.name: c for c in v.checks}["short_edge"]
+    assert edge.status is Status.PASS
+    # last close 99.8k: below the 100k trigger and above the sell limit, so the sell is live now
+    assert v.action is Action.TAKE and v.headline.startswith(f"TAKE ABC SHORT — SELL {v.sizing.qty} @ ")
+    assert v.ticket[0].startswith(f"SELL {v.sizing.qty} ABC MIS LIMIT ")
+
+
+def test_h5b_unavailable_edge_caps_with_the_reason():
+    df, _ = _breakdown_frame()
+    v = _short_check(df, short_edge_why="cache unreadable (JSONDecodeError): run shortcheck again")
+    assert v.action is Action.WAIT
+    assert v.headline == ("WAIT ABC SHORT — edge check unavailable (cache unreadable (JSONDecodeError): "
+                          "run shortcheck again)")

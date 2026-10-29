@@ -31,7 +31,8 @@ class OutcomeMoney:
     p_stop: float
     p_time: float
     # The replays assume a fill at the trigger. Intraday: a fill at the stop-limit's limit worsens each outcome by
-    # up to qty x (limit - entry); None for swing (a LIMIT buy never fills above entry).
+    # up to qty x |limit - entry| (above the trigger for a long's buy, below it for a short's sell); None for swing
+    # (a LIMIT buy never fills above entry).
     limit_slippage: float | None = None
 
 
@@ -43,7 +44,7 @@ def outcome_money(card: TradeCard) -> OutcomeMoney | None:
         return None
     pnl = np.asarray(odds.mc_rs, dtype=float) * card.qty * card.risk_per_share
     p5, p25, p50, p75, p95 = (float(x) for x in np.percentile(pnl, [5, 25, 50, 75, 95]))
-    slip = None if card.entry_limit is None else card.qty * max(0.0, card.entry_limit - card.entry)
+    slip = None if card.entry_limit is None else card.qty * abs(card.entry_limit - card.entry)
     return OutcomeMoney(tuple(pnl.tolist()), p5, p25, p50, p75, p95, odds.p_target, odds.p_stop, odds.p_time, slip)
 
 
