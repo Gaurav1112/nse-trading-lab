@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 5  # C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 6  # F1 round 3 (6): containing bar, resting LIMIT, window; C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -929,7 +929,7 @@ def test_i2_stop_gap_on_the_first_bar_exits_at_its_open():
 
 def test_i2_rows_without_a_price_or_above_the_limit_keep_the_stop_limit_model():
     bars = _session({"10:15": (99.6, 99.8, 97.9, 98.2)}, first="09:15", idle=(98.5, 99.0, 98.2, 98.6))
-    for cp in (None, 100.6, 99.9):  # old row / above the limit (never a TAKE) / below the trigger
+    for cp in (None, 99.9):  # old row / below the trigger (above the limit: a resting LIMIT since round 3)
         o = resolve_intraday(_limit_cand(cp), bars, flat_by=time(15, 15), now=NOW)
         assert o.status is Status.NOT_FILLED, cp
 
@@ -943,3 +943,96 @@ def test_i2_audit_rows_carry_the_current_price_into_the_candidate():
     assert c.current_price == 100.2
     (old,), _ = load_candidates([{k: v for k, v in row.items() if k != "current_price"}])
     assert old.current_price is None
+
+
+# ---------------------------------------------------------------- F1 round 3: containing bar, resting LIMIT, window
+
+IDLE = (99.0, 99.5, 98.9, 99.2)
+
+
+def _r3(cp, over, created=(10, 7), record="desk", first="09:15", **kw):
+    from dataclasses import replace as _replace
+    c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, *created, tzinfo=IST)), entry_limit=100.5,
+                 current_price=cp, record=record, **kw)
+    return resolve_intraday(c, _session(over, first=first, idle=IDLE), flat_by=time(15, 15), now=NOW)
+
+
+def test_r3_a_plain_limit_containing_bar_stop_is_lost_and_its_target_never_credited():
+    o = _r3(100.2, {"10:00": (100, 100.4, 97.5, 100.3), "10:15": (100.3, 103.2, 100.1, 103)})  # probe A
+    assert o.status is Status.LOST and o.fill_price == pytest.approx(100.2) and o.exit_price == 98.0
+    o = _r3(100.2, {"10:00": (100, 103.4, 99.9, 100.3)})  # a target inside the containing bar is not credited
+    assert o.status is Status.TIME and o.note == "time exit at flat-by"
+
+
+def test_r3_missing_containing_bar_is_unavailable():
+    o = _r3(100.2, {}, first="10:15")  # bars start after created_at's bar
+    assert o.status is Status.UNAVAILABLE and "gap" in o.note
+
+
+def test_r3_b_plain_limit_later_gap_through_the_stop_exits_at_the_open():
+    o = _r3(100.2, {"10:15": (97.0, 97.5, 96.5, 97.2)})  # probe B
+    assert o.status is Status.LOST and o.exit_price == 97.0
+
+
+def test_r3_resting_limit_for_a_desk_row_priced_above_the_limit():
+    o = _r3(100.6, {"10:15": (99.5, 99.8, 98.5, 98.6), "10:30": (98.6, 98.7, 97.5, 97.6)})  # probe K
+    assert o.status is Status.LOST and o.fill_price == 100.5 and o.realised_r == pytest.approx(-1.25)
+
+
+def test_r3_resting_limit_containing_bar_fill_and_stop():
+    o = _r3(100.6, {"10:00": (100.8, 100.9, 97.8, 98.2)})
+    assert o.status is Status.LOST and o.fill_price == 100.5 and o.exit_price == 98.0
+
+
+def test_r3_resting_limit_fills_on_a_later_bar_and_never_better_than_the_limit():
+    hi = (100.9, 101.2, 100.7, 101.0)  # above the limit: no fill
+    o = _r3(100.6, {"10:00": hi, "10:15": hi, "10:30": (99.8, 100.2, 99.5, 100.0), "10:45": (100.0, 103.2, 99.9, 103)})
+    assert o.status is Status.WON and o.fill_price == 100.5  # Open 99.8 < limit: still the limit (worst case)
+    assert o.fill_at == "2026-10-27 10:30:00"
+
+
+def test_r3_resting_limit_never_back_is_not_filled():
+    hi = (100.9, 101.2, 100.7, 101.0)
+    c_over = {f"{h:02d}:{m:02d}": hi for h in range(9, 16) for m in (0, 15, 30, 45)}
+    o = _r3(100.6, c_over)
+    assert o.status is Status.NOT_FILLED
+
+
+def test_r3_every_override_priced_at_or_above_entry_is_a_resting_limit():
+    # same bars as probe A: a desk row is a logged-price fill; an override rests at the limit (fills at 100.5)
+    over = {"10:15": (100.3, 103.2, 100.1, 103)}
+    desk = _r3(100.2, over)
+    mine = _r3(100.2, over, record="override")
+    assert desk.fill_price == pytest.approx(100.2) and mine.fill_price == 100.5
+    below = _r3(99.9, {"10:15": (99.9, 100.4, 99.8, 100.2), "10:30": (100.2, 103.2, 100.1, 103)},
+                record="override")  # below the trigger: the stop-limit
+    assert below.status is Status.WON and below.fill_price == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("created", [(14, 55), (9, 20)])  # probes G and H
+@pytest.mark.parametrize("cp,record", [(100.2, "desk"), (100.6, "desk"), (100.2, "override")])
+def test_r3_limit_rows_logged_outside_the_entry_window_are_not_filled(created, cp, record):
+    o = _r3(cp, {"15:00": (100.3, 103.2, 100.1, 103), "09:30": (100.3, 103.2, 100.1, 103)}, created=created,
+            record=record)
+    assert o.status is Status.NOT_FILLED and o.note == "logged outside the entry window"
+
+
+def test_r3_property_no_fill_better_than_the_logged_price_or_limit_and_no_skipped_containing_stop():
+    rng = np.random.default_rng(19)
+    for _ in range(400):
+        cp = float(rng.choice([99.9, 100.0, 100.2, 100.5, 100.6, 101.0]))
+        record = str(rng.choice(["desk", "override"]))
+        over = {}
+        for t in pd.date_range("2026-10-27 09:15", "2026-10-27 15:00", freq="15min"):
+            o_ = float(rng.uniform(97, 103))
+            h, l_ = o_ + float(rng.uniform(0, 2)), o_ - float(rng.uniform(0, 2))
+            over[f"{t:%H:%M}"] = (o_, h, l_, float(rng.uniform(l_, h)))
+        out = _r3(cp, over, record=record)
+        if out.fill_price is not None and cp >= 100.0:  # a buy: "better" is lower
+            assert out.fill_price >= min(cp, 100.5) - 1e-9, (cp, record, out)
+            assert out.fill_price <= 100.5 + 1e-9
+        if out.fill_price is not None and cp >= 100.0:
+            cont = over["10:00"]
+            filled_in_containing = record == "desk" and cp <= 100.5 or cont[2] <= 100.5
+            if filled_in_containing and cont[2] <= 98.0:
+                assert out.status is Status.LOST and out.exit_price == 98.0, (cp, record, out)

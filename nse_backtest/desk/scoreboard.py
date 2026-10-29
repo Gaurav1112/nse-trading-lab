@@ -24,7 +24,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 5  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 6  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -366,6 +366,10 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     mask = (idx.normalize() == pd.Timestamp(day)) & (idx > pd.Timestamp(created)) & \
            (np.array([t.time() < close for t in idx], dtype=bool) if len(idx) else True)
     sess = bars15[mask]
+    limit = fills.limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
+    model = limit_model(c, limit)
+    if model is not None and not (profile.no_entry_before <= created.time() < cal.entry_cancel_by(profile, day)):
+        return _outcome(c, Status.NOT_FILLED, "logged outside the entry window")
     if sess.empty:
         return _outcome(c, Status.UNAVAILABLE, f"{MID_SESSION_NOTE} (no 15-minute bars after the TAKE)")
     gap_after = _gap_after(sess.index, created)
@@ -466,26 +470,60 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
     return None
 
 
-def _plain_limit(c: Candidate, sess: pd.DataFrame, op, hi, lo, cl, session_over: bool, incomplete: bool,
-                 incomplete_note: str) -> Outcome:
-    """The ticket for a price already at/above the trigger is `BUY ... LIMIT {entry_limit}`: a marketable limit
-    that fills when typed in, at about the logged price (in [entry, entry_limit]), at created_at; no bar is needed
-    for the fill. The bars after created_at then exit it as usual; a stop on the first one exits at
-    min(Open, stop), since the fill came before that bar."""
-    fill, fill_at, n = float(c.current_price), c.created_at.isoformat(), len(sess)
-    res = _walk(op, hi, lo, cl, 0, n - 1, c.stop, c.target_1)
+def limit_model(c: Candidate, limit: float) -> str | None:
+    """Which entry the printed ticket was, from the logged price: "plain" (a desk TAKE priced in [entry, limit]: a
+    marketable `BUY ... LIMIT` filled at about that price), "resting" (a desk row priced above the limit, or any
+    override priced at or above the entry: a buy limit at the limit placed at created_at, which the owner may have
+    typed in after the price moved), or None (no logged price, or below the trigger: the buy stop-limit)."""
+    cp = c.current_price
+    if cp is None or cp < c.entry:
+        return None
+    if c.record == "override" or cp > limit:
+        return "resting"
+    return "plain"
+
+
+def _limit_fill(c: Candidate, model: str, limit: float, frame: pd.DataFrame, profile, session_over: bool,
+                incomplete: bool, incomplete_note: str, day: date) -> Outcome:
+    """Bar 0 of ``frame`` contains created_at; bars 1.. follow it (before flat-by). Plain: filled at the logged price
+    at created_at. Resting: filled at the limit (the worst case: the order and the price inside a bar are unknown)
+    on bar 0 if its Low reaches the limit, else on the first later bar inside the entry window that does. On the
+    fill bar a Low at or below the stop is LOST at the stop (we cannot tell whether it came after the fill) and a
+    target is never credited; later bars exit as usual (a gap through the stop at its Open)."""
+    op, hi, lo, cl = (frame[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    if not _all_finite(op, hi, lo, cl):
+        return _outcome(c, Status.UNAVAILABLE, "bad price data")
+    n, idx = len(frame), frame.index
+    if model == "plain":
+        k, fill, note = 0, float(c.current_price), "limit filled at the logged price"
+    else:
+        win = [j for j in range(1, n) if profile.no_entry_before <= idx[j].time() <= profile.no_entry_after]
+        k = 0 if lo[0] <= limit else next((j for j in win if lo[j] <= limit), None)
+        fill, note = float(limit), "resting limit filled at the limit"
+        if k is None:
+            if not session_over:
+                return _outcome(c, Status.OPEN, "limit not filled yet")
+            if incomplete:
+                return _outcome(c, Status.UNAVAILABLE, incomplete_note)
+            return _outcome(c, Status.NOT_FILLED,
+                            f"not filled inside the entry window (cancel by {cal.entry_cancel_by(profile, day):%H:%M})")
+    fill_at = c.created_at.isoformat() if k == 0 else str(idx[k])
+    if lo[k] <= c.stop:  # conservative: the fill bar's low may have come after the fill; its target never counts
+        return _finish(c, fill, fill_at, c.stop, idx[k], 0, "stop touched on the fill bar")
+    res = _walk(op, hi, lo, cl, k + 1, n - 1, c.stop, c.target_1) if k + 1 <= n - 1 else None
     if res is not None:
         px, j = res
-        return _finish(c, fill, fill_at, px, sess.index[j], j + 1, "limit filled at the logged price")
+        return _finish(c, fill, fill_at, px, idx[j], j - k, note)
     if session_over:
         if incomplete:
             return _outcome(c, Status.UNAVAILABLE, incomplete_note)
-        return _finish(c, fill, fill_at, cl[n - 1], sess.index[n - 1], n, "time exit at flat-by")
-    return _outcome(c, Status.OPEN, "holding", fill=fill, fill_at=fill_at, mtm=_mtm(c, fill, cl[n - 1]), held=n)
+        return _finish(c, fill, fill_at, cl[n - 1], idx[n - 1], n - 1 - k, "time exit at flat-by")
+    return _outcome(c, Status.OPEN, "holding", fill=fill, fill_at=fill_at, mtm=_mtm(c, fill, cl[n - 1]),
+                    held=n - 1 - k)
 
 
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
-    """A row logged with a price in [entry, entry_limit] printed a plain LIMIT: see _plain_limit. Otherwise:
+    """A row logged at or above the trigger printed a LIMIT ticket: see limit_model and _limit_fill. Otherwise:
     BUY stop-limit (trigger = entry, limit = entry_limit, as the ticket prints it) over created_at's session,
     bars strictly after created_at and before flat_by, filled by fills.stop_limit_fill: never better than the
     trigger, never worse than the limit, and only inside the desk's entry window [no_entry_before,
@@ -502,6 +540,10 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     mask = (idx.normalize() == pd.Timestamp(day)) & (idx > pd.Timestamp(created)) & \
            (np.array([t.time() < flat_by for t in idx], dtype=bool) if len(idx) else True)
     sess = bars15[mask]
+    limit = fills.limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
+    model = limit_model(c, limit)
+    if model is not None and not (profile.no_entry_before <= created.time() < cal.entry_cancel_by(profile, day)):
+        return _outcome(c, Status.NOT_FILLED, "logged outside the entry window")
     if sess.empty:
         if not session_over:
             return _outcome(c, Status.OPEN, "session still running")
@@ -515,9 +557,12 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = sess.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    limit = fills.limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
-    if c.current_price is not None and c.entry <= c.current_price <= limit:
-        return _plain_limit(c, sess, op, hi, lo, cl, session_over, incomplete, incomplete_note)
+    if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts
+        bar0 = pd.Timestamp(created).floor("15min")
+        if bar0 not in bars15.index:
+            return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars (no bar containing {created:%H:%M})")
+        frame = pd.concat([bars15.loc[[bar0]], sess])
+        return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day)
     window = [p for p, t in enumerate(sess.index)
               if profile.no_entry_before <= t.time() <= profile.no_entry_after]
     got = (fills.stop_limit_fill(op, hi, lo, window[0], window[-1], c.entry, limit)  # BUY stop-limit, as printed
