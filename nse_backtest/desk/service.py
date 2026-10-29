@@ -1,6 +1,7 @@
 """check_trade: stock frame in, TAKE / WAIT / SKIP verdict with hand-typed ticket out. Nothing is placed."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,8 @@ from .plan import build_plan
 from .sizing import size_position
 from .verdict import decide
 
+log = logging.getLogger(__name__)
+
 
 def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mode, limits: Limits,
                 ctx: CheckContext, *, entry: float | None = None, stop: float | None = None,
@@ -30,7 +33,8 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
     cps = round_trip_cost(profile, mode, plan.entry, plan.target_1, q, spread) / q
     try:
         odds = timemachine.odds(df, plan, cost_per_share=cps, replays=replays, robustness=robustness)
-    except ValueError:
+    except ValueError as e:  # no odds -> the monte_carlo check BLOCKs
+        log.warning("odds could not be computed for %s: %s", symbol, e)
         odds = None
     checks = run_checks(plan, sizing, odds, ctx)
     v = decide(plan, sizing, odds, checks, profile, plan.last_close, ctx.now)

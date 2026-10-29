@@ -93,3 +93,12 @@ def test_daily_plan_earnings_lookup_only_for_take_candidates():
     assert len(calls) == 2 and len(dp.take) >= 1  # 4 TAKE-able frames, only top 2 looked up
     for v in dp.take:
         assert any(c.name == "earnings" and c.status.value == "WARN" for c in v.checks)
+
+
+def test_a2_unknown_regime_daily_plan_lands_on_watch():
+    frames = {"AAA": series(), "BBB": series()}
+    dp = daily_plan(NSE, frames, None, Limits(capital=100_000), ctx(), replays=500)
+    assert dp.regime is None and dp.take == ()
+    assert {v.plan.symbol for v in dp.watch} == {"AAA", "BBB"}
+    for v in dp.watch:
+        assert [c.name for c in v.blocks()] == ["regime"]

@@ -67,3 +67,23 @@ def test_check_trade_hostile_is_skip(tmp_path):
     c = CheckContext(profile=NSE, limits=Limits(capital=100_000), now=NOW, regime="HOSTILE")
     v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), c, replays=500, robustness=False, audit_path=tmp_path / "a.jsonl")
     assert v.action is Action.SKIP and "regime" in v.headline
+
+
+# ---- Final fix wave A1: a 3-bar intraday session (no odds) used to be TAKE; now SKIP ----
+def test_a1_three_bar_session_without_odds_is_skip(tmp_path, monkeypatch):
+    day = pd.Timestamp("2026-10-28")
+    idx = pd.DatetimeIndex([day + pd.Timedelta(hours=9, minutes=15 + 15 * i) for i in range(3)])
+    df = pd.DataFrame({"Open": [100, 100.5, 101.2], "High": [101, 101.6, 102.0], "Low": [99.5, 100.2, 101.0],
+                       "Close": [100.5, 101.2, 101.05], "Volume": [1e6] * 3}, index=idx)
+    now = datetime(2026, 10, 28, 9, 50, tzinfo=ZoneInfo("Asia/Kolkata"))
+    c = CheckContext(profile=NSE, limits=Limits(capital=100_000), now=now, regime="TRENDING", governor_can_trade=True,
+                     ban=BanList(frozenset(), "ok", "2026-10-28", ""), earnings_checked=True,
+                     turnover_20d=1e9, today_gap_pct=0.2)
+    from nse_backtest.desk import service
+    logged = []
+    monkeypatch.setattr(service.log, "warning", lambda msg, *a: logged.append(msg % a))
+    v = check_trade(df, "X", NSE, Mode.INTRADAY, Limits(capital=100_000), c, replays=500, audit=False,
+                    entry=101.0, target=102.5)
+    assert v.odds is None and v.action is Action.SKIP and v.ticket == ()
+    assert "monte_carlo" in [b.name for b in v.blocks()]
+    assert any("odds could not be computed" in m and "Monte Carlo" in m for m in logged)

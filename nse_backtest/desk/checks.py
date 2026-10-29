@@ -116,7 +116,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         elif r == "TRENDING":
             out.append(_ck("regime", P, "Market regime TRENDING: swing longs have historically worked here"))
         else:
-            out.append(_ck("regime", W, unknown + "treat swing edge as unconfirmed"))
+            out.append(_ck("regime", B, "Regime unknown — treated as HOSTILE (swing longs blocked)"))
     else:
         if r == "HOSTILE":
             out.append(_ck("regime", W, "Market regime HOSTILE: intraday longs face a falling market, be selective"))
@@ -198,9 +198,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
 
     # 7 monte_carlo
     if odds is None:
-        out.append(_ck("monte_carlo", W, "Monte Carlo odds unavailable: no simulated expectancy to check"))
+        out.append(_ck("monte_carlo", B, "Odds could not be computed — no trade without odds"))
     elif (mc := _num(odds.mc_expectancy_r)) is None:
-        out.append(_ck("monte_carlo", W, "Monte Carlo expectancy is not a number — odds unavailable"))
+        out.append(_ck("monte_carlo", B, "Monte Carlo expectancy is not a number — no trade without odds"))
     elif mc < 0:
         out.append(_ck("monte_carlo", B, f"Simulated expectancy {mc:+.2f}R is negative"))
     elif mc < 0.1:
@@ -286,7 +286,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
             out.append(_ck("earnings", P, f"Next earnings on {ne} are not today"))
 
     # 12 setup_history
-    if odds is None:
+    if odds is None and not swing:
+        out.append(_ck("setup_history", B, "Research only: setup history could not be computed for this stock"))
+    elif odds is None:
         out.append(_ck("setup_history", W, "Setup history unavailable: no past trades of this setup to check"))
     else:
         n, exp = _num(odds.history_n), _num(odds.history_expectancy_r)
@@ -325,7 +327,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     raw_nf = odds.noise_negative_frac if odds is not None else None
     nf = _num(raw_nf)
     if raw_nf is None:
-        out.append(_ck("robustness", P, "Robustness not run: noise robustness test was not performed"))
+        out.append(_ck("robustness", W, "Robustness not run — edge not stress-tested"))
     elif nf is None:
         out.append(_ck("robustness", W, "Noise robustness result is not a number: fragility unknown"))
     elif nf > 0.25:

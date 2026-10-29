@@ -41,7 +41,7 @@ def test_baseline_all_pass_with_sixteen_checks():
 @pytest.mark.parametrize("override,name,status", [
     (dict(regime="HOSTILE"), "regime", Status.BLOCK),
     (dict(regime="MIXED"), "regime", Status.WARN),
-    (dict(regime=None), "regime", Status.WARN),
+    (dict(regime=None), "regime", Status.BLOCK),  # A2: unknown regime swing -> BLOCK
     (dict(governor_can_trade=False, governor_reasons=("max positions",)), "risk_governor", Status.BLOCK),
     (dict(governor_can_trade=None), "risk_governor", Status.WARN),
     (dict(ban=BanList(frozenset({"ABC"}), "ok", None, "")), "ban_list", Status.BLOCK),
@@ -63,7 +63,7 @@ def test_reward_risk_and_size_and_odds_blocks():
     assert by_name(run_checks(plan(), replace(SIZE, qty=0, note="too wide"), ODDS, ctx()))["size"] is Status.BLOCK
     assert by_name(run_checks(plan(), SIZE, replace(ODDS, mc_expectancy_r=-0.1), ctx()))["monte_carlo"] is Status.BLOCK
     assert by_name(run_checks(plan(), SIZE, replace(ODDS, noise_negative_frac=0.5), ctx()))["robustness"] is Status.WARN
-    assert by_name(run_checks(plan(), SIZE, None, ctx()))["monte_carlo"] is Status.WARN
+    assert by_name(run_checks(plan(), SIZE, None, ctx()))["monte_carlo"] is Status.BLOCK  # A1
 
 
 def test_stale_swing_data_blocks():
@@ -107,10 +107,10 @@ def _s(p, odds, c):
     return by_name(run_checks(p, SIZE, odds, c))
 
 
-def test_nan_monte_carlo_warns():
+def test_nan_monte_carlo_blocks():  # A1: unusable odds are no odds
     cs = run_checks(plan(), SIZE, replace(ODDS, mc_expectancy_r=NAN), ctx())
     c = [c for c in cs if c.name == "monte_carlo"][0]
-    assert c.status is Status.WARN and "not a number" in c.reason
+    assert c.status is Status.BLOCK and "not a number" in c.reason
 
 
 def test_nan_turnover_warns():
@@ -137,8 +137,8 @@ def test_nan_noise_frac_warns():
     assert _s(plan(), replace(ODDS, noise_negative_frac=NAN), ctx())["robustness"] is Status.WARN
 
 
-def test_robustness_not_run_stays_pass():
-    assert _s(plan(), replace(ODDS, noise_negative_frac=None), ctx())["robustness"] is Status.PASS
+def test_robustness_not_run_warns():  # A3
+    assert _s(plan(), replace(ODDS, noise_negative_frac=None), ctx())["robustness"] is Status.WARN
 
 
 def test_nan_pnl_row_unreadable_warns_in_daily_loss():
@@ -260,8 +260,8 @@ def test_swing_hostile_case_insensitive_blocks(reg):
     assert _c("regime", regime=reg).status is Status.BLOCK
 
 
-def test_swing_garbage_regime_warns():
-    assert _c("regime", regime="garbage").status is Status.WARN
+def test_swing_garbage_regime_blocks():  # A2
+    assert _c("regime", regime="garbage").status is Status.BLOCK
 
 
 def test_intraday_hostile_lowercase_warns():
@@ -331,7 +331,7 @@ def test_streak_tie_order_decides_result():
 def test_string_numerics_never_raise():
     assert _c("liquidity", turnover_20d="1e9").status is Status.WARN
     assert _c("gap", today_gap_pct="x").status is Status.WARN
-    assert _c("monte_carlo", o=replace(ODDS, mc_expectancy_r="1")).status is Status.WARN
+    assert _c("monte_carlo", o=replace(ODDS, mc_expectancy_r="1")).status is Status.BLOCK  # A1
     assert _c("setup_history", o=replace(ODDS, history_expectancy_r="x")).status is Status.WARN
     assert _c("robustness", o=replace(ODDS, noise_negative_frac="x")).status is Status.WARN
 
@@ -413,3 +413,27 @@ def test_governor_not_evaluated_surfaces_reasons():
     assert cs["risk_governor"].reason == "Risk governor not evaluated: a broke; b broke"
     cs = _by(run_checks(plan(), SIZE, ODDS, ctx(governor_can_trade=None)))
     assert cs["risk_governor"].reason == "Risk governor not evaluated: portfolio limits could not be checked"
+
+
+# ---- Final fix wave A1-A3: no odds / unknown regime / robustness not run fail closed ----
+def test_a1_no_odds_blocks_monte_carlo_both_modes():
+    for p in (plan(), _intra()):
+        c = _c("monte_carlo", p=p, o=None)
+        assert c.status is Status.BLOCK and c.reason == "Odds could not be computed — no trade without odds"
+
+
+def test_a1_no_odds_setup_history_intraday_blocks_swing_warns():
+    c = _c("setup_history", p=_intra(), o=None)
+    assert c.status is Status.BLOCK and "Research only" in c.reason
+    assert _c("setup_history", o=None).status is Status.WARN
+
+
+@pytest.mark.parametrize("reg", [None, "", "garbage"])
+def test_a2_unknown_regime_swing_blocks(reg):
+    c = _c("regime", regime=reg)
+    assert c.status is Status.BLOCK and c.reason == "Regime unknown — treated as HOSTILE (swing longs blocked)"
+
+
+def test_a3_robustness_not_run_warns():
+    c = _c("robustness", o=replace(ODDS, noise_negative_frac=None))
+    assert c.status is Status.WARN and c.reason == "Robustness not run — edge not stress-tested"
