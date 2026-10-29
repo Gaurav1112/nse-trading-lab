@@ -56,6 +56,15 @@ def _market_now(profile: MarketProfile, now: datetime | None = None) -> datetime
     return now.astimezone(ZoneInfo(profile.tz)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(profile.tz))
 
 
+def latest_completed_session(profile: MarketProfile, now: datetime | None = None) -> date:
+    """The most recent trading day whose session has closed, in market time."""
+    now = _market_now(profile, now)
+    today = now.date()
+    if cal.is_trading_day(profile, today) and now.time() >= cal.session_close_for(profile, today):
+        return today
+    return cal.previous_trading_day(profile, today)
+
+
 def _needs_refetch(profile: MarketProfile, df: pd.DataFrame, now: datetime) -> bool:
     """Just after the close a cached frame may hold a mid-session partial bar: fetch once more, uncached."""
     today = now.date()
@@ -91,9 +100,11 @@ def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: date
     today = now.date()
     start = (today - timedelta(days=int(365.25 * years))).isoformat()
     end = (today + timedelta(days=1)).isoformat()
-    df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, adjusted=adjusted)
+    latest = latest_completed_session(profile, now)  # a lagging start/end download is topped up to this
+    df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, adjusted=adjusted, latest_completed=latest)
     if _needs_refetch(profile, df, now):
-        df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, use_cache=False, adjusted=adjusted)
+        df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, use_cache=False, adjusted=adjusted,
+                       latest_completed=latest)
     return _finalise_daily(profile, symbol, df, now)
 
 
@@ -112,7 +123,8 @@ def load_daily_many(profile: MarketProfile, symbols, years: int = 4, *,
     start = (today - timedelta(days=int(365.25 * years))).isoformat()
     end = (today + timedelta(days=1)).isoformat()
     raw, errors = fetch_many_daily(symbols, start, end, profile.exchange,
-                                   refetch_if=lambda sym, df: _needs_refetch(profile, df, now))
+                                   refetch_if=lambda sym, df: _needs_refetch(profile, df, now),
+                                   latest_completed=latest_completed_session(profile, now))
     errors = dict(errors)
     frames: dict[str, pd.DataFrame] = {}
     for sym in symbols:
@@ -179,13 +191,16 @@ def live_quote(profile: MarketProfile, symbol: str) -> LiveQuote | None:
         return None
 
 
-def load_regime(profile: MarketProfile) -> pd.DataFrame:
-    """Regime-index daily bars. Raises on failure so the caller can surface the reason."""
+def load_regime(profile: MarketProfile, *, now: datetime | None = None) -> pd.DataFrame:
+    """Regime-index daily bars. Raises on failure so the caller can surface the reason.
+    A lagging download is topped up like load_daily's; if the index still lags, it stays lagging."""
     from nse_backtest.data import fetch_nse
-    start = (date.today() - timedelta(days=800)).isoformat()
+    now = _market_now(profile, now)
+    start = (now.date() - timedelta(days=800)).isoformat()
     # index symbols (^NSEI, ^GSPC) take no exchange suffix: '^NSEI.NS' does not exist on Yahoo
     exchange = "" if profile.regime_index.startswith("^") else profile.exchange
-    df = fetch_nse(profile.regime_index, start, exchange=exchange)
+    df = fetch_nse(profile.regime_index, start, exchange=exchange,
+                   latest_completed=latest_completed_session(profile, now))
     if df is None or len(df) == 0:
         raise ValueError(f"no regime index data for {profile.regime_index}")
     return _clean_bars(df, f"regime index {profile.regime_index}")

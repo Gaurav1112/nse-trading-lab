@@ -629,7 +629,7 @@ def test_r1_load_daily_adjusted_passthrough(monkeypatch):
     import nse_backtest.data as data
     seen = []
 
-    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
+    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True, **_k):
         seen.append(adjusted)
         return _daily_to("2026-10-28")
     monkeypatch.setattr(data, "fetch_nse", fake)

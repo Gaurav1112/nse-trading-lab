@@ -73,7 +73,9 @@ def test_frames_equal_load_daily(monkeypatch, tmp_path, now):
     monkeypatch.setattr(data_mod, "CACHE_DIR", str(tmp_path / "batch"))
     calls = _record(monkeypatch, multi({f"{s}.NS": df for s, df in raw.items()}))
     frames, errors = loaders.load_daily_many(NSE, ["INFY", "TCS"], now=now)
-    assert errors == {} and calls == [["INFY.NS", "TCS.NS"]]
+    # after the close TCS (last bar 11-06) lags the 11-09 session: ONE period top-up, which has nothing newer
+    topup = [] if now.hour == 10 else [["TCS.NS"]]
+    assert errors == {} and calls == [["INFY.NS", "TCS.NS"]] + topup
     for sym in raw:
         pd.testing.assert_frame_equal(frames[sym], expected[sym])
         assert date(2026, 11, 8) not in set(frames[sym].index.date)  # Muhurat Sunday dropped
@@ -119,7 +121,7 @@ def test_after_close_fallback_does_not_reread_the_stale_cache(monkeypatch, cache
     _record(monkeypatch, pd.DataFrame())  # batch empty -> fallback
     seen = []
     monkeypatch.setattr(data_mod, "fetch_nse",
-                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True: seen.append(use_cache)
+                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True, **_k: seen.append(use_cache)
                         or _daily_to("2026-11-09"))
     frames, errors = loaders.load_daily_many(NSE, ["INFY"], now=now)
     assert errors == {} and seen == [False]

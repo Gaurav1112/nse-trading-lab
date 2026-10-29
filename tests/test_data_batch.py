@@ -137,7 +137,7 @@ def test_batch_raises_falls_back_to_fetch_nse_per_symbol(monkeypatch):
     _record(monkeypatch, RuntimeError("rate limited"))
     seen = []
 
-    def per_symbol(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
+    def per_symbol(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True, **_k):
         seen.append((sym, start, end, exchange, use_cache))
         if sym == "CCC":
             raise ValueError("No data found for CCC.NS")
@@ -273,7 +273,7 @@ def test_missing_ticker_is_retried_per_symbol(monkeypatch):
     _record(monkeypatch, multi({"BBB.NS": b}))
     seen = []
     monkeypatch.setattr(data_mod, "fetch_nse",
-                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True: seen.append((sym, use_cache)) or c)
+                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True, **_k: seen.append((sym, use_cache)) or c)
     frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
     assert errors == {} and seen == [("CCC", True)] and frames["CCC"] is c
 
@@ -327,7 +327,7 @@ def test_fetch_many_daily_unadjusted_retry_stays_unadjusted(monkeypatch):
     _record(monkeypatch, RuntimeError("rate limited"))
     seen = []
     monkeypatch.setattr(data_mod, "fetch_nse", lambda sym, start, end=None, exchange="NS", use_cache=True,
-                        adjusted=True: seen.append(adjusted) or _bars(base=200))
+                        adjusted=True, **_k: seen.append(adjusted) or _bars(base=200))
     data_mod.fetch_many_daily(["BBB"], START, END, "NS", adjusted=False)
     assert seen == [False]
 
