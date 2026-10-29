@@ -11,6 +11,7 @@ import pandas as pd
 
 from nse_backtest import tape_monitor
 
+from .calendars import is_trading_day
 from .checks import CheckContext
 from .models import Action, DeskVerdict, LiveQuote, Limits, Mode
 from .service import check_trade
@@ -37,13 +38,16 @@ def turnover_20d(df) -> float | None:
         return None
 
 
-def today_gap_pct(daily_df, quote: LiveQuote | None, now) -> float | None:
+def today_gap_pct(daily_df, quote: LiveQuote | None, now, profile=None) -> float | None:
     """(today's open / previous completed daily close - 1) * 100, from a live quote.
 
     None without a quote, and None unless the quote's own time (in the market timezone of `now`)
-    falls on market-today: a previous session's open is not today's gap.
+    falls on market-today: a previous session's open is not today's gap. With a `profile`, also None
+    when market-today is not a trading day on the exchange calendar (no session, so no gap).
     """
     if quote is None or daily_df is None or now is None or getattr(now, "tzinfo", None) is None:
+        return None
+    if profile is not None and not is_trading_day(profile, now.date()):
         return None
     try:
         day = quote.as_of.astimezone(now.tzinfo).date()
@@ -201,7 +205,7 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
                 quote = quote_lookup(sym)
             except Exception:  # noqa: BLE001 - no quote: live_price and gap WARN
                 quote = None
-            c2 = replace(c2, today_gap_pct=today_gap_pct(frames[sym], quote, c2.now))
+            c2 = replace(c2, today_gap_pct=today_gap_pct(frames[sym], quote, c2.now, profile))
         try:
             v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, c2, entry=entries[sym],
                              robustness=True, replays=replays, audit=True, audit_path=audit_path, quote=quote)

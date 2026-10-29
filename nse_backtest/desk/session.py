@@ -14,6 +14,7 @@ import pandas as pd
 
 from nse_backtest import tape_monitor
 
+from . import calendars as cal
 from . import loaders
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
@@ -37,16 +38,28 @@ def limits_with_status(profile) -> tuple[Limits, bool]:
 _REGIME_MAX_AGE_DAYS = 3
 
 
-def _regime_stale(regime_df, profile) -> str | None:
-    """Warning text when the regime index's last bar is too old for market-today, else None."""
+_REGIME_MAX_MISSED_SESSIONS = 2  # the index may lag one session behind the stocks
+
+
+def _regime_stale(regime_df, profile, now: datetime | None = None) -> str | None:
+    """Warning text when the regime index's last bar is too old for market-today, else None.
+
+    Covered years: stale once 2 or more trading sessions lie strictly between the last bar and today.
+    Years without a holiday calendar keep the 3-calendar-day rule.
+    """
     try:
         last = pd.Timestamp(regime_df.index[-1]).date()
     except Exception:  # noqa: BLE001 - unreadable dates: treat as stale
         return "Regime index data is stale (last bar unknown)"
-    today = datetime.now(ZoneInfo(profile.tz)).date()
-    if (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS):
-        return f"Regime index data is stale (last bar {last})"
-    return None
+    tz = ZoneInfo(profile.tz)
+    today = (now.astimezone(tz) if now is not None and now.tzinfo is not None else now or datetime.now(tz)).date()
+    if last >= today:
+        return None
+    if cal.first_uncovered_year(profile, last, today) is not None:
+        stale = (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS)
+    else:
+        stale = cal.trading_days_between(profile, last, today) >= _REGIME_MAX_MISSED_SESSIONS
+    return f"Regime index data is stale (last bar {last})" if stale else None
 
 
 def assess(regime_df, on_warning: Warn = None, profile=None):
@@ -123,7 +136,7 @@ def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, s
     ctx = context_for(profile, limits, daily, regime)
     nxt, checked = loaders.next_earnings(profile, sym)
     quote = quote_for(profile, sym, on_warning)
-    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now))
+    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now, profile))
     return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target, quote=quote)
 
 
@@ -165,7 +178,7 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
         try:  # daily bars give the liquidity (turnover) and gap checks something to read
             daily = loaders.load_daily(profile, s)
             per_symbol[s] = replace(ctx, turnover_20d=turnover_20d(daily),
-                                    today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now))
+                                    today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now, profile))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)

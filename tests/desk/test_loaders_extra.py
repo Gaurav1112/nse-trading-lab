@@ -574,3 +574,26 @@ def test_lr_load_daily_us_after_close_uses_market_tz(monkeypatch):
     calls = _recording_fetch(monkeypatch, _daily_to("2026-10-29"))
     loaders.load_daily(US, "AAPL", now=datetime(2026, 10, 29, 16, 30, tzinfo=et))
     assert calls == [True, False]
+
+
+# ---- S2: exchange calendars in load_daily and the PDT window ----
+def test_s2_load_daily_keeps_todays_bar_after_early_close(monkeypatch):
+    et = loaders.ZoneInfo(US.tz)
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-11-27"))
+    out = loaders.load_daily(US, "AAPL", now=datetime(2026, 11, 27, 13, 30, tzinfo=et))
+    assert out.index[-1].date() == date(2026, 11, 27)  # early close 13:00: bar is complete
+    assert calls == [True, False]  # just after the (early) close: re-fetched once, uncached
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-11-27"))
+    out = loaders.load_daily(US, "AAPL", now=datetime(2026, 11, 27, 12, 30, tzinfo=et))
+    assert out.index[-1].date() < date(2026, 11, 27)  # session still open: partial bar dropped
+    assert calls == [True]
+
+
+def test_s2_pdt_window_is_last_5_trading_days(tmp_path):
+    rows = [  # US Thanksgiving 2026-11-26 is not a trading day, so the window reaches back to Fri 11-20
+        {"market": "US", "symbol": "A", "entry_date": "2026-11-20", "closed_date": "2026-11-20", "pnl": 1},
+        {"market": "US", "symbol": "B", "entry_date": "2026-11-19", "closed_date": "2026-11-19", "pnl": 1},
+    ]
+    _journal(tmp_path, rows)
+    now = datetime(2026, 11, 27, 11, 0, tzinfo=loaders.ZoneInfo(US.tz))
+    assert loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=now).day_trades_5d == 1

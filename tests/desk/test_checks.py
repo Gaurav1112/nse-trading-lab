@@ -546,10 +546,12 @@ def test_lr_reward_risk_widens_only_when_values_differ_but_print_equal():
 
 
 def test_lr_freshness_pluralises_days():
-    one = _reason("freshness", plan(last_bar="2026-10-28T00:00:00"))
+    # S2: day counts appear only on the uncovered-year 3-day fallback (NSE 2027 has no holiday calendar yet)
+    now = datetime(2027, 1, 7, 10, 0, tzinfo=IST)
+    one = _reason("freshness", plan(last_bar="2027-01-06T00:00:00"), now=now)
     assert "1 day old" in one and "1 days" not in one
-    assert "2 days old" in _reason("freshness", plan(last_bar="2026-10-27T00:00:00"))
-    assert "0 days old" in _reason("freshness", plan(last_bar="2026-10-29T00:00:00"))
+    assert "2 days old" in _reason("freshness", plan(last_bar="2027-01-05T00:00:00"), now=now)
+    assert "0 days old" in _reason("freshness", plan(last_bar="2027-01-07T00:00:00"), now=now)
 
 
 def test_lr_liquidity_compact_money_per_market():
@@ -560,3 +562,94 @@ def test_lr_liquidity_compact_money_per_market():
     assert _reason("liquidity", turnover_20d=17_727_000_000) == "20-day turnover ₹1,772.7 Cr meets the minimum ₹5.0 Cr"
     assert "$1,234.5M" in _reason("liquidity", profile=US, turnover_20d=1_234_500_000)
     assert _reason("liquidity", profile=US, turnover_20d=1e6) == "20-day turnover $1.0M is below the minimum $20.0M"
+
+
+# ---- S2: exchange holiday calendars ----
+def _fresh(last_bar, now, profile=NSE):
+    return _c("freshness", p=plan(last_bar=last_bar, market=profile.code), profile=profile, now=now)
+
+
+@pytest.mark.parametrize("last_bar,now,status,reason", [
+    ("2026-10-16T00:00:00", datetime(2026, 10, 21, 10, 0, tzinfo=IST), Status.BLOCK,
+     "Data is stale: last daily bar 2026-10-16 misses 1 trading session(s)"),
+    ("2026-10-19T00:00:00", datetime(2026, 10, 21, 10, 0, tzinfo=IST), Status.PASS,
+     "Last daily bar 2026-10-19 is the latest completed session"),
+    ("2026-10-29T00:00:00", datetime(2026, 10, 29, 16, 0, tzinfo=IST), Status.PASS,
+     "Last daily bar 2026-10-29 is the latest completed session"),
+    ("2026-10-28T00:00:00", datetime(2026, 10, 29, 16, 0, tzinfo=IST), Status.BLOCK,
+     "Data is stale: last daily bar 2026-10-28 misses 1 trading session(s)"),
+    ("2026-10-28T00:00:00", datetime(2026, 10, 29, 11, 0, tzinfo=IST), Status.PASS,
+     "Last daily bar 2026-10-28 is the latest completed session"),
+    ("2026-10-16T00:00:00", datetime(2026, 10, 18, 12, 0, tzinfo=IST), Status.PASS,  # weekend
+     "Last daily bar 2026-10-16 is the latest completed session"),
+    ("2026-10-27T00:00:00", datetime(2026, 10, 29, 10, 0, tzinfo=IST), Status.BLOCK,
+     "Data is stale: last daily bar 2026-10-27 misses 1 trading session(s)"),
+])
+def test_s2_swing_freshness_counts_trading_sessions(last_bar, now, status, reason):
+    c = _fresh(last_bar, now)
+    assert (c.status, c.reason) == (status, reason)
+
+
+def test_s2_swing_freshness_early_close_counts_today_after_1pm():
+    et = ZoneInfo("America/New_York")
+    c = _fresh("2026-11-25T00:00:00", datetime(2026, 11, 27, 13, 30, tzinfo=et), US)
+    assert c.status is Status.BLOCK and "misses 1 trading session(s)" in c.reason
+    c = _fresh("2026-11-25T00:00:00", datetime(2026, 11, 27, 12, 0, tzinfo=et), US)
+    assert c.status is Status.PASS  # Thanksgiving was a holiday, today's short session still open
+
+
+def test_s2_swing_freshness_uncovered_year_uses_3_day_rule_and_warns():
+    c = _fresh("2027-01-04T00:00:00", datetime(2027, 1, 5, 10, 0, tzinfo=IST))
+    assert c.status is Status.WARN
+    assert c.reason == ("Last daily bar is 1 day old (limit 3)"
+                        " (holiday calendar not available for 2027; using a 3-day rule)")
+    c = _fresh("2026-12-28T00:00:00", datetime(2027, 1, 5, 10, 0, tzinfo=IST))
+    assert c.status is Status.BLOCK
+    assert c.reason == ("Data is stale: last daily bar is 8 days old (limit 3)"
+                        " (holiday calendar not available for 2027; using a 3-day rule)")
+
+
+def test_s2_swing_freshness_very_old_bar_blocks():
+    c = _fresh("2026-02-02T00:00:00", datetime(2026, 10, 29, 10, 0, tzinfo=IST))
+    assert c.status is Status.BLOCK and c.reason.startswith("Data is stale: last daily bar 2026-02-02 misses")
+
+
+def _window(now, profile=NSE, last_bar=None):
+    p = plan(mode=Mode.INTRADAY, last_bar=last_bar or now.replace(tzinfo=None).isoformat(), market=profile.code)
+    return _c("entry_window", p=p, profile=profile, now=now)
+
+
+def test_s2_entry_window_blocks_on_holiday_and_weekend():
+    c = _window(datetime(2026, 11, 10, 10, 0, tzinfo=IST))
+    assert (c.status, c.reason) == (Status.BLOCK, "Market closed today: Diwali-Balipratipada")
+    c = _window(datetime(2026, 10, 31, 10, 0, tzinfo=IST))
+    assert (c.status, c.reason) == (Status.BLOCK, "Market closed today: weekend")
+
+
+def test_s2_entry_window_blocks_on_early_close():
+    c = _window(datetime(2026, 11, 27, 11, 0, tzinfo=ZoneInfo("America/New_York")), US)
+    assert (c.status, c.reason) == (Status.BLOCK, "Early close today (13:00) — no new intraday entries")
+
+
+def test_s2_entry_window_uncovered_year_warns_with_suffix():
+    c = _window(datetime(2027, 1, 5, 10, 0, tzinfo=IST))
+    assert c.status is Status.WARN
+    assert c.reason == "10:00 is inside the entry window 09:30-14:30 (holiday calendar not available for 2027)"
+    c = _window(datetime(2027, 1, 5, 15, 0, tzinfo=IST))
+    assert c.status is Status.BLOCK and c.reason.endswith(" (holiday calendar not available for 2027)")
+
+
+def test_s2_live_price_on_holiday_warns_market_closed():
+    now = datetime(2026, 10, 20, 11, 0, tzinfo=IST)
+    c = _lpq(100.0, datetime(2026, 10, 19, 15, 29, tzinfo=IST), now)
+    assert (c.status, c.reason) == (Status.WARN, "Market closed today (Dussehra); last trade 2026-10-19 15:29")
+    now = datetime(2026, 10, 31, 11, 0, tzinfo=IST)
+    c = _lpq(100.0, datetime(2026, 10, 30, 15, 29, tzinfo=IST), now)
+    assert (c.status, c.reason) == (Status.WARN, "Market closed today (weekend); last trade 2026-10-30 15:29")
+
+
+def test_s2_live_price_early_close_session_ends_at_1pm():
+    et = ZoneInfo("America/New_York")
+    now = datetime(2026, 11, 27, 14, 0, tzinfo=et)
+    c = _lpq(100.0, datetime(2026, 11, 27, 12, 59, tzinfo=et), now, US)
+    assert c.status is Status.PASS and "(market closed)" in c.reason

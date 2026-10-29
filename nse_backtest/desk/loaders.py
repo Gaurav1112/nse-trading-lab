@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from . import calendars as cal
 from . import nse_lists
 from .audit import data_dir
 from .checks import CheckContext
@@ -62,13 +63,14 @@ def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: date
     today = now.date()
     start = (today - timedelta(days=int(365.25 * years))).isoformat()
     df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange)
-    if (now.weekday() < 5 and pd.Timestamp(df.index[-1]).date() == today
-            and timedelta() <= datetime.combine(today, now.time()) - datetime.combine(today, profile.session_close) < timedelta(hours=3)):
+    close = cal.session_close_for(profile, today)  # early-close days end at 13:00 ET
+    if (cal.is_trading_day(profile, today) and pd.Timestamp(df.index[-1]).date() == today
+            and timedelta() <= datetime.combine(today, now.time()) - datetime.combine(today, close) < timedelta(hours=3)):
         # just after the close a cached frame may hold a mid-session partial bar: re-fetch once, uncached
         df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange,
                        use_cache=False)
     df = _clean_bars(df, f"daily bars for {symbol}")
-    if pd.Timestamp(df.index[-1]).date() == today and now.time() < profile.session_close:
+    if pd.Timestamp(df.index[-1]).date() == today and now.time() < close:
         df = df.iloc[:-1]  # partial bar: plans are built on completed bars
         if len(df) == 0:
             raise ValueError(f"daily bars for {symbol}: no completed bars")
@@ -329,19 +331,23 @@ def _day(row: dict, keys) -> date | None:
         return None
 
 
-def _last_weekdays(today: date, n: int = 5) -> set[date]:
-    out, d = set(), today
-    while len(out) < n:
-        if d.weekday() < 5:
-            out.add(d)
-        d -= timedelta(days=1)
+def _last_trading_days(profile: MarketProfile, today: date, n: int = 5) -> set[date]:
+    """Today (when it is a trading day) and the trading days before it, n in all, from the exchange calendar."""
+    out = {today} if cal.is_trading_day(profile, today) else set()
+    d = today
+    for _ in range(n):  # bounded: each step is one bounded calendar walk
+        if len(out) >= n:
+            break
+        d = cal.previous_trading_day(profile, d)
+        out.add(d)
     return out
 
 
-def day_trades_5d(journal: list[dict], today: date) -> int | None:
-    """US round trips opened and closed on the same day within the last 5 weekdays.
+def day_trades_5d(journal: list[dict], today: date, profile: MarketProfile | None = None) -> int | None:
+    """US round trips opened and closed on the same day within the last 5 trading days.
     None when a row that could be one has no readable entry or exit date (count unknowable)."""
-    window, n = _last_weekdays(today), 0
+    from .markets import US
+    window, n = _last_trading_days(profile or US, today), 0
     for r in journal:
         if str(r.get("market") or "NSE").upper() != "US":
             continue
@@ -397,7 +403,7 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
         from .daily import turnover_20d
         turnover = turnover_20d(symbol_df)
     # today's gap needs a live day-open: set by the caller from a quote, else None (gap WARNs)
-    trades_5d = day_trades_5d(journal, now.date()) if profile.code == "US" and journal_readable else (
+    trades_5d = day_trades_5d(journal, now.date(), profile) if profile.code == "US" and journal_readable else (
         0 if journal_readable else None)
     return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
                         governor_can_trade=can_trade, governor_reasons=reasons, ban=ban, regime=regime,

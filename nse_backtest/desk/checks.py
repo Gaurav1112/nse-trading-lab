@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import Check, Limits, Mode, Odds, Sizing, Status, TradePlan
 from nse_backtest.desk.nse_lists import BanList
@@ -101,6 +102,46 @@ _QUOTE_MAX_AGE_MIN = 20
 
 def _days(n: int) -> str:
     return "day" if n == 1 else "days"
+
+
+def _closed_name(prof: MarketProfile, d: date) -> str:
+    return cal.holiday_name(prof, d) or "weekend"
+
+
+def _swing_freshness(prof: MarketProfile, bar_day: date, now: datetime) -> Check:
+    """Daily data is fresh when no completed trading session is missing after the last bar."""
+    P, W, B = Status.PASS, Status.WARN, Status.BLOCK
+    today = now.date()
+    if bar_day > today:
+        return _ck("freshness", W, "Last bar is in the future — check the clock/data")
+    year = cal.first_uncovered_year(prof, bar_day, today)
+    if year is not None:  # calendar unknown: the old 3-calendar-day rule, never a clean PASS
+        sfx = f" (holiday calendar not available for {year}; using a 3-day rule)"
+        age = (today - bar_day).days
+        if age > 3:
+            return _ck("freshness", B, f"Data is stale: last daily bar is {age} {_days(age)} old (limit 3){sfx}")
+        return _ck("freshness", W, f"Last daily bar is {age} {_days(age)} old (limit 3){sfx}")
+    missed = cal.trading_days_between(prof, bar_day, today)
+    if bar_day < today and cal.is_trading_day(prof, today) and now.time() >= cal.session_close_for(prof, today):
+        missed += 1  # today's session has closed and its bar is missing
+    if missed >= 1:
+        return _ck("freshness", B, f"Data is stale: last daily bar {bar_day} misses {missed} trading session(s)")
+    return _ck("freshness", P, f"Last daily bar {bar_day} is the latest completed session")
+
+
+def _entry_window(prof: MarketProfile, now: datetime) -> Check:
+    P, W, B = Status.PASS, Status.WARN, Status.BLOCK
+    today = now.date()
+    known = cal.covered(prof, today)
+    sfx = "" if known else f" (holiday calendar not available for {today.year})"
+    window = f"{prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"
+    if not cal.is_trading_day(prof, today):
+        return _ck("entry_window", B, f"Market closed today: {_closed_name(prof, today)}{sfx}")
+    if cal.is_early_close(prof, today):
+        return _ck("entry_window", B, f"Early close today ({cal.session_close_for(prof, today):%H:%M}) — no new intraday entries")
+    if not (prof.no_entry_before <= now.time() <= prof.no_entry_after):
+        return _ck("entry_window", B, f"{now:%H:%M} is outside the entry window {window}{sfx}")
+    return _ck("entry_window", P if known else W, f"{now:%H:%M} is inside the entry window {window}{sfx}")
 
 
 def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext,
@@ -231,13 +272,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     elif naive:
         out.append(_ck("freshness", B, "Clock has no timezone — cannot verify freshness"))
     elif swing:
-        age = (now.date() - bar.date()).days
-        if age < 0:
-            out.append(_ck("freshness", W, "Last bar is in the future — check the clock/data"))
-        elif age > 3:
-            out.append(_ck("freshness", B, f"Data is stale: last daily bar is {age} {_days(age)} old (limit 3)"))
-        else:
-            out.append(_ck("freshness", P, f"Last daily bar is {age} {_days(age)} old (limit 3)"))
+        out.append(_swing_freshness(prof, bar.date(), now))
     else:
         age_min = (now - bar).total_seconds() / 60
         if age_min < -5:
@@ -263,8 +298,12 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         as_of = ctx.quote_as_of.astimezone(tz)
         age_min = (now - as_of).total_seconds() / 60
-        in_session = now.weekday() < 5 and prof.session_open <= now.time() <= prof.session_close
-        if as_of.date() != now.date():
+        today = now.date()
+        trading = cal.is_trading_day(prof, today)
+        in_session = trading and prof.session_open <= now.time() <= cal.session_close_for(prof, today)
+        if not trading:
+            out.append(_ck("live_price", W, f"Market closed today ({_closed_name(prof, today)}); last trade {as_of:%Y-%m-%d %H:%M}"))
+        elif as_of.date() != today:
             out.append(_ck("live_price", W, f"Last trade was {as_of:%Y-%m-%d %H:%M} — market not open today yet; confirm the live price before entering"))
         elif in_session and age_min > _QUOTE_MAX_AGE_MIN:
             out.append(_ck("live_price", W, f"Live price is {age_min:.0f} min old"))
@@ -278,12 +317,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("entry_window", P, "Swing entries have no time-of-day window"))
     elif naive:
         out.append(_ck("entry_window", B, "Clock has no timezone — cannot verify freshness"))
-    elif now.weekday() >= 5:
-        out.append(_ck("entry_window", B, f"Market is closed: {now:%A} is a weekend"))
-    elif not (prof.no_entry_before <= now.time() <= prof.no_entry_after):
-        out.append(_ck("entry_window", B, f"{now:%H:%M} is outside the entry window {prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"))
     else:
-        out.append(_ck("entry_window", P, f"{now:%H:%M} is inside the entry window {prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"))
+        out.append(_entry_window(prof, now))
 
     # 11 liquidity
     turn = _num(ctx.turnover_20d)
