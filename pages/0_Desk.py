@@ -5,6 +5,7 @@ error and the rest of the page keeps working.
 """
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import pandas as pd
@@ -52,12 +53,24 @@ def _safe(label: str, fn, *args, **kw):
 
 # ---------------------------------------------------------------- verdict card
 
+def _check_summary(v: DeskVerdict) -> str:
+    """One line: 'N BLOCK · M WARN' with the names; red if any BLOCK, amber if only WARN, else green."""
+    blocks, warns = [c.name for c in v.blocks()], [c.name for c in v.warns()]
+    if not blocks and not warns:
+        return f"<span style='color:{STATUS_COLOR['PASS']};font-weight:700'>All {len(v.checks)} checks passed</span>"
+    color = STATUS_COLOR["BLOCK"] if blocks else STATUS_COLOR["WARN"]
+    parts = [f"{len(blocks)} BLOCK · {len(warns)} WARN"]
+    names = [f"{label}: {', '.join(n)}" for label, n in (("BLOCK", blocks), ("WARN", warns)) if n]
+    return f"<span style='color:{color};font-weight:700'>{parts[0]} &nbsp;({' · '.join(names)})</span>"
+
+
 def render_verdict(v: DeskVerdict, profile, key: str) -> None:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     color = ACTION_COLOR.get(v.action.value, "#888888")
     st.markdown(f"<div style='font-size:2.6rem;font-weight:800;color:{color};line-height:1.1'>"
                 f"{v.action.value}</div>", unsafe_allow_html=True)
     st.markdown(f"**{v.headline}**")
+    st.markdown(_check_summary(v), unsafe_allow_html=True)
 
     st.markdown("**Plan**")
     st.dataframe(pd.DataFrame([{
@@ -154,17 +167,16 @@ with st.sidebar:
 # ---------------------------------------------------------------- header: regime
 
 def _regime_state(profile):
-    """(regime_df, tape, error). Cached per market and day."""
+    """(regime_df, tape, error). Only a successful load is cached (per market and day); a failure retries."""
     key = ("regime", profile.code, _today())
     if key in st.session_state:
         return st.session_state[key]
-    df = tape = err = None
     try:
         df = loaders.load_regime(profile)
         tape = tape_monitor.assess_tape(df)
     except Exception as e:  # noqa: BLE001
-        err = str(e)
-    st.session_state[key] = (df, tape, err)
+        return None, None, str(e) or type(e).__name__
+    st.session_state[key] = (df, tape, None)
     return st.session_state[key]
 
 
@@ -209,8 +221,10 @@ with tab_plan:
             rows = []
             for v in plan.watch:
                 trig = v.trigger or v.plan.entry
+                px_now = v.current_price
+                ok = isinstance(px_now, (int, float)) and math.isfinite(px_now) and px_now > 0
                 rows.append({"Symbol": v.plan.symbol, "Trigger": profile.money(trig),
-                             "Distance %": round((trig / v.current_price - 1) * 100, 2),
+                             "Distance %": str(round((trig / px_now - 1) * 100, 2)) if ok else "n/a",
                              "Blocked by": ", ".join(c.name for c in v.blocks()) or "waiting for trigger"})
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         else:
@@ -233,7 +247,7 @@ with tab_check:
     entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry")
     stop = e2.number_input("Stop (0 = auto)", min_value=0.0, value=0.0, key="desk_stop")
     target = e3.number_input("Target (0 = auto)", min_value=0.0, value=0.0, key="desk_target")
-    result_key = ("check", market)
+    result_key = ("check", market, symbol.strip().upper(), mode, entry, stop, target)
     if st.button("Check this trade", key="desk_check"):
         st.session_state.pop(result_key, None)
         try:
@@ -255,17 +269,22 @@ with tab_check:
 
 with tab_pos:
     pos_key = ("positions", market)
+    loaded_now = False
     if st.button("Refresh positions", key="desk_refresh_pos") or pos_key not in st.session_state:
+        loaded_now = True
         def _review():
             positions = loaders.market_positions(profile)
             syms = sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")})
             frames = session.load_frames(profile, syms)
             return review_positions(positions, {k: f for k, f in frames.items() if f is not None}, profile)
         actions, err = _safe("Could not review positions", _review)
-        st.session_state[pos_key] = actions
-    actions = st.session_state.get(pos_key)
-    if actions is None:
-        pass  # the error is already shown above
+        # never cache a failure as an empty result: keep the message and re-show it until a Refresh succeeds
+        st.session_state[pos_key] = {"error": err} if err is not None else {"ok": actions}
+    state = st.session_state[pos_key]
+    actions = state.get("ok")
+    if "error" in state:
+        if not loaded_now:  # a fresh load already showed it via _safe
+            st.error(state["error"])
     elif not actions:
         st.info(f"No open {market} positions.")
     else:
@@ -288,7 +307,7 @@ with tab_pos:
 with tab_intra:
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni[:15], key=f"desk_intra_syms_{market}")
-    scan_key = ("intraday", market)
+    scan_key = ("intraday", market, _today())
     if st.button("Scan", key="desk_scan"):
         if not picked:
             st.error("Pick at least one symbol.")
