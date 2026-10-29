@@ -38,7 +38,7 @@ _US_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")  # same rule as news.py validate_t
 _SKILLS = Path(__file__).resolve().parents[2] / ".claude" / "skills"
 NEWS_PY = _SKILLS / "trader-news" / "news.py"
 FACTS_PY = _SKILLS / "trader-analyst" / "facts.py"
-_PATH_RE = re.compile(r"(?<![\w.:/])(?:[A-Za-z]:)?[\\/][^\s'\"]*")
+_PATH_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"]*|(?<![\w.])(?:[A-Za-z]:)?[\\/][^\s'\"]*")
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,10 @@ class Unavailable:
 
 def _scrub(text: str) -> str:
     """Drop directories from any path in text; keep file names."""
-    return _PATH_RE.sub(lambda m: re.split(r"[\\/]", m.group(0).rstrip("/\\"))[-1] or "", text)[:200]
+    def one(m: re.Match) -> str:
+        t = m.group(0)
+        return t if "://" in t else re.split(r"[\\/]", t.rstrip("/\\"))[-1]
+    return _PATH_RE.sub(one, text)[:200]
 
 
 _ENV_KEYS = ("PATH", "HOME", "SEC_USER_AGENT")
@@ -106,7 +109,7 @@ def _sec_ua() -> str | None:
     return (os.environ.get("SEC_USER_AGENT") or "").strip() or None
 
 
-def us_research(symbol: str, *, runner=run_skill, news_args: tuple[str, ...] = ()) -> Research | Unavailable:
+def us_research(symbol: str, *, runner=run_skill) -> Research | Unavailable:
     if not isinstance(symbol, str) or not _US_RE.fullmatch(symbol):
         return Unavailable("invalid US symbol")
     has_ua = _sec_ua() is not None
@@ -117,7 +120,7 @@ def us_research(symbol: str, *, runner=run_skill, news_args: tuple[str, ...] = (
     nargs = ["--tickers", symbol, "--json", "--dry-run", "--hours", "168", "--no-moves"]
     if not has_ua:
         nargs.append("--no-sec")
-    news = runner(NEWS_PY, [*nargs, *news_args], ok_codes=(0, 1))
+    news = runner(NEWS_PY, nargs, ok_codes=(0, 1))
     if not isinstance(news, Unavailable) and not news.get("items"):
         # news.py also exits 1 when every fetch failed; the failure is only in its notes.
         prefix = f"headlines for {symbol}:"

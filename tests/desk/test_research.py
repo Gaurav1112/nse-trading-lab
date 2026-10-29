@@ -57,6 +57,13 @@ def test_run_skill_env_override_is_filtered(monkeypatch):
     assert seen["env"]["SEC_USER_AGENT"] == "A b@c.d"
 
 
+def test_scrub_colon_glued_path():
+    out = research._scrub("cannot open error:/var/tmp/secret/x.py")
+    assert "x.py" in out and "/var" not in out and "secret" not in out
+    mixed = research._scrub("open error:/var/tmp/secret/x.py via https://data.sec.gov/a/b.json")
+    assert "https://data.sec.gov/a/b.json" in mixed and "secret" not in mixed
+
+
 def test_scrub_keeps_urls_strips_paths():
     assert research._scrub("HTTP 404 for https://data.sec.gov/api/x/CIK1.json") == \
         "HTTP 404 for https://data.sec.gov/api/x/CIK1.json"
