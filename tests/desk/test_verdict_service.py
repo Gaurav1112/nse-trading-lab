@@ -257,3 +257,94 @@ def test_r9_check_trade_without_a_quote_logs_no_quote_time():
     v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), _ctx_ok(), replays=200,
                     robustness=False, audit=False)
     assert v.quote_live is False and v.quote_as_of is None
+
+
+# ---------------------------------------------------------------- H3: advice vs blocks
+
+import re as _re  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from nse_backtest.desk import checks as _checks  # noqa: E402
+from nse_backtest.desk import verdict as _verdict  # noqa: E402
+from nse_backtest.desk.checks import run_checks  # noqa: E402
+from nse_backtest.desk.models import DeskVerdict, Odds  # noqa: E402
+
+
+def _h3_ctx(regime, **kw):
+    base = dict(regime=regime, governor_can_trade=True, ban=BanList(frozenset(), "ok", "2026-10-29", ""),
+                earnings_checked=True, turnover_20d=1e12, today_gap_pct=0.5)
+    base.update(kw)
+    return CheckContext(NSE, Limits(capital=1_000_000), NOW, **base)
+
+
+def _h3_verdict(regime="HOSTILE", **kw):
+    cs = run_checks(P, S, None, _h3_ctx(regime, **kw), 100.0)
+    return decide(P, S, None, cs, NSE, 100.0, NOW)
+
+
+def test_h3_input_hash_of_an_unchanged_long_verdict_is_pinned():
+    """Groups are derived, never stored on Check: a long verdict's input hash is the same as before H3."""
+    assert _h3_verdict("HOSTILE").input_hash == "de3294528de29ced8832c6b21360aecb03e4593e33de72371ae51a7f04b87bfe"
+    assert _h3_verdict("TRENDING").input_hash == "aa7b9f297ae23ea3b866bd4c037e6936ac049041d2cfe8f494bc9992f426e492"
+
+
+def _emitted_names() -> set[str]:
+    """Every check name run_checks can emit: the literals in checks.py plus a live run per market and mode."""
+    src = (_Path(_checks.__file__)).read_text()
+    names = set(_re.findall(r'_ck\(\s*"([a-z_]+)"', src))
+    odds = Odds(500, 19, .4, .4, .2, .3, 30, 50.0, .3, (.3,) * 30, 1, 3, 6, .1, .2, .5, .1)
+    for mode in (Mode.SWING, Mode.INTRADAY):
+        for prof in (NSE, US):
+            p = replace(P, mode=mode, market=prof.code)
+            ctx = CheckContext(prof, Limits(capital=1_000_000), NOW)
+            for o in (None, odds):
+                names |= {c.name for c in run_checks(p, S, o, ctx, 100.0)}
+    return names
+
+
+def test_h3_every_check_name_is_mapped_to_exactly_one_group():
+    names = _emitted_names()
+    assert len(names) == 17
+    assert set(_verdict.CHECK_GROUPS) == names  # mapped explicitly, nothing left to the "limits" default
+    assert set(_verdict.CHECK_GROUPS.values()) == {"market", "odds", "data", "limits"}
+    assert _verdict.CHECK_GROUPS["regime"] == "market"
+    assert {n for n, g in _verdict.CHECK_GROUPS.items() if g == "data"} == {"freshness", "live_price", "gap"}
+    for n in ("monte_carlo", "setup_history", "robustness"):
+        assert _verdict.CHECK_GROUPS[n] == "odds"
+    for n in ("size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
+              "entry_window", "reward_risk"):
+        assert _verdict.CHECK_GROUPS[n] == "limits"
+
+
+def test_h3_block_groups_splits_non_pass_checks_and_unknown_names_go_to_limits():
+    checks = (Check("regime", Status.BLOCK, "r"), Check("monte_carlo", Status.BLOCK, "m"),
+              Check("freshness", Status.BLOCK, "f"), Check("liquidity", Status.WARN, "l"),
+              Check("size", Status.PASS, "ok"), Check("window", Status.BLOCK, "w"))
+    v = decide(P, S, None, checks, NSE, 100.0, NOW)
+    g = _verdict.block_groups(v)
+    assert list(g) == ["market", "odds", "data", "limits"]
+    assert [c.name for c in g["market"]] == ["regime"] and [c.name for c in g["odds"]] == ["monte_carlo"]
+    assert [c.name for c in g["data"]] == ["freshness"]
+    assert [c.name for c in g["limits"]] == ["liquidity", "window"]  # PASS left out; unknown -> limits
+    assert _verdict.data_broken(v) == ("f",)
+    assert _verdict.data_broken(decide(P, S, None, (Check("gap", Status.WARN, "g"),), NSE, 100.0, NOW)) == ()
+
+
+def test_h3_regime_check_text_and_override_note_share_one_held_out_figure():
+    v = _h3_verdict("HOSTILE")
+    reg = next(c for c in v.checks if c.name == "regime")
+    assert reg.reason == "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"
+    assert _checks.REGIME_HELD_OUT_PCT == {"HOSTILE": -1.61}
+    x = NSE.money(0.0161 * S.notional)
+    assert _verdict.regime_override_note(v, NSE) == (
+        "YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% per "
+        f"trade ≈ {x} on this position")
+    y = NSE.money(0.0161 * 40 * 100)
+    assert _verdict.regime_override_note(v, NSE, notional=4_000.0).endswith(f"≈ {y} on this position")
+
+
+def test_h3_override_note_without_a_held_out_figure_or_a_regime_block():
+    unknown = _h3_verdict(None)  # regime unknown is treated as HOSTILE and blocks swing longs
+    assert _verdict.regime_override_note(unknown, NSE) == "YOUR OVERRIDE — against the market regime (UNKNOWN)"
+    assert _verdict.regime_override_note(_h3_verdict("TRENDING"), NSE) == ""
+    assert _verdict.regime_override_note(_h3_verdict("MIXED"), NSE) == ""  # a WARN is advice, not a block

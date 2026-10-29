@@ -469,8 +469,8 @@ def _cands():
     wait = replace(base, action=Action.WAIT, plan=replace(base.plan, symbol="WTT"), input_hash="w" * 64,
                    headline="WAIT WTT — buy only above", ticket=("IF TRIGGERED:",), checks=())
     skip = replace(base, action=Action.SKIP, plan=replace(base.plan, symbol="SKP"), input_hash="s" * 64,
-                   headline="SKIP SKP — blocked by: gap", ticket=(),
-                   checks=(Check("gap", Status.BLOCK, "gap too wide"), Check("liquidity", Status.WARN, "thin")))
+                   headline="SKIP SKP — blocked by: liquidity", ticket=(),  # H3: a limit, so it can be overridden
+                   checks=(Check("liquidity", Status.BLOCK, "too thin"), Check("gap", Status.WARN, "gap wide")))
     intra = replace(base, action=Action.SKIP, plan=replace(base.plan, symbol="INT", mode=Mode.INTRADAY),
                     input_hash="i" * 64, headline="SKIP INT", ticket=(),
                     checks=(Check("window", Status.BLOCK, "outside the entry window"),))
@@ -577,7 +577,7 @@ def test_c7_selected_row_renders_card_metrics(monkeypatch, tmp_path):
 def test_c7_skip_override_reveals_ticket_and_logs_once_per_hash_and_qty(monkeypatch, tmp_path):
     at, calls = _choose_page(monkeypatch, tmp_path)
     _pick(_load(at), "SKIP SKP")
-    assert "BLOCK gap — gap too wide" in _texts(at.error) and "WARN liquidity — thin" in _texts(at.error)
+    assert "BLOCK liquidity — too thin" in _texts(at.error) and "WARN gap — gap wide" in _texts(at.warning)
     assert "BUY" not in _codes(at)
     assert calls["override"] == []
     box = next(c for c in at.checkbox if c.label == "I choose this anyway")
@@ -967,3 +967,71 @@ def test_h2_check_a_trade_entry_zero_is_the_desks_own_entry(monkeypatch, tmp_pat
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert not at.exception and seen and seen[0]["entry"] is None and seen[0]["desk_entry"] is True
+
+
+# ---------------------------------------------------------------- H3: advice looks like advice
+
+H3_FLIP = "Nifty closes above its 50-day average"
+H3_HOSTILE = "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"
+
+
+def _h3_card(monkeypatch, tmp_path, checks, *, reruns=None, **changes):
+    from dataclasses import replace
+    from nse_backtest.desk import daily
+    from nse_backtest.desk.models import Action
+    from tests.test_desk_card_f1 import _base, _card_page
+    monkeypatch.setattr(daily, "flip_conditions", lambda df, profile: (H3_FLIP,))
+    base = _base(monkeypatch, tmp_path)
+    v = replace(base, action=Action.SKIP, headline="SKIP ABC — blocked", ticket=(), checks=tuple(checks),
+                input_hash=("h3" + "".join(c.name[:2] for c in checks)).ljust(64, "0"), **changes)
+    at, calls = _card_page(monkeypatch, tmp_path, v, reruns=reruns)
+    return at, calls, v
+
+
+def test_h3_card_market_and_odds_are_amber_data_and_limits_red(monkeypatch, tmp_path):
+    from nse_backtest.desk.markets import NSE
+    from nse_backtest.desk.models import Check, Status
+    checks = (Check("regime", Status.BLOCK, H3_HOSTILE),
+              Check("monte_carlo", Status.BLOCK, "Simulated expectancy -0.20R is negative"),
+              Check("liquidity", Status.BLOCK, "turnover too low"),
+              Check("live_price", Status.WARN, "Price is the last close"))
+    at, calls, v = _h3_card(monkeypatch, tmp_path, checks)
+    warn, err = _texts(at.warning), _errors(at)
+    assert "Market says sit out" in warn and H3_HOSTILE in warn and H3_FLIP in warn
+    assert "Simulated expectancy -0.20R is negative" in warn
+    assert "turnover too low" in err
+    for advice in (H3_HOSTILE, "Simulated expectancy", "Market says sit out"):
+        assert advice not in err, advice
+    box = next(c for c in at.checkbox if c.label == "I choose this anyway")
+    box.check().run()
+    assert not at.exception
+    qty = int(next(n for n in at.number_input if n.label == "Quantity").value)
+    x = NSE.money(0.0161 * qty * v.plan.entry)
+    assert ("YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% "
+            f"per trade ≈ {x} on this position") in _texts(at.warning)
+    assert len(calls["override"]) == 1
+
+
+def test_h3_card_broken_data_has_no_override_box_only_a_recheck(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk.models import Action, Check, Status
+    from tests.test_desk_card_f1 import _base
+    fresh = replace(_base(monkeypatch, tmp_path), action=Action.TAKE, input_hash="f" * 64)
+    checks = (Check("freshness", Status.BLOCK, "Data is stale: misses 2 sessions"),
+              Check("regime", Status.BLOCK, H3_HOSTILE))
+    at, calls, _ = _h3_card(monkeypatch, tmp_path, checks, reruns=[fresh])
+    assert not any(c.label.startswith("I choose this anyway") for c in at.checkbox)
+    assert "Data is broken (Data is stale: misses 2 sessions) — re-check before choosing" in _errors(at)
+    at.button(key=next(b.key for b in at.button if b.label == "Re-check")).click().run()
+    assert not at.exception
+    assert len(calls["check"]) == 2 and calls["override"] == []
+    assert "Data is broken" not in _errors(at)
+
+
+def test_h3_quick_verdict_gate_comes_before_the_broken_data_gate(monkeypatch, tmp_path):
+    from nse_backtest.desk.models import Check, Status
+    checks = (Check("freshness", Status.BLOCK, "Data is stale: misses 2 sessions"),)
+    at, _, _ = _h3_card(monkeypatch, tmp_path, checks, first_pass=True, quote_as_of=None)
+    labels = [b.label for b in at.button]
+    assert "Full check" in labels and "Re-check" not in labels
+    assert not any(c.label.startswith("I choose this anyway") for c in at.checkbox)

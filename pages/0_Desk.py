@@ -169,7 +169,8 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, 
 
 def _render_card(v: DeskVerdict, profile, limits, key: str, *, header: bool = True) -> None:
     """The trade card (components/desk_card.py): money, levels, your-call ticket, charts, projections, research."""
-    desk_card.render_card(v, profile, limits, key, today=_today(profile), header=header)
+    desk_card.render_card(v, profile, limits, key, today=_today(profile), header=header,
+                          flips=tuple(flips))  # the header's flip conditions, under a "Market says sit out" banner
 
 
 # ---------------------------------------------------------------- sidebar

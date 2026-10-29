@@ -175,16 +175,16 @@ def test_cli_wait_keeps_desk_conditional_ticket_and_choose_adds_override(desk, m
 
 
 def test_cli_skip_without_choose_has_no_ticket(desk, monkeypatch, capsys, tmp_path):
-    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC"]) == 0
     out = capsys.readouterr().out
     assert "BUY 10 ABC" not in out and "--choose" in out
-    assert "BLOCK gap — too wide" in out
+    assert "BLOCK liquidity — too thin" in out
     assert _audit_rows(tmp_path) == []
 
 
 def test_cli_choose_on_skip_prints_override_ticket_and_logs_once(desk, monkeypatch, capsys, tmp_path):
-    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC", "--choose", "--qty", "12"]) == 0
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE — the desk said SKIP" in out
@@ -226,7 +226,7 @@ def test_cli_check_json_carries_card_without_bulky_fields(desk, monkeypatch, cap
 def test_cli_choose_always_runs_a_fresh_check_and_stamps_the_override_now(desk, monkeypatch, capsys, tmp_path):
     """F1 B1: --choose never reuses an old verdict: each call checks again, and the row is stamped when chosen."""
     from datetime import datetime, timezone
-    calls = _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    calls = _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert len(calls) == 2
@@ -254,6 +254,47 @@ def test_cli_choose_inside_the_window_still_logs(desk, monkeypatch, capsys, tmp_
     from datetime import datetime
     from zoneinfo import ZoneInfo
     monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
-    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("gap", Status.BLOCK, "x"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("liquidity", Status.BLOCK, "x"),)))
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert "YOUR OVERRIDE" in capsys.readouterr().out and len(_audit_rows(tmp_path)) == 1
+
+
+# ---------------------------------------------------------------- H3: advice vs blocks
+
+HOSTILE = Check("regime", Status.BLOCK,
+                "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)")
+
+
+def test_h3_cli_choose_refuses_when_data_is_broken(desk, monkeypatch, capsys, tmp_path):
+    bad = v("ABC", Action.SKIP, checks=(Check("freshness", Status.BLOCK, "Data is stale: misses 2 sessions"),
+                                        Check("live_price", Status.BLOCK, "Price is at or below the stop"),
+                                        Check("liquidity", Status.BLOCK, "too thin")))
+    _fake(monkeypatch, bad)
+    assert cli.main(["check", "ABC", "--choose"]) != 0
+    out = capsys.readouterr().out
+    assert ("data is broken (Data is stale: misses 2 sessions; Price is at or below the stop) — re-check before "
+            "choosing") in out
+    assert "YOUR OVERRIDE" not in out and "Override logged" not in out and _audit_rows(tmp_path) == []
+    assert cli.main(["check", "ABC", "--choose", "--json"]) != 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["override_logged"] is False and "data is broken" in d["override_refused"]
+    assert _audit_rows(tmp_path) == []
+    assert cli.main(["check", "ABC"]) == 0  # without --choose it is just the verdict
+
+
+def test_h3_cli_regime_override_states_the_held_out_cost(desk, monkeypatch, capsys, tmp_path):
+    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(HOSTILE,)))
+    assert cli.main(["check", "ABC", "--choose", "--qty", "12"]) == 0
+    out = capsys.readouterr().out
+    x = NSE.money(0.0161 * 12 * 100)
+    assert ("YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% "
+            f"per trade ≈ {x} on this position") in out
+    assert len(_audit_rows(tmp_path)) == 1
+
+
+def test_h3_candidate_rank_treats_exactly_the_market_and_odds_groups_as_advice():
+    from nse_backtest.desk.verdict import CHECK_GROUPS
+    for name, group in CHECK_GROUPS.items():
+        rank = session.candidate_rank(v("X", Action.SKIP, checks=(Check(name, Status.BLOCK, ""),)))
+        assert rank[0] == (2 if group in ("market", "odds") else 3), name
+    assert session.candidate_rank(v("X", Action.SKIP, checks=(Check("mystery", Status.BLOCK, ""),)))[0] == 3

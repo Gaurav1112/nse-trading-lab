@@ -12,9 +12,13 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
+import re
+
 from . import calendars as cal
 from . import fills
+from .checks import REGIME_HELD_OUT_PCT, signed_pct
 from .markets import MarketProfile
+from . import models
 from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan, summary_fields
 from .sizing import loss_at_stop
 
@@ -70,6 +74,63 @@ def is_quick(v: DeskVerdict) -> bool:
     """True when the verdict came from the daily plan's first pass: priced on the last close with no live quote, no
     earnings date and no robustness run, and never audited. Its ticket must not be used until a full check."""
     return bool(getattr(v, "first_pass", False)) and v.quote_as_of is None
+
+
+# Every check run_checks emits, by what kind of reason it is (a derived view: Check carries no group field, so input
+# hashes are unchanged). "market" and "odds" are the desk's advice and show amber; "data" BLOCKs mean the inputs are
+# broken (re-check, no override); "limits" are the owner's own limits and the exchange's rules. Earnings never
+# blocks: it is advice about the trade's odds (results may land inside it).
+CHECK_GROUPS: dict[str, str] = {
+    "regime": "market",
+    "monte_carlo": "odds", "setup_history": "odds", "robustness": "odds", "earnings": "odds",
+    "freshness": "data", "live_price": "data", "gap": "data",
+    "size": "limits", "risk_governor": "limits", "daily_loss": "limits", "pdt": "limits", "ban_list": "limits",
+    "stoploss_streak": "limits", "liquidity": "limits", "entry_window": "limits", "reward_risk": "limits",
+}
+GROUPS = ("market", "odds", "data", "limits")
+ADVICE_GROUPS = frozenset({"market", "odds"})
+
+
+def group_of(name: str) -> str:
+    """The group of a check name; an unknown name is treated as a limit (red, never advice)."""
+    return CHECK_GROUPS.get(name, "limits")
+
+
+def block_groups(v: DeskVerdict) -> dict[str, list[models.Check]]:
+    """The verdict's BLOCK and WARN checks by group, in check order; PASS checks are left out. Keys are always
+    "market", "odds", "data", "limits" in that order."""
+    out: dict[str, list[models.Check]] = {g: [] for g in GROUPS}
+    for c in v.checks:
+        if c.status is not Status.PASS:
+            out[group_of(c.name)].append(c)
+    return out
+
+
+def data_broken(v: DeskVerdict) -> tuple[str, ...]:
+    """The reasons of the verdict's "data" BLOCKs: non-empty means the inputs are broken and the verdict must be
+    re-checked before anyone chooses it."""
+    return tuple(c.reason for c in block_groups(v)["data"] if c.status is Status.BLOCK)
+
+
+_REGIME_RE = re.compile(r"^Market regime ([A-Z]+)\b")
+
+
+def regime_override_note(v: DeskVerdict, profile: MarketProfile, *, notional: float | None = None) -> str:
+    """The override header for a verdict the market regime blocks, with the held-out cost of going against it on
+    this position (``notional``, default the desk's sizing); "" when the regime check is not a BLOCK. A regime
+    with no held-out figure (or no positive notional) gets the sentence without the number."""
+    reg = next((c for c in v.checks if c.name == "regime" and c.status is Status.BLOCK), None)
+    if reg is None:
+        return ""
+    m = _REGIME_RE.match(reg.reason or "")
+    regime = m.group(1) if m else "UNKNOWN"
+    head = f"YOUR OVERRIDE — against the market regime ({regime})"
+    pct = REGIME_HELD_OUT_PCT.get(regime)
+    n = v.sizing.notional if notional is None else notional
+    if pct is None or not (isinstance(n, (int, float)) and math.isfinite(n) and n > 0):
+        return head
+    return (f"{head}: the desk's held-out longs here averaged {signed_pct(pct)}% per trade ≈ "
+            f"{profile.money(abs(pct) / 100 * n)} on this position")
 
 
 def _plain(o):

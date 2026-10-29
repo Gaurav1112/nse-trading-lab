@@ -24,6 +24,7 @@ from .intraday import orb_scan
 from .models import Action, DeskVerdict, Limits, Mode
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
+from .verdict import ADVICE_GROUPS, group_of
 
 Warn = Callable[[str], None] | None
 _RESOLVE = object()
@@ -222,19 +223,16 @@ def expectancy(v: DeskVerdict) -> float | None:
     return e if isinstance(e, (int, float)) and e == e and abs(e) != float("inf") else None
 
 
-ADVICE_BLOCKS = frozenset({"regime", "monte_carlo", "setup_history", "robustness"})
-
-
 def candidate_rank(v: DeskVerdict) -> tuple:
     """Sort key for "your call": TAKE, then WAIT, then SKIPs blocked only by the market or the desk's own odds
-    (regime / monte_carlo / setup_history / robustness), then every other SKIP (data, limits, exchange). Within
+    (verdict.block_groups' "market" and "odds"), then every other SKIP (data, limits, exchange). Within
     a group, the highest Monte Carlo expectancy first; no odds last."""
     blocks = {c.name for c in v.blocks()}
     if v.action is Action.TAKE:
         group = 0
     elif v.action is Action.WAIT:
         group = 1
-    elif blocks and blocks <= ADVICE_BLOCKS:
+    elif blocks and all(group_of(b) in ADVICE_GROUPS for b in blocks):
         group = 2
     else:
         group = 3

@@ -44,7 +44,7 @@ def test_baseline_all_pass_with_seventeen_checks():
     (dict(regime=None), "regime", Status.BLOCK),  # A2: unknown regime swing -> BLOCK
     (dict(governor_can_trade=False, governor_reasons=("max positions",)), "risk_governor", Status.BLOCK),
     (dict(governor_can_trade=None), "risk_governor", Status.WARN),
-    (dict(ban=BanList(frozenset({"ABC"}), "ok", None, "")), "ban_list", Status.BLOCK),
+    (dict(ban=BanList(frozenset({"ABC"}), "ok", None, "")), "ban_list", Status.WARN),  # H3: swing long warns
     (dict(ban=None), "ban_list", Status.WARN),
     (dict(ban=BanList(frozenset(), "stale", "2026-10-20", "")), "ban_list", Status.WARN),
     (dict(turnover_20d=1e6), "liquidity", Status.BLOCK),
@@ -292,8 +292,8 @@ def test_nan_history_n_missing(mode_p, st):
 
 def test_ban_symbol_whitespace_and_ns_suffix():
     b = BanList(frozenset({"ABC"}), "ok", None, "")
-    assert _c("ban_list", p=replace(plan(), symbol=" ABC"), ban=b).status is Status.BLOCK
-    assert _c("ban_list", p=replace(plan(), symbol="abc.ns "), ban=b).status is Status.BLOCK
+    assert _c("ban_list", p=replace(plan(), symbol=" ABC"), ban=b).reason.startswith("ABC is in the F&O ban")
+    assert _c("ban_list", p=replace(plan(), symbol="abc.ns "), ban=b).reason.startswith("ABC is in the F&O ban")
 
 
 def test_exact_reason_wording():
@@ -345,7 +345,7 @@ def test_string_mode_normalised():
 @pytest.mark.parametrize("sym", ["NSE:ABC", "ABC-EQ", "nse:abc-eq", "ABC.NS"])
 def test_ban_symbol_normalisation(sym):
     b = BanList(frozenset({"ABC"}), "ok", None, "")
-    assert _c("ban_list", p=replace(plan(), symbol=sym), ban=b).status is Status.BLOCK
+    assert _c("ban_list", p=replace(plan(), symbol=sym), ban=b).reason.startswith("ABC is in the F&O ban")
 
 
 @pytest.mark.parametrize("val,st", [
@@ -663,3 +663,10 @@ def test_s2_fix1_bar_dated_today_while_session_open_warns():
     assert (c.status, c.reason) == (Status.WARN, "Last daily bar 2026-11-27 is today's unfinished session")
     c = _fresh("2026-11-27T00:00:00", datetime(2026, 11, 27, 13, 30, tzinfo=et), US)
     assert (c.status, c.reason) == (Status.PASS, "Last daily bar 2026-11-27 is the latest completed session")
+
+
+def test_h3_ban_list_warns_a_swing_long_cash_delivery_is_allowed():
+    b = BanList(frozenset({"ABC"}), "ok", None, "")
+    c = _c("ban_list", ban=b)
+    assert c.status is Status.WARN
+    assert c.reason == "ABC is in the F&O ban — derivatives only; cash delivery allowed"

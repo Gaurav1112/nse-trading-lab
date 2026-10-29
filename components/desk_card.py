@@ -19,10 +19,10 @@ import streamlit as st
 
 from nse_backtest.desk import audit, charts, loaders, projections, research, session
 from nse_backtest.desk import calendars as cal
-from nse_backtest.desk.models import Action, DeskVerdict, Mode
+from nse_backtest.desk.models import Action, DeskVerdict, Mode, Status
 from nse_backtest.desk.textsafe import md_escape, safe_url, shown
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
-from nse_backtest.desk.verdict import is_quick
+from nse_backtest.desk.verdict import block_groups, data_broken, is_quick
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -178,11 +178,33 @@ def _header(v: DeskVerdict) -> None:
     st.caption("The desk's verdict is advice. You make the call and type any ticket in yourself.")
 
 
-def _reasons(v: DeskVerdict, card) -> None:
+def _bullets(checks) -> str:
+    return "\n".join(f"- {c.status.value} {c.name} — {c.reason}" for c in checks)
+
+
+def _reasons(v: DeskVerdict, card, flips=()) -> None:
+    """Why the desk did not say TAKE, by kind: the market regime and the desk's odds are advice (amber); broken
+    data and the owner's limits are real problems (red when they BLOCK, amber when they only WARN)."""
     if v.action is Action.TAKE:
         return
-    lines = list(card.reasons) or [v.headline]
-    st.error(f"The desk says {v.action.value}:\n\n" + "\n".join(f"- {r}" for r in lines))
+    g = block_groups(v)
+    market = [c for c in g["market"] if c.status is Status.BLOCK]
+    if market:
+        text = "**Market says sit out** — advice, not a fault in this trade:\n\n" + _bullets(market)
+        if flips:
+            text += "\n\nWhat would change it:\n" + "\n".join(f"- {f}" for f in flips)
+        st.warning(text)
+    advice = [c for c in g["market"] if c.status is not Status.BLOCK] + g["odds"]
+    if advice:
+        st.warning("**Advice** — the market and the desk's odds on this setup:\n\n" + _bullets(advice))
+    problems = [c for c in g["data"] + g["limits"] if c.status is Status.BLOCK]
+    if problems:
+        st.error(f"**Real problems** — the desk says {v.action.value}:\n\n" + _bullets(problems))
+    cautions = [c for c in g["data"] + g["limits"] if c.status is not Status.BLOCK]
+    if cautions:
+        st.warning("**Check before entering:**\n\n" + _bullets(cautions))
+    if not (market or advice or problems or cautions):
+        st.error(f"The desk says {v.action.value}:\n\n- {v.headline}")
 
 
 def _levels(card, profile) -> None:
@@ -256,10 +278,10 @@ def recheck_prompt(v: DeskVerdict, profile, limits, key: str, wkey: str, reason:
     _recheck(v, profile, limits, key, wkey, reason)
 
 
-def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) -> None:
+def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str, *, broken: bool = False) -> None:
     """The stale-verdict prompt: no ticket and no override box, only a Re-check that runs the full desk check for
-    this symbol and mode and replaces the card's verdict."""
-    st.warning(reason)
+    this symbol and mode and replaces the card's verdict. ``broken`` (the data is broken) shows it in red."""
+    (st.error if broken else st.warning)(reason)
     rk = (RECHECK_KEY, key, v.input_hash)
     if st.button("Re-check", key=f"{wkey}_recheck"):
         p = v.plan
@@ -306,6 +328,11 @@ def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = ""
     reason = stale_reason(v, profile, now or market_now(profile))
     if reason is not None:
         _recheck(v, profile, limits, key, wkey, reason)
+        return
+    broken = data_broken(v)
+    if broken:  # broken inputs are not an opinion to override: no ticket, no override box, only a Re-check
+        _recheck(v, profile, limits, key, wkey,
+                 f"Data is broken ({'; '.join(broken)}) — re-check before choosing", broken=True)
         return
     if v.action is Action.TAKE:
         if card.ticket:
@@ -447,10 +474,12 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
 
 # ---------------------------------------------------------------- entry point
 
-def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header: bool = True) -> None:
+def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header: bool = True,
+                flips: tuple[str, ...] = ()) -> None:
     """One trade card. ``key`` namespaces the widgets; they are also keyed by the verdict's input hash so a new
     verdict starts from the desk's own quantity and an unticked override box. A Re-check of a stale intraday
-    verdict replaces it here (session state), until the page builds a new verdict for the row."""
+    verdict replaces it here (session state), until the page builds a new verdict for the row. ``flips`` are the
+    regime's flip conditions, shown under a "Market says sit out" banner."""
     v = current_verdict(v, key)  # follow re-checks: each replaces the verdict it was made from
     wkey = f"{key}_{v.input_hash[:12]}"
     now = market_now(profile)
@@ -467,7 +496,7 @@ def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header
     except Exception as e:  # noqa: BLE001 - invalid geometry or quantity: no money, no ticket
         st.error(f"Trade card unavailable: {_msg(e)}")
         return
-    _section("Reasons", _reasons, v, card)
+    _section("Reasons", _reasons, v, card, tuple(flips or ()))
     st.markdown("**Levels**")
     _section("Levels", _levels, card, profile)
     st.markdown("**Money**")

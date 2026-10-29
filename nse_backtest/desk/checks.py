@@ -99,6 +99,16 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 
 _QUOTE_MAX_AGE_MIN = 20
 
+# The desk's held-out result for swing longs per regime (% per trade), shown in the regime check and in the cost
+# line of an override against it (verdict.regime_override_note). A regime without an entry has no figure.
+REGIME_HELD_OUT_PCT = {"HOSTILE": -1.61}
+REGIME_HELD_OUT_PERIOD = "held-out 2026"
+
+
+def signed_pct(x: float) -> str:
+    """A percentage with a true minus sign (−1.61), as the desk prints it."""
+    return f"{x:.2f}".replace("-", "−")
+
 
 def _days(n: int) -> str:
     return "day" if n == 1 else "days"
@@ -166,7 +176,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     unknown = "Regime unknown: could not classify the market, "
     if swing:
         if r == "HOSTILE":
-            out.append(_ck("regime", B, "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"))
+            held = f"{REGIME_HELD_OUT_PERIOD}: {signed_pct(REGIME_HELD_OUT_PCT['HOSTILE'])}%/trade"
+            out.append(_ck("regime", B, f"Market regime HOSTILE: swing longs historically lose here ({held})"))
         elif r == "MIXED":
             out.append(_ck("regime", W, "Market regime MIXED: swing edge is weaker, take smaller or wait"))
         elif r == "TRENDING":
@@ -247,6 +258,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("ban_list", P, f"No ban list for {prof.code}"))
     elif ctx.ban is None or ctx.ban.status not in ("ok", "cached", "stale"):
         out.append(_ck("ban_list", W, "Could not verify F&O ban list: check NSE before trading"))
+    elif sym in ctx.ban.symbols and swing:  # the ban restricts F&O; a cash (CNC) delivery long is allowed
+        out.append(_ck("ban_list", W, f"{sym} is in the F&O ban — derivatives only; cash delivery allowed"))
     elif sym in ctx.ban.symbols:
         out.append(_ck("ban_list", B, f"{sym} is in the NSE F&O ban list: no fresh positions allowed"))
     elif ctx.ban.status == "stale":
