@@ -229,3 +229,13 @@ def test_i1_check_trade_card_and_headline_use_the_frames_spread(market, volume, 
     assert c.max_loss == pytest.approx(v.sizing.risk_amount) and c.max_loss <= lim.capital / 100
     if v.action is Action.TAKE:
         assert prof.money(v.sizing.risk_amount) in v.headline
+
+
+def test_r8_check_trade_marks_whether_the_price_was_a_live_quote(tmp_path):
+    df = rising()
+    lim = Limits(capital=100_000)
+    v = check_trade(df, "ABC", NSE, Mode.SWING, lim, _ctx_ok(), replays=200, robustness=False, audit=False)
+    assert v.quote_live is False  # no quote: the plan's last close
+    q = check_trade(df, "ABC", NSE, Mode.SWING, lim, _ctx_ok(price_is_live=True), replays=200, robustness=False,
+                    audit=False, quote=_quote(float(df["Close"].iloc[-1])))
+    assert q.quote_live is True

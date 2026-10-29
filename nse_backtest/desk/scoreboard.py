@@ -10,9 +10,13 @@ possible is ambiguous (the touch may have come before the TAKE): it is kept when
 target never counts, and when it would win the order is replayed from the later bars: a later fill counts only if
 its R is at most the containing-bar fill's (a counted result is never better than either possible history), else
 NOT_FILLED ("fill only possible on the bar the TAKE was logged in — counted only if it loses").
-The one accepted residual optimism: the plain-LIMIT model fills a row priced in [entry, limit] (desk TAKE or
-override) at the logged price, when that price is consistent with the TAKE's bar, although an order typed in later
-could fill up to the limit (at most about 0.25R worse).
+The logged price (current_price) is used only when it is TRUSTED: a live quote (quote_live True) inside the TAKE
+bar's [Low, High + 0.5%]. Without a quote the desk logs the plan's last close, so an untrusted price (not live, or
+unknown in old rows) is ignored entirely: the row is scored with its branch's no-price model (swing and stop-limit:
+the ambiguous containing-bar rules; LIMIT tickets: the resting model). The branch itself still follows the ticket
+that was printed. A live price outside that range contradicts the bars: data_unavailable.
+The one accepted residual optimism: a trusted live price in [entry, limit] (desk TAKE or override) fills at that
+price, although an order typed in later could fill up to the limit (at most about 0.25R worse).
 """
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 10  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 11  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -62,6 +66,7 @@ class Candidate:
     entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (None: computed from the tick)
     record: str = "desk"        # "desk" (a logged TAKE) or "override" (the owner chose a WAIT/SKIP anyway)
     current_price: float | None = None  # the price the verdict was decided at; None in rows logged before it
+    quote_live: bool | None = None  # current_price was a live quote; False: the last close; None: unknown (old row)
 
 
 class Status(str, Enum):
@@ -184,7 +189,20 @@ def _parse_row(row: dict) -> Candidate:
                      f"{row['input_hash']}|{created.isoformat()}" + ("|override" if record == "override" else ""),
                      str(last_bar) if last_bar not in (None, "") else None,
                      last_close if last_close is not None and last_close > 0 else None, limit, record,
-                     cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None)
+                     cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None,
+                     _quote_live(row))
+
+
+def _quote_live(row: dict) -> bool | None:
+    """The row's quote_live; rows logged before it: False when current_price equals the logged last close (the
+    plan's fallback without a quote), else None (unknown). Only True makes the logged price trusted."""
+    q = row.get("quote_live")
+    if isinstance(q, bool):
+        return q
+    cp, lc = row.get("current_price"), row.get("last_close")
+    if cp is not None and lc is not None and cp == lc:
+        return False
+    return None
 
 
 def default_session_of(market: str, created_at: datetime) -> date:
@@ -418,6 +436,8 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     op, lo = sess["Open"].to_numpy(dtype=float), sess["Low"].to_numpy(dtype=float)
     if not _all_finite(op, lo, sess["High"].to_numpy(dtype=float), sess["Close"].to_numpy(dtype=float)):
         return _outcome(c, Status.UNAVAILABLE, "bad price data")
+    if _price_trust(c, sess.iloc[0]) == "contradiction":
+        return _contradiction(c, sess.iloc[0])
     k = next((p for p in range(1 if skip_containing else 0, len(sess)) if lo[p] <= c.entry), None)
     if k is None:
         return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing
@@ -426,7 +446,8 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     # (the touch may have come before the TAKE) unless the logged price was already at or below the limit.
     fill = c.entry if k == 0 else min(op[k], c.entry)
     fill_at = c.created_at.isoformat() if k == 0 else sess.index[k]
-    ambiguous = k == 0 and not (c.current_price is not None and c.current_price <= c.entry)
+    trusted = _price_trust(c, sess.iloc[0]) == "trusted"
+    ambiguous = k == 0 and not (trusted and c.current_price <= c.entry)
     m = next((p for p in range(k, len(sess)) if lo[p] <= c.stop), None)
     if m is not None:  # target on the fill day is ignored (as on a daily fill bar); a loss is always kept
         px = c.stop if m == 0 else min(op[m], c.stop)
@@ -531,11 +552,22 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
 PLAIN_PRICE_TOLERANCE = 0.005  # a logged price within 0.5% of the TAKE bar's range counts as traded there
 
 
-def _logged_price_traded(cp: float, bar0, limit: float) -> bool:
-    """A plain LIMIT is a certain fill at the logged price only when that price lies within the containing bar's
-    [Low, High] widened by 0.5% of the price, and that bar's Low reached the limit."""
-    tol = PLAIN_PRICE_TOLERANCE * cp
-    return float(bar0["Low"]) - tol <= cp <= float(bar0["High"]) + tol and float(bar0["Low"]) <= limit
+def _price_trust(c: Candidate, bar0) -> str:
+    """How far the logged price can be used against the bar containing created_at: "none" (no price), "untrusted"
+    (not a live quote, or unknown: ignored entirely), "trusted" (a live quote inside [Low, High + 0.5%]) or
+    "contradiction" (a live quote outside that range)."""
+    cp = c.current_price
+    if cp is None:
+        return "none"
+    if c.quote_live is not True:
+        return "untrusted"
+    lo0, hi0 = float(bar0["Low"]), float(bar0["High"])
+    return "trusted" if lo0 <= cp <= hi0 + PLAIN_PRICE_TOLERANCE * cp else "contradiction"
+
+
+def _contradiction(c: Candidate, bar0) -> Outcome:
+    return _outcome(c, Status.UNAVAILABLE, f"logged live price {c.current_price} is outside the bar's range "
+                                           f"{float(bar0['Low'])}-{float(bar0['High'])}")
 
 
 def limit_model(c: Candidate, limit: float) -> str | None:
@@ -648,26 +680,30 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = frame.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    if model == "plain" and not _logged_price_traded(c.current_price, frame.iloc[0], limit):
-        model = "resting"  # a stale logged price (e.g. the last close without a quote): never a certain fill
+    trust = _price_trust(c, frame.iloc[0]) if has_bar0 else "none"
+    if trust == "contradiction":
+        return _contradiction(c, frame.iloc[0])
+    if model == "plain" and trust != "trusted":
+        model = "resting"  # a price that is not a live quote the bar traded at: never a certain fill
     if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts
         return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day)
     in_win = [profile.no_entry_before <= t.time() <= profile.no_entry_after for t in frame.index]
+    price = c.current_price if trust == "trusted" else None  # an untrusted price is ignored entirely
     o, ambiguous = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
-                                    incomplete, incomplete_note, skip_containing=False)
+                                    incomplete, incomplete_note, skip_containing=False, price=price)
     if ambiguous and _only_if_it_loses(c, o) is not o:  # an ambiguous containing-bar trigger that would win
         later, _ = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
-                                    incomplete, incomplete_note, skip_containing=True)
+                                    incomplete, incomplete_note, skip_containing=True, price=price)
         o = _cap_fallback(c, o, later)
     return o
 
 
 def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool, limit: float, profile, day: date,
-                     session_over: bool, incomplete: bool, incomplete_note: str, *, skip_containing: bool
-                     ) -> tuple[Outcome, bool]:
+                     session_over: bool, incomplete: bool, incomplete_note: str, *, skip_containing: bool,
+                     price: float | None = None) -> tuple[Outcome, bool]:
     """(outcome, ambiguous): ambiguous when only the bar containing created_at triggered the fill."""
     got = None
-    if (has_bar0 and not skip_containing and in_win[0] and c.current_price is None
+    if (has_bar0 and not skip_containing and in_win[0] and price is None
             and lo[0] >= c.entry and hi[0] <= limit):
         # no logged price, and the whole containing bar traded inside [trigger, limit]: the order was marketable
         # whenever it was placed in that bar, a certain fill; at the limit, the worst price in the bar
@@ -678,7 +714,7 @@ def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool
         # when the whole bar traded above the trigger); only its stop counts, never its target
         # no logged price: the worst price consistent with the bar (it may have been above the trigger at the
         # TAKE); a logged price below the trigger: the trigger itself
-        fill0 = min(hi[0], limit) if c.current_price is None else (c.entry if lo[0] <= c.entry else limit)
+        fill0 = min(hi[0], limit) if price is None else (c.entry if lo[0] <= c.entry else limit)
         got = (0, float(fill0))
     else:
         first = 1 if has_bar0 else 0

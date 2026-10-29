@@ -44,7 +44,7 @@ INTRADAY_MAX_AGE_DAYS = 58  # yfinance serves 15-minute bars for the last 60 day
 FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 _CANDIDATE_FIELDS = ("market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars", "cost_per_share",
-                     "qty", "last_bar", "last_close", "entry_limit", "record", "current_price")
+                     "qty", "last_bar", "last_close", "entry_limit", "record", "current_price", "quote_live")
 
 
 @dataclass(frozen=True)
@@ -208,7 +208,7 @@ def _candidate_record(c: Candidate) -> dict:
             "qty": c.qty, "created_at": c.created_at.isoformat(), "mc_expectancy_r": c.mc_expectancy_r,
             "history_expectancy_r": c.history_expectancy_r, "key": c.key, "last_bar": c.last_bar,
             "last_close": c.last_close, "entry_limit": c.entry_limit, "record": c.record,
-            "current_price": c.current_price}
+            "current_price": c.current_price, "quote_live": c.quote_live}
 
 
 def _entry(o: Outcome) -> dict:

@@ -237,12 +237,16 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   traded wholly between the trigger and the limit is a certain fill there, at the limit; one whose containing bar
   only straddles the trigger fills at the worst consistent price, the lower of that bar's high and the limit.
 - Intraday rows logged at or above the trigger printed a LIMIT ticket. Priced up to the limit (desk TAKE or
-  override), it fills at the logged price, but only when the TAKE's bar traded at that price (within 0.5% of its
-  range) and reached the limit: a stale logged price (for example the last close, used when there is no live
-  quote) is treated as a resting limit instead. Priced above the limit, it is a resting limit at the limit price. A
-  LIMIT row logged outside the entry window, or a stop-limit row logged after the cancel time, is `not_filled`.
-- One small optimism is accepted: a plain limit (desk TAKE or override) fills at the logged price, although an
-  order typed in later could fill up to the limit (at most about 0.25R worse).
+  override), it fills at the logged price only when that price is trusted (below). Priced above the limit, it is
+  a resting limit at the limit price. A LIMIT row logged outside the entry window, or a stop-limit row logged
+  after the cancel time, is `not_filled`.
+- The logged price is trusted only when it was a live quote (the audit row's `quote_live`; without a quote the
+  desk logs the plan's last close) and the TAKE's bar traded at it (between its low and 0.5% above its high).
+  An untrusted price is ignored: the trade is scored as if no price had been logged (swing and stop-limit: the
+  containing-bar rules above; a LIMIT ticket: a resting limit), though which ticket was printed still follows it.
+  A live price outside that bar's range contradicts the bars and makes the trade `data_unavailable`.
+- One small optimism is accepted: a trusted live price (desk TAKE or override, up to the limit) fills at that
+  price, although an order typed in later could fill up to the limit (at most about 0.25R worse).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.

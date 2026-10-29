@@ -43,7 +43,8 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
         log.warning("odds could not be computed for %s: %s", symbol, e)
         odds = None
     checks = run_checks(plan, sizing, odds, ctx, current_price=current_price)
-    v = replace(decide(plan, sizing, odds, checks, profile, current_price, ctx.now), cost_per_share=cps)
+    v = replace(decide(plan, sizing, odds, checks, profile, current_price, ctx.now), cost_per_share=cps,
+                quote_live=quote is not None)
     if audit:
         append_verdict(v, audit_path if audit_path is not None else data_dir() / "desk_audit.jsonl")
     return v

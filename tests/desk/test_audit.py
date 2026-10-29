@@ -105,3 +105,10 @@ def test_m5_naive_now_is_market_time_not_machine_local(tmp_path, monkeypatch):
     finally:
         monkeypatch.undo()
         _time.tzset()
+
+
+def test_r8_audit_row_records_whether_the_price_was_a_live_quote(tmp_path):
+    for live in (True, False):
+        v = replace(_verdict(Action.SKIP), quote_live=live)
+        (rec,) = [json.loads(x) for x in audit.append_verdict(v, tmp_path / f"{live}.jsonl").read_text().splitlines()]
+        assert rec["quote_live"] is live

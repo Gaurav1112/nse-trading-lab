@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 10  # F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 11  # F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -900,9 +900,10 @@ def test_c8_two_scans_of_the_same_take_are_one_candidate():
 
 # ---------------------------------------------------------------- F1 round 2, I2: the plain-LIMIT ticket
 
-def _limit_cand(current_price, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST)):
-    from dataclasses import replace as _replace
-    return _replace(cand(mode=Mode.INTRADAY, created=created), entry_limit=100.5, current_price=current_price)
+def _limit_cand(current_price, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST), quote_live=True):
+    from dataclasses import replace as _replace  # F1 r8: a live quote unless a test says otherwise
+    return _replace(cand(mode=Mode.INTRADAY, created=created), entry_limit=100.5, current_price=current_price,
+                    quote_live=quote_live)
 
 
 def test_i2_plain_limit_fills_at_the_logged_price_and_a_failed_breakout_is_lost():
@@ -934,7 +935,7 @@ def test_i2_stop_gap_on_the_first_bar_exits_at_its_open():
 def test_i2_rows_without_a_price_or_above_the_limit_keep_the_stop_limit_model():
     bars = _session({"10:15": (99.6, 99.8, 97.9, 98.2)}, first="09:15", idle=(98.5, 99.0, 98.2, 98.6))
     for cp in (None, 99.9):  # old row / below the trigger (above the limit: a resting LIMIT since round 3)
-        o = resolve_intraday(_limit_cand(cp), bars, flat_by=time(15, 15), now=NOW)
+        o = resolve_intraday(_limit_cand(cp, quote_live=False), bars, flat_by=time(15, 15), now=NOW)
         assert o.status is Status.NOT_FILLED, cp
 
 
@@ -954,17 +955,17 @@ def test_i2_audit_rows_carry_the_current_price_into_the_candidate():
 IDLE = (99.0, 99.5, 98.9, 99.2)
 
 
-def _r3(cp, over, created=(10, 7), record="desk", first="09:15", **kw):
+def _r3(cp, over=None, created=(10, 7), record="desk", first="09:15", quote_live=None, **kw):
     from dataclasses import replace as _replace
     c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, *created, tzinfo=IST)), entry_limit=100.5,
-                 current_price=cp, record=record, **kw)
+                 current_price=cp, record=record, quote_live=quote_live, **kw)
     return resolve_intraday(c, _session(over, first=first, idle=IDLE), flat_by=time(15, 15), now=NOW)
 
 
 def test_r3_a_plain_limit_containing_bar_stop_is_lost_and_its_target_never_credited():
-    o = _r3(100.2, {"10:00": (100, 100.4, 97.5, 100.3), "10:15": (100.3, 103.2, 100.1, 103)})  # probe A
+    o = _r3(100.2, {"10:00": (100, 100.4, 97.5, 100.3), "10:15": (100.3, 103.2, 100.1, 103)}, quote_live=True)  # probe A
     assert o.status is Status.LOST and o.fill_price == pytest.approx(100.2) and o.exit_price == 98.0
-    o = _r3(100.2, {"10:00": (100, 103.4, 99.9, 100.3)})  # a target inside the containing bar is not credited
+    o = _r3(100.2, {"10:00": (100, 103.4, 99.9, 100.3)}, quote_live=True)  # a target inside the containing bar: not credited
     assert o.status is Status.TIME and o.note == "time exit at flat-by"
 
 
@@ -1007,8 +1008,8 @@ def test_r3_every_override_priced_at_or_above_entry_is_a_resting_limit():
     # one priced above the limit rests at the limit. The containing bar stays above the limit, so the resting
     # override's fill is confirmed by the 10:15 bar.
     traded = {"10:00": (100.1, 100.3, 100.0, 100.2), "10:15": (100.3, 103.2, 100.1, 103)}  # F1 r7: traded at 100.2
-    desk = _r3(100.2, traded)
-    mine = _r3(100.2, traded, record="override")
+    desk = _r3(100.2, traded, quote_live=True)
+    mine = _r3(100.2, traded, record="override", quote_live=True)
     assert desk.fill_price == pytest.approx(100.2) and mine.fill_price == pytest.approx(100.2)
     over = {"10:00": (100.6, 100.8, 100.6, 100.7), "10:15": (100.3, 103.2, 100.1, 103)}
     rest = _r3(100.6, over, record="override")
@@ -1074,7 +1075,7 @@ S_BARS = {"10:00": (99.7, 100.3, 97.8, 98.2), "10:15": (98.2, 100.4, 98.1, 100.3
 
 @pytest.mark.parametrize("cp,record", [(99.8, "desk"), (99.8, "override"), (None, "desk")])  # p_r3 S1-S3
 def test_r4_stop_limit_containing_bar_trigger_and_stop_is_lost(cp, record):
-    o = _r3(cp, S_BARS, record=record)
+    o = _r3(cp, S_BARS, record=record, quote_live=True if cp is not None else None)
     # F1 r7: without a logged price the fill is the worst consistent price, min(bar High 100.3, limit)
     fill = 100.0 if cp is not None else 100.3
     assert o.status is Status.LOST and o.fill_price == pytest.approx(fill) and o.exit_price == 98.0
@@ -1082,11 +1083,11 @@ def test_r4_stop_limit_containing_bar_trigger_and_stop_is_lost(cp, record):
 
 
 def test_r4_stop_limit_containing_bar_trigger_without_stop_fills_there_and_walks_on():
-    o = _r3(99.8, {"10:00": (99.7, 100.3, 99.6, 100.2), "10:15": (100.2, 103.2, 100.1, 103)})
+    o = _r3(99.8, {"10:00": (99.7, 100.3, 99.6, 100.2), "10:15": (100.2, 103.2, 100.1, 103)}, quote_live=True)
     # F1 r5: a containing-bar trigger counts only if it loses; this one would win, so the 10:15 bar's own trigger
     # (open 100.2) is the real fill, scored normally (its target is never credited on the fill bar)
     assert o.fill_price == pytest.approx(100.2) and o.fill_at == "2026-10-27 10:15:00"
-    lost = _r3(99.8, {"10:00": (99.7, 100.3, 99.6, 100.2), "10:15": (100.2, 100.3, 97.5, 97.8)})
+    lost = _r3(99.8, {"10:00": (99.7, 100.3, 99.6, 100.2), "10:15": (100.2, 100.3, 97.5, 97.8)}, quote_live=True)
     assert lost.status is Status.LOST and lost.fill_price == 100.0 and lost.fill_at == "2026-10-27T10:07:00+05:30"
 
 
@@ -1120,9 +1121,9 @@ def test_r4_early_close_last_bar_reaches_the_containing_bar_path():
 AMBIG = "fill only possible on the bar the TAKE was logged in — counted only if it loses"
 
 
-def _sw(hm, cp, over):
+def _sw(hm, cp, over, quote_live=None):
     from dataclasses import replace as _replace
-    c = _replace(_mid_cand(datetime(2026, 10, 26, *hm, tzinfo=IST)), current_price=cp)
+    c = _replace(_mid_cand(datetime(2026, 10, 26, *hm, tzinfo=IST)), current_price=cp, quote_live=quote_live)
     return resolve_swing(c, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True,
                          bars15=_fill_day(over))
 
@@ -1136,7 +1137,7 @@ def test_r5_swing_containing_bar_winner_is_not_filled(hm, cp, over):
 
 
 def test_r5_swing_marketable_price_is_a_real_fill():
-    o = _sw((14, 20), 99.8, {"14:15": (99.7, 100.2, 99.7, 99.9)})  # SW4
+    o = _sw((14, 20), 99.8, {"14:15": (99.7, 100.2, 99.7, 99.9)}, quote_live=True)  # SW4: a live, traded price
     assert o.status is Status.WON and o.fill_price == 100.0
 
 
@@ -1205,7 +1206,7 @@ def test_r5_swing_later_bar_confirms_after_an_ambiguous_containing_bar():
 
 def test_r5_stop_limit_later_bar_confirms_after_an_ambiguous_containing_bar():
     """I3: the 10:15 bar opens at 100.45 above the trigger: a real fill there, scored normally."""
-    o = _r3(99.8, {"10:00": (100.2, 100.3, 99.5, 99.8), "10:15": (100.45, 103.5, 100.4, 103.2),
+    o = _r3(99.8, quote_live=True, over={"10:00": (100.2, 100.3, 99.5, 99.8), "10:15": (100.45, 103.5, 100.4, 103.2),
                    "10:30": (103.2, 103.5, 103.0, 103.3)})
     assert o.fill_price == pytest.approx(100.45) and o.fill_at == "2026-10-27 10:15:00"
     assert o.status is Status.WON
@@ -1256,10 +1257,10 @@ def test_r6_d_stop_limit_without_price_containing_bar_inside_trigger_and_limit_i
 
 
 def test_r6_f_override_priced_inside_the_limit_is_marketable_at_the_logged_price():
-    o = _r3(100.2, {"10:00": (100.2, 100.3, 100.1, 100.2), "10:15": (100.7, 103.0, 100.6, 102.8),
+    o = _r3(100.2, quote_live=True, over={"10:00": (100.2, 100.3, 100.1, 100.2), "10:15": (100.7, 103.0, 100.6, 102.8),
                     "10:30": (101.0, 101.2, 100.4, 100.9), "10:45": (106.0, 106.5, 105.8, 106.2)}, record="override")
     assert o.status is Status.WON and o.fill_price == pytest.approx(100.2) and o.realised_r == pytest.approx(1.4)
-    stop = _r3(100.2, {"10:00": (100.2, 100.3, 97.5, 100.2)}, record="override")  # containing-bar stop rule
+    stop = _r3(100.2, {"10:00": (100.2, 100.3, 97.5, 100.2)}, record="override", quote_live=True)  # containing-bar stop
     assert stop.status is Status.LOST and stop.exit_price == 98.0
 
 
@@ -1322,17 +1323,20 @@ def test_r7_logged_price_far_outside_the_bar_rests_at_the_limit(record):
 
 
 def test_r7_logged_price_inside_the_bar_is_still_plain():
-    o = _r3(100.2, {"10:00": (100.1, 100.4, 100.0, 100.2), "10:15": (100.3, 103.2, 100.1, 103)})
+    o = _r3(100.2, {"10:00": (100.1, 100.4, 100.0, 100.2), "10:15": (100.3, 103.2, 100.1, 103)}, quote_live=True)
     assert o.status is Status.WON and o.fill_price == pytest.approx(100.2)
-    near = _r3(100.2, {"10:00": (100.6, 100.9, 100.45, 100.8), "10:15": (100.8, 103.2, 100.7, 103)})  # within 0.5%
+    # F1 r8: the 0.5% tolerance is above the High only; a live price under the bar's Low contradicts it
+    near = _r3(100.2, {"10:00": (99.9, 99.98, 99.8, 99.9), "10:15": (100.0, 103.2, 99.95, 103)}, quote_live=True)
     assert near.fill_price == pytest.approx(100.2)
+    below = _r3(100.2, {"10:00": (100.6, 100.9, 100.45, 100.8), "10:15": (100.8, 103.2, 100.7, 103)}, quote_live=True)
+    assert below.status is Status.UNAVAILABLE
 
 
 def test_r7_b_stop_limit_without_price_straddling_the_trigger_fills_at_the_worst_consistent_price():
     o = _r3(None, {"10:00": (100.2, 100.3, 97.5, 99.8)})  # P3
     assert o.status is Status.LOST and o.fill_price == pytest.approx(100.3)
     assert o.realised_r == pytest.approx(-1.15)
-    low = _r3(99.8, {"10:00": (100.2, 100.3, 97.5, 99.8)})  # a logged price below the trigger: fills at the trigger
+    low = _r3(99.8, {"10:00": (100.2, 100.3, 97.5, 99.8)}, quote_live=True)  # a live price below the trigger: the trigger
     assert low.fill_price == 100.0
 
 
@@ -1343,3 +1347,61 @@ def test_r7_cap_fallback_passes_open_and_unavailable_through():
     for st in (Status.OPEN, Status.UNAVAILABLE):
         later = _outcome(c, st, "later")
         assert _cap_fallback(c, cont, later) is later
+
+
+
+# ---------------------------------------------------------------- F1 round 8: only a live price the bar traded is trusted
+
+UP8 = {f"{h:02d}:{m:02d}": (101.0, 103.2, 100.9, 103.0) for h in range(10, 15) for m in (0, 15, 30, 45) if (h, m) != (10, 0)}
+
+
+@pytest.mark.parametrize("live", [False, None])
+def test_r8_stale_plain_price_is_ignored(live):
+    """Q1/Q2: a price that is not a live quote (the plan's last close) is ignored: the LIMIT ticket is scored with the
+    resting model."""
+    assert _r3(100.2, {"10:00": (100.45, 101.0, 100.45, 100.9), **UP8}, quote_live=live).status is Status.NOT_FILLED
+    assert _r3(100.0, {"10:00": (100.5, 101.0, 100.5, 100.9), **UP8}, record="override",
+               quote_live=live).status is Status.NOT_FILLED
+    traded = _r3(100.2, {"10:00": (100.1, 101.0, 100.1, 100.9), **UP8}, quote_live=live)  # Q3 but not live
+    assert traded.status is Status.NOT_FILLED and traded.note == AMBIG
+
+
+def test_r8_live_traded_price_is_trusted():
+    o = _r3(100.2, {"10:00": (100.1, 101.0, 100.1, 100.9), **UP8}, quote_live=True)  # Q3: the documented exception
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.2)
+    above = _r3(100.2, {"10:00": (99.9, 99.98, 99.8, 99.9), "10:15": (100.0, 103.2, 99.95, 103)}, quote_live=True)
+    assert above.fill_price == pytest.approx(100.2)  # within High + 0.5%
+
+
+@pytest.mark.parametrize("cp,bar0", [(100.2, (100.45, 101.0, 100.45, 100.9)), (101.5, (100.0, 100.4, 99.9, 100.2))])
+def test_r8_live_price_outside_the_bar_is_unavailable(cp, bar0):
+    o = _r3(cp, {"10:00": bar0, **UP8}, quote_live=True)
+    assert o.status is Status.UNAVAILABLE
+    assert o.note == f"logged live price {cp} is outside the bar's range {bar0[2]}-{bar0[1]}"
+
+
+def test_r8_swing_stale_price_at_or_below_entry_is_not_a_certain_fill():
+    over = {"14:15": (99.95, 101.6, 99.95, 101.5)}
+    for cp in (99.0, 95.0, 100.0):  # S1, S2, S3 (cp = entry = last close without a quote)
+        o = _sw((14, 20), cp, over, quote_live=False)
+        assert o.status is Status.NOT_FILLED and o.note == AMBIG, cp
+    assert _sw((14, 20), 99.0, over, quote_live=True).status is Status.UNAVAILABLE  # live but untraded
+    ok = _sw((14, 20), 100.0, over, quote_live=True)  # live and traded at/below the entry: a certain fill
+    assert ok.status is Status.WON and ok.fill_price == 100.0
+
+
+def test_r8_stop_limit_untrusted_price_uses_the_no_price_model():
+    o = _r3(99.0, {"10:00": (100.2, 100.3, 97.5, 99.8)}, quote_live=False)  # L1
+    assert o.fill_price == pytest.approx(100.3) and o.realised_r == pytest.approx(-1.15)
+    t = _r3(99.8, {"10:00": (100.2, 100.3, 97.5, 99.8)}, quote_live=True)  # trusted below the trigger
+    assert t.fill_price == 100.0 and t.realised_r == pytest.approx(-1.0)
+
+
+def test_r8_audit_rows_carry_quote_live_and_old_rows_infer_it():
+    from nse_backtest.desk.scoreboard import load_candidates
+    row = {"created_at": "2026-10-27T10:07:00+05:30", "action": "TAKE", "symbol": "ABC", "market": "NSE",
+           "mode": "intraday", "entry": 100.0, "stop": 98.0, "target_1": 103.0, "qty": 10, "input_hash": "h",
+           "entry_limit": 100.5, "current_price": 100.2, "last_close": 99.0}
+    assert load_candidates([{**row, "quote_live": True}])[0][0].quote_live is True
+    assert load_candidates([row])[0][0].quote_live is None  # old row, price differs from the last close: unknown
+    assert load_candidates([{**row, "current_price": 99.0}])[0][0].quote_live is False  # == last close: not live

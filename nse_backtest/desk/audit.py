@@ -40,6 +40,7 @@ def _row(v: DeskVerdict) -> dict:
         "stop_basis": p.stop_basis,
         "last_close": p.last_close,  # the plan's last daily Close: the scoreboard's price-scale check
         "entry_limit": p.entry_limit,  # intraday stop-limit's limit price (None for swing)
+        "quote_live": v.quote_live,  # True only when current_price is a live quote (the scoreboard trusts only that)
     }
 
 
