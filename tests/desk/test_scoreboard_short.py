@@ -71,12 +71,21 @@ def _long_fixture_outcomes():
     return outs
 
 
+def _canon(v):
+    """Round floats so the pin survives last-bit differences between platforms (numpy SIMD / summation order)."""
+    if isinstance(v, float):
+        return round(v, 9)
+    if isinstance(v, (tuple, list)):
+        return tuple(_canon(x) for x in v)
+    return v
+
+
 def _digest(outs) -> str:
     h = hashlib.sha256()
     for o in outs:
-        h.update(repr(tuple(getattr(o, k) for k in _OUTCOME_FIELDS)).encode())
+        h.update(repr(_canon(tuple(getattr(o, k) for k in _OUTCOME_FIELDS))).encode())
     for s in summarize(outs):
-        h.update(repr(tuple(getattr(s, k) for k in _STATS_FIELDS)).encode())
+        h.update(repr(_canon(tuple(getattr(s, k) for k in _STATS_FIELDS))).encode())
     return h.hexdigest()
 
 
@@ -84,7 +93,7 @@ def test_h5c_long_scoring_is_pinned():
     outs = _long_fixture_outcomes()
     seen = {o.status for o in outs}
     assert {Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED, Status.OPEN, Status.UNAVAILABLE} <= seen
-    assert _digest(outs) == "19101d5221e343c32658498f82ec2db6563d717eeea92337c1f012ff5cb722c0"
+    assert _digest(outs) == "c89d1f0febbfad9dec51f8a5bbcebedf3449a926b09cafeb110a920daa9c1951"  # same digest on the pre-short base code (10eeb9f)
 
 
 _CAND_FIELDS = ("created_at", "market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars",
@@ -113,7 +122,7 @@ def test_h5c_long_candidates_are_pinned():
     good, bad = load_candidates(_long_rows())
     h = hashlib.sha256()
     for c in good:
-        h.update(repr(tuple(getattr(c, k) for k in _CAND_FIELDS)).encode())
+        h.update(repr(_canon(tuple(getattr(c, k) for k in _CAND_FIELDS))).encode())
     for _, why in bad:
         h.update(why.encode())
     assert (len(good), len(bad)) == (4, 4) and h.hexdigest() == "2493bcab7fe6d0ff564eb0dc19c7d6bc2f9b53bc1ea7596f6fe0cdad4e546a33"
