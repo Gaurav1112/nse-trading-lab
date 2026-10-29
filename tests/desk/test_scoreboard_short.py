@@ -1,5 +1,6 @@
 """H5c: the scoreboard replays ORB shorts with every long invariant mirrored, and long scoring is unchanged."""
 import hashlib
+import re
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -75,6 +76,8 @@ def _canon(v):
     """Round floats so the pin survives last-bit differences between platforms (numpy SIMD / summation order)."""
     if isinstance(v, float):
         return round(v, 9)
+    if isinstance(v, str):  # notes can embed raw floats, e.g. a bar's range
+        return re.sub(r"\d+\.\d{7,}", lambda m: f"{float(m.group()):.6f}", v)
     if isinstance(v, (tuple, list)):
         return tuple(_canon(x) for x in v)
     return v
@@ -93,7 +96,7 @@ def test_h5c_long_scoring_is_pinned():
     outs = _long_fixture_outcomes()
     seen = {o.status for o in outs}
     assert {Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED, Status.OPEN, Status.UNAVAILABLE} <= seen
-    assert _digest(outs) == "c89d1f0febbfad9dec51f8a5bbcebedf3449a926b09cafeb110a920daa9c1951"  # same digest on the pre-short base code (10eeb9f)
+    assert _digest(outs) == "99786953192dccca8c6ec9726bc64bdd490473d84a541c6348dc16dfe2784784"  # same digest on the pre-short base code (10eeb9f)
 
 
 _CAND_FIELDS = ("created_at", "market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars",
@@ -125,7 +128,7 @@ def test_h5c_long_candidates_are_pinned():
         h.update(repr(_canon(tuple(getattr(c, k) for k in _CAND_FIELDS))).encode())
     for _, why in bad:
         h.update(why.encode())
-    assert (len(good), len(bad)) == (4, 4) and h.hexdigest() == "2493bcab7fe6d0ff564eb0dc19c7d6bc2f9b53bc1ea7596f6fe0cdad4e546a33"
+    assert (len(good), len(bad)) == (4, 4) and h.hexdigest() == "44fe6131f1490e36a0c0f1984a483b56fec97431d3587ef53def483ee5e960b3"
 
 
 # ---------------------------------------------------------------- short fixtures (a mirror of test_scoreboard's)
