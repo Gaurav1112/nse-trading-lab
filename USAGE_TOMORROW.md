@@ -23,6 +23,21 @@ cd /Users/racit/PersonalProject/nse-trading-lab
 - **Every push** — GitHub Actions CI runs the full pytest suite. Any
   regression blocks the push from being trusted.
 
+## Morning routine with the Trade Desk
+
+1. Open the **Desk** page (`./start.sh`, then Desk) and pick the market (NSE or US). Read the regime
+   banner first: an unknown or stale regime is treated as HOSTILE, and swing longs are blocked.
+2. Check the sidebar settings (capital, risk per trade, daily loss limit) are today's numbers.
+3. Open **My Positions** and act on every EXIT or TIGHTEN_STOP first. Today's Plan shows how many
+   positions need action.
+4. Build **Today's Plan**. Read the TAKE cards' checks: every WARN is something to confirm by hand.
+   A "Price is the last close" WARN means the live price was not available — confirm it in your broker.
+5. Put WATCH triggers in as broker alerts, not orders. A WAIT is not a TAKE.
+6. For any stock you like, use **Check a Trade**. Type the ticket into your broker yourself; the desk
+   places nothing.
+7. After the close, log every closed trade (with entry and exit dates) in the journal so the daily-loss,
+   stop-out streak and PDT checks stay accurate.
+
 ## The order to read the screen
 
 1. **Tape Regime banner (top of Picks).** Green = TRENDING (trade normally), amber = MIXED (be selective), red = HOSTILE (paper-trade only).

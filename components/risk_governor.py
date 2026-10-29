@@ -64,11 +64,15 @@ def _setting(name: str, fallback) -> float | int:
 
     Imported lazily so this module is importable outside Streamlit (e.g., tests).
     """
+    default = DEFAULTS.get(name, fallback)
     try:
+        from streamlit import runtime
+        if not runtime.exists():  # CLI / tests: touching session_state would spam ScriptRunContext warnings
+            return default
         import streamlit as st
-        return st.session_state.get(name, DEFAULTS.get(name, fallback))
+        return st.session_state.get(name, default)
     except Exception:
-        return DEFAULTS.get(name, fallback)
+        return default
 
 
 def count_open_positions(positions: list[dict]) -> int:
