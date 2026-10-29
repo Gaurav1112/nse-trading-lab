@@ -1,12 +1,24 @@
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import numpy as np, pandas as pd, pytest
-from nse_backtest.desk import cli, loaders
+from nse_backtest.desk import calendars as cal, cli, loaders
 from nse_backtest.desk.markets import NSE, US
 from nse_backtest.desk.models import Limits
 
 
+def _last_completed_session(prof=NSE):
+    """The newest NSE session that has closed as of the wall clock, so the swing freshness check
+    passes at any time of day (a fixed "yesterday" goes stale once today's session closes)."""
+    now = datetime.now(ZoneInfo(prof.tz))
+    d = now.date()
+    if cal.is_trading_day(prof, d) and now.time() >= cal.session_close_for(prof, d):
+        return d
+    return cal.previous_trading_day(prof, d)
+
+
 def series(n=400):
-    idx = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=1), periods=n)
+    idx = pd.bdate_range(end=pd.Timestamp(_last_completed_session()), periods=n)
     close = 100 * 1.004 ** np.arange(1, n + 1); prev = close / 1.004
     return pd.DataFrame({"Open": prev, "High": prev * 1.012, "Low": prev * 0.995, "Close": close, "Volume": 5e6}, index=idx)
 
