@@ -139,7 +139,7 @@ def test_cli_check_prints_money_block(desk, monkeypatch, capsys):
 def test_cli_check_real_path_has_money(desk, capsys):
     assert cli.main(["check", "ABC"]) == 0
     out = capsys.readouterr().out
-    assert "Money (" in out or "Money: unavailable" in out
+    assert "Money (50 shares):" in out and "Money: unavailable" not in out  # the offline fixture sizes 50
 
 
 def test_cli_check_qty_override_shows_breaches(desk, monkeypatch, capsys):
@@ -157,6 +157,21 @@ def test_cli_check_bad_qty_exits_2(desk, monkeypatch, capsys, bad):
     _fake(monkeypatch, v("ABC"))
     assert cli.main(["check", "ABC", "--qty", bad]) == 2
     assert "qty" in capsys.readouterr().err
+
+
+def test_cli_wait_keeps_desk_conditional_ticket_and_choose_adds_override(desk, monkeypatch, capsys, tmp_path):
+    w = replace(v("ABC", Action.WAIT), ticket=("IF TRIGGERED:",) + ticket_lines(PLAN, SIZING, NSE))
+    _fake(monkeypatch, w)
+    assert cli.main(["check", "ABC"]) == 0
+    out = capsys.readouterr().out
+    assert "Desk's conditional ticket" in out and "IF TRIGGERED:" in out
+    assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    out = capsys.readouterr().out
+    assert "IF TRIGGERED:" in out and "YOUR OVERRIDE — the desk said WAIT" in out
+    assert out.index("IF TRIGGERED:") < out.index("YOUR OVERRIDE") and len(_audit_rows(tmp_path)) == 1
+    assert cli.main(["check", "ABC", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ticket"][0] == "IF TRIGGERED:"
 
 
 def test_cli_skip_without_choose_has_no_ticket(desk, monkeypatch, capsys, tmp_path):

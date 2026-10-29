@@ -16,6 +16,17 @@ def _session_keys(at) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Page tests never touch the network: any socket connect fails (as in tests/desk/conftest.py)."""
+    import socket
+
+    def _blocked(*args, **kwargs):
+        raise OSError("network access is blocked in page tests")
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_quote(monkeypatch):
     """No network from the page: the live quote is unavailable unless a test stubs one."""
     from nse_backtest.desk import loaders
@@ -557,17 +568,28 @@ def test_c7_skip_override_reveals_ticket_and_logs_once_per_hash_and_qty(monkeypa
     at.run()
     at.run()
     assert len(calls["override"]) == 1  # reruns never log again
+    first = int(next(n for n in at.number_input if n.label == "Quantity").value)
+    assert calls["override"][0].sizing.qty == first
+    assert f"Logged once as your override at qty {first}" in _texts(at.caption)
     qty = next(n for n in at.number_input if n.label == "Quantity")
-    new = int(qty.value) + 1
-    qty.set_value(new).run()
-    assert len(calls["override"]) == 2 and calls["override"][1].sizing.qty == new
+    qty.set_value(first + 1).run()
+    assert len(calls["override"]) == 1  # later qty changes add no rows
+    assert f"Logged once as your override at qty {first}" in _texts(at.caption)
+    assert f"BUY {first + 1} SKP" in _codes(at)
 
 
-def test_c7_wait_without_reasons_says_why_in_red(monkeypatch, tmp_path):
-    at, _ = _choose_page(monkeypatch, tmp_path)
+def test_c7_wait_shows_desk_conditional_ticket_and_override_adds_take_now(monkeypatch, tmp_path):
+    at, calls = _choose_page(monkeypatch, tmp_path)
     _pick(_load(at), "WAIT WTT")
     assert "WAIT WTT — buy only above" in _texts(at.error)
-    assert "IF TRIGGERED" not in _codes(at)
+    assert "IF TRIGGERED" in _codes(at)  # the desk's own conditional ticket, no override needed
+    assert "conditional ticket" in _texts(at.tabs[0].markdown)
+    assert "YOUR OVERRIDE" not in _texts(at.warning) and calls["override"] == []
+    next(c for c in at.checkbox if c.label == "I choose this anyway").check().run()
+    assert "YOUR OVERRIDE — the desk said WAIT" in _texts(at.warning)
+    codes = [c.value for c in at.tabs[0].code]
+    assert any(c.startswith("IF TRIGGERED") for c in codes) and any(c.startswith("BUY") for c in codes)
+    assert len(calls["override"]) == 1
 
 
 def test_c7_qty_above_sized_shows_breaches_in_red(monkeypatch, tmp_path):
@@ -603,12 +625,20 @@ def test_c7_price_chart_load_failure_is_unavailable_only_there(monkeypatch, tmp_
     _load(at)
     from nse_backtest.desk import loaders
 
-    def boom(*a, **k):
+    n = {"calls": 0}
+
+    def counting(*a, **k):
+        n["calls"] += 1
         raise RuntimeError("bars down")
-    monkeypatch.setattr(loaders, "load_daily", boom)
+    monkeypatch.setattr(loaders, "load_daily", counting)
     _pick(at, "WAIT WTT")  # a symbol whose bars are not cached yet
-    assert "unavailable: bars down" in _texts(at.error)
+    assert "unavailable: bars down" in _texts(at.error) and "retry in" in _texts(at.error)
     assert "Max loss" in [m.label for m in at.metric]
+    at.run()
+    at.run()
+    assert n["calls"] == 1  # a failure is not retried on every rerun
+    next(b for b in at.button if b.label == "Retry").click().run()
+    assert n["calls"] == 2
 
 
 def test_c7_charts_are_plotly_with_c5_figures_and_captioned(monkeypatch, tmp_path):
@@ -644,7 +674,9 @@ def test_c7_research_loads_on_the_button_caches_and_shows_unavailable(monkeypatc
     assert not at.exception and calls == ["ABC"]
     assert "no corporate actions for ABC" in _texts(at.warning)
     at.run()
-    assert calls == ["ABC"] and "no corporate actions for ABC" in _texts(at.warning)  # cached for 30 minutes
+    assert calls == ["ABC"] and "no corporate actions for ABC" in _texts(at.warning)  # shown, not refetched
+    next(b for b in at.button if b.label == "Load news & earnings").click().run()
+    assert calls == ["ABC", "ABC"]  # an unavailable result never blocks a retry
 
 
 def test_c7_research_items_and_reasons_are_shown(monkeypatch, tmp_path):
@@ -655,15 +687,20 @@ def test_c7_research_items_and_reasons_are_shown(monkeypatch, tmp_path):
     def nse(sym, *, earnings=None, actions=None):
         seen.update(sym=sym, earnings=earnings, actions=actions)
         return research.Research("NSE", "2026-10-29T05:00:00+00:00",
-                                 (research.ResearchItem("Dividend 5 per share", None, "2026-08-01", "dividend"),),
+                                 (research.ResearchItem("Dividend 5 per share", None, "2026-08-01", "dividend"),
+                                  research.ResearchItem("Q2 *beats* [x](y)", "https://e.test/a(1)", None, "headline")),
                                  ("earnings date unknown",))
     monkeypatch.setattr(research, "nse_research", nse)
     at, _ = _choose_page(monkeypatch, tmp_path)
     _load(at)
     next(b for b in at.button if b.label == "Load news & earnings").click().run()
     assert seen["sym"] == "ABC" and seen["actions"] is not None
+    seen.clear()
+    next(b for b in at.button if b.label == "Load news & earnings").click().run()
+    assert seen == {}  # a success stays cached for 30 minutes
     text = _texts(at.markdown) + _texts(at.caption)
     assert "Dividend 5 per share" in text and "earnings date unknown" in text and "display only" in text.lower()
+    assert r"Q2 \*beats\* \[x\]\(y\)" in text and "(https://e.test/a%281%29)" in text
 
 
 def test_c7_research_unavailable_result_reason_is_shown(monkeypatch, tmp_path):
@@ -696,14 +733,42 @@ def test_c7_skipped_symbol_check_it_runs_check_and_renders_card(monkeypatch, tmp
 
 def test_c7_intraday_row_band_uses_current_session_only(monkeypatch, tmp_path):
     from nse_backtest.desk import loaders
-    idx = pd.date_range("2026-10-28 09:15", periods=25, freq="15min").append(
-        pd.date_range("2026-10-29 09:15", periods=10, freq="15min"))
+    import json
+    today = _market_today()
+    days = pd.bdate_range(end=pd.Timestamp(today) - pd.Timedelta(days=1), periods=3)
+    idx = pd.DatetimeIndex([t for d in days for t in pd.date_range(f"{d.date()} 09:15", periods=25, freq="15min")]
+                           + list(pd.date_range(f"{today} 09:15", periods=10, freq="15min")))
     bars = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": np.linspace(100, 101, len(idx)),
                          "Volume": 1e5}, index=idx)
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: bars)
     at, _ = _choose_page(monkeypatch, tmp_path)
     _pick(_load(at), "SKIP INT")
-    assert "range band unavailable: not enough intraday bars yet" in _texts(at.caption)
+    assert "range band unavailable" not in _texts(at.caption)
+    price = next(json.loads(p.proto.spec) for p in at.get("plotly_chart")
+                 if json.loads(p.proto.spec)["layout"].get("title", {}).get("text", "").startswith("Price"))
+    assert len(price["data"][0]["x"]) == 10  # candles: the current session only
+    assert any(t.get("name") == "p5-p95" for t in price["data"])  # the band, from session returns
+
+
+def test_c7_intraday_session_over(monkeypatch, tmp_path):
+    from nse_backtest.desk import loaders
+    today = _market_today()
+    full = pd.DatetimeIndex(list(pd.date_range(f"{today} 09:15", periods=25, freq="15min")))
+    bars = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0, "Volume": 1e5}, index=full)
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: bars)
+    at, _ = _choose_page(monkeypatch, tmp_path)
+    _pick(_load(at), "SKIP INT")
+    assert "range band unavailable: session over" in _texts(at.caption)
+
+
+def test_c7_intraday_empty_frame_is_no_bars(monkeypatch, tmp_path):
+    from nse_backtest.desk import loaders
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: pd.DataFrame(
+        columns=["Open", "High", "Low", "Close", "Volume"], index=pd.DatetimeIndex([])))
+    at, _ = _choose_page(monkeypatch, tmp_path)
+    _pick(_load(at), "SKIP INT")
+    assert "Price chart unavailable: no bars" in _texts(at.error)
+    assert "IndexError" not in _texts(at.error)
 
 
 def test_c7_check_a_trade_renders_the_same_card(monkeypatch, tmp_path):
@@ -723,8 +788,23 @@ def test_c7_zero_sized_card_shows_reason_and_per_share(monkeypatch, tmp_path):
     from nse_backtest.desk.models import Sizing
     _patch_ok(monkeypatch, tmp_path)
     take = _cands()[0]
+    from nse_backtest.desk import charts, projections
     zero = replace(take, sizing=Sizing(0, "risk", 0.0, 0.0, 0.0, False, "stop too wide"))
     monkeypatch.setattr(session, "run_check", lambda *a, **k: zero)
+    real_oc, real_ap = charts.outcome_chart, projections.account_projection
+    armed = {"on": True}
+
+    def oc(*a, **k):
+        if armed["on"]:
+            raise AssertionError("outcome_chart called for a zero-quantity card")
+        return real_oc(*a, **k)
+
+    def ap(*a, **k):
+        if armed["on"]:
+            raise AssertionError("account_projection called for a zero-quantity card")
+        return real_ap(*a, **k)
+    monkeypatch.setattr(charts, "outcome_chart", oc)
+    monkeypatch.setattr(projections, "account_projection", ap)
     at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
@@ -733,5 +813,24 @@ def test_c7_zero_sized_card_shows_reason_and_per_share(monkeypatch, tmp_path):
     assert qty.value is None
     text = _texts(at.info) + _texts(at.caption) + _texts(at.markdown)
     assert "The desk sized 0 shares (stop too wide)" in text and "Per share" in text
+    assert "zero-quantity" not in _texts(at.error)
+    armed["on"] = False
     qty.set_value(3).run()
     assert "Max loss" in [m.label for m in at.metric]
+
+
+def test_c7_zero_sized_choose_row_shows_dash_for_money(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk import session
+    from nse_backtest.desk.daily import DailyPlan
+    from nse_backtest.desk.models import Sizing
+    _patch_ok(monkeypatch, tmp_path)
+    take = _cands()[0]
+    zero = replace(take, sizing=Sizing(0, "risk", 0.0, 0.0, 0.0, False, "stop too wide"))
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: DailyPlan("NSE", None, "", (), (zero,), (), (), ()))
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], []))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    _load(at)
+    df = next(d.value for d in at.dataframe if "Desk says" in d.value.columns)
+    row = df.iloc[0]
+    assert row["Qty"] == "0" and row["Max loss"] == "—" and row["Profit T1"] == "—"

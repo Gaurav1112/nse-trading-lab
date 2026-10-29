@@ -7,9 +7,14 @@ through ``profile.money()``. Nothing here places an order; the research panel is
 from __future__ import annotations
 
 import html
+import math
+import re
 import time
 from dataclasses import replace
+from datetime import datetime
 
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 from nse_backtest.desk import audit, charts, loaders, projections, research
@@ -20,8 +25,10 @@ NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
 RESEARCH_TTL_S = 30 * 60
 INTRADAY_BARS_TTL_S = 15 * 60
+BAR_FAIL_TTL_S = 60  # a failed bar load is shown, not retried on every rerun, for this long (or until Retry)
+BAR_15M = pd.Timedelta(minutes=15)
 SWING_BARS_SHOWN = 120
-OVERRIDES_KEY = "desk_overrides_logged"  # {"input_hash|qty"}: one audit row per pair, never per rerun
+OVERRIDES_KEY = "desk_overrides_logged"  # {input_hash: qty at the first confirmation}: one audit row per verdict
 ACCOUNT_N = (10, 20, 50)
 
 
@@ -43,31 +50,68 @@ def _pct(x) -> str:
 
 # ---------------------------------------------------------------- data helpers (pure-ish, unit-testable)
 
-def band_closes(bars, mode: Mode):
-    """(bars to draw, closes for the range band, reason the band is unavailable or None).
+def md_escape(text) -> str:
+    """Backslash-escape Markdown punctuation so fetched text is shown as text, never as links or formatting."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~])", r"\\\1", str(text))
 
-    Swing: the last 120 daily bars. Intraday: the current session's 15-minute bars only (no overnight gap); fewer
-    than 30 closes -> the band is unavailable."""
+
+def safe_url(url) -> str | None:
+    """http(s) URLs only, with the characters that end a Markdown link target percent-encoded."""
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        return None
+    return url.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+
+
+def session_returns(bars) -> np.ndarray:
+    """Within-session log returns of the Close: each session's first bar starts fresh, so no overnight gap."""
+    out = []
+    closes = bars["Close"].astype(float)
+    for _, grp in closes.groupby(closes.index.date):
+        out.append(np.diff(np.log(grp.to_numpy())))
+    return np.concatenate(out) if out else np.array([])
+
+
+def bars_left(last_bar, profile) -> int:
+    """15-minute bars that still start before the plan's flat-by on the last bar's day."""
+    last = pd.Timestamp(last_bar)
+    flat = pd.Timestamp(datetime.combine(last.date(), profile.flat_by))
+    nxt = last + BAR_15M
+    return 0 if nxt >= flat else math.ceil((flat - nxt) / BAR_15M)
+
+
+def chart_inputs(bars, mode: Mode, profile, today: str, *, steps: int | None = None):
+    """(bars to draw, range band or None, reason the band is unavailable or None).
+
+    Swing: the last 120 daily bars, band from their closes over ``steps`` bars. Intraday: the current session's
+    bars are drawn; the band bootstraps within-session 15-minute returns of the whole loaded history from the last
+    close, over the bars left until flat-by. No bars at all -> (None, None, "no bars")."""
+    if bars is None or len(bars) == 0:
+        return None, None, "no bars"
     if mode is Mode.INTRADAY:
-        last_day = bars.index[-1].date()
-        shown = bars[[ts.date() == last_day for ts in bars.index]]
-        if len(shown) < projections.MIN_BAND_CLOSES:
-            return shown, None, "not enough intraday bars yet"
-        return shown, shown["Close"], None
+        last = pd.Timestamp(bars.index[-1])
+        shown = bars[bars.index.date == last.date()]
+        left = bars_left(last, profile)
+        if last.date().isoformat() != today or left < 1:
+            return shown, None, "session over"
+        band = projections.price_band_from_returns(float(bars["Close"].iloc[-1]), session_returns(bars), left)
+        if band is None:
+            return shown, None, "not enough intraday history yet"
+        return shown, replace(band, start=last), None
     shown = bars.tail(SWING_BARS_SHOWN)
-    return shown, shown["Close"], None
+    band = projections.price_band(shown["Close"], max(1, int(steps or 1)))
+    return shown, band, None if band is not None else "not enough clean closes"
 
 
 def _bars(profile, v: DeskVerdict, today: str):
-    """Bars for the price chart, loaded lazily and kept in session state (swing per day, intraday 15 minutes).
-    A failure is never cached."""
+    """Bars for the price chart, loaded lazily and kept in session state (swing per day, intraday 15 minutes)."""
     sym, mode = v.plan.symbol, v.plan.mode
     key = ("card_bars", profile.code, sym, mode.value, today)
     hit = st.session_state.get(key)
     if hit and (mode is Mode.SWING or time.time() - hit["at"] < INTRADAY_BARS_TTL_S):
         return hit["df"]
     df = loaders.load_intraday(profile, sym) if mode is Mode.INTRADAY else loaders.load_daily(profile, sym)
-    st.session_state[key] = {"at": time.time(), "df": df}
+    if df is not None and len(df):
+        st.session_state[key] = {"at": time.time(), "df": df}
     return df
 
 
@@ -134,16 +178,18 @@ def _money(card, profile) -> None:
 
 
 def _log_once(v: DeskVerdict, card) -> None:
-    logged = st.session_state.setdefault(OVERRIDES_KEY, set())
-    k = f"{v.input_hash}|{card.qty}"
-    if k not in logged:
+    """One audit row per verdict (input hash), with the quantity at the first confirmation; later quantity changes
+    add no rows."""
+    logged = st.session_state.setdefault(OVERRIDES_KEY, {})
+    if v.input_hash not in logged:
         try:
             audit.append_override(replace(v, sizing=card.sizing))  # the quantity the owner chose
         except Exception as e:  # noqa: BLE001 - shown; retried on the next rerun
             st.error(f"Override NOT logged: {_msg(e)}")
             return
-        logged.add(k)
-    st.caption("Override logged — scored under \"Your overrides\", apart from the desk's picks.")
+        logged[v.input_hash] = card.qty
+    st.caption(f"Logged once as your override at qty {logged[v.input_hash]} — scored under \"Your overrides\", "
+               "apart from the desk's picks.")
 
 
 def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str) -> None:
@@ -154,9 +200,13 @@ def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str) -> None:
         else:
             st.info("No ticket without a quantity.")
         return
+    if v.action is Action.WAIT and v.ticket:
+        st.markdown("**Desk's conditional ticket** (the desk's own plan — type it in yourself only if it triggers)")
+        st.code("\n".join(v.ticket), language="text")
     if not st.checkbox("I choose this anyway", key=f"{wkey}_choose"):
-        st.caption(f"No ticket: the desk says {v.action.value}. Tick \"I choose this anyway\" to see it; "
-                   "your choice is logged and scored separately.")
+        now = " to take it now" if v.action is Action.WAIT else ""
+        st.caption(f"The desk says {v.action.value}. Tick \"I choose this anyway\"{now} to see your override "
+                   "ticket; your choice is logged and scored separately.")
         return
     chosen = build_card(v, profile, limits, qty=qty, override_confirmed=True)
     if not chosen.ticket:
@@ -190,21 +240,35 @@ def _outcome(card, profile, wkey: str) -> None:
 def _price(card, profile, today: str, wkey: str) -> None:
     st.markdown("**Price and levels**")
     v = card.verdict
+    fail_key = ("card_bars_fail", profile.code, v.plan.symbol, v.plan.mode.value)
+    retry_key = f"{wkey}_retry_bars"
+    fail = st.session_state.get(fail_key)
+    if fail is not None and time.time() - fail["at"] >= BAR_FAIL_TTL_S:
+        st.session_state.pop(fail_key, None)
+        fail = None
+    if fail is not None:
+        if not st.button("Retry", key=retry_key):
+            left = max(1, math.ceil(BAR_FAIL_TTL_S - (time.time() - fail["at"])))
+            st.error(f"Price chart unavailable: {fail['reason']} (retry in {left}s)")
+            return
+        st.session_state.pop(fail_key, None)
     try:
         bars = _bars(profile, v, today)
-    except Exception as e:  # noqa: BLE001 - this section only
-        st.error(f"Price chart unavailable: {_msg(e)}")
+    except Exception as e:  # noqa: BLE001 - this section only; not retried on every rerun
+        st.session_state[fail_key] = {"at": time.time(), "reason": _msg(e)}
+        st.error(f"Price chart unavailable: {_msg(e)} (retry in {BAR_FAIL_TTL_S}s)")
+        if fail is None:  # the Retry button is already on the page when this was a retry
+            st.button("Retry", key=retry_key)
         return
-    shown, closes, why = band_closes(bars, v.plan.mode)
-    band = None
-    if closes is not None:
-        band = projections.price_band(closes, max(1, int(v.plan.max_hold_bars)))
-        if band is None:
-            why = "not enough clean closes"
+    shown, band, why = chart_inputs(bars, v.plan.mode, profile, today, steps=v.plan.max_hold_bars)
+    if shown is None:
+        st.error(f"Price chart unavailable: {why}")
+        return
     st.plotly_chart(charts.price_chart(shown, card, band, profile), width="stretch", key=f"{wkey}_price")
     if why:
         st.caption(f"Price chart: range band unavailable: {why}")
-    st.caption(f"Band: the stock's own past moves over {v.plan.max_hold_bars} bars — {NOT_A_FORECAST}.")
+    span = "the bars left until flat-by" if v.plan.mode is Mode.INTRADAY else f"{v.plan.max_hold_bars} bars"
+    st.caption(f"Band: the stock's own past moves over {span} — {NOT_A_FORECAST}.")
 
 
 def _account(card, profile, limits, wkey: str) -> None:
@@ -236,29 +300,30 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
     sym = v.plan.symbol
     key = ("research", profile.code, sym)
     hit = st.session_state.get(key)
-    fresh = hit is not None and time.time() - hit["at"] < RESEARCH_TTL_S
-    if st.button("Load news & earnings", key=f"{wkey}_research") and not fresh:
+    failed = hit is not None and isinstance(hit["res"], research.Unavailable)
+    fresh = hit is not None and not failed and time.time() - hit["at"] < RESEARCH_TTL_S
+    if st.button("Load news & earnings", key=f"{wkey}_research") and not fresh:  # a failure is always retried
         with st.spinner(f"Fetching news and earnings for {sym}..."):
             hit = {"at": time.time(), "res": _research(profile, sym)}
         st.session_state[key] = hit
-        fresh = True
+        failed = isinstance(hit["res"], research.Unavailable)
+        fresh = not failed
+    if failed:
+        st.warning(f"Research unavailable: {hit['res'].reason} — press the button to try again.")
+        return
     if not fresh:
         st.caption("Press the button to fetch (it can take ~20 seconds). Cached for 30 minutes.")
         return
     res = hit["res"]
-    if isinstance(res, research.Unavailable):
-        st.warning(f"Research unavailable: {res.reason}")
-        return
-    st.caption(f"Source: {res.source} · fetched {res.fetched_at} · display only")
+    st.caption(f"Source: {md_escape(res.source)} · fetched {md_escape(res.fetched_at)} · display only")
     if not res.items:
         st.caption("No recent items.")
     for it in res.items:
-        title = html.escape(it.title)
-        url = it.url if it.url and it.url.startswith(("https://", "http://")) else None
+        title, url = md_escape(it.title), safe_url(it.url)
         text = f"[{title}]({url})" if url else title
-        st.markdown(f"- **{html.escape(it.kind)}** {html.escape(it.when or '')} — {text}")
+        st.markdown(f"- **{md_escape(it.kind)}** {md_escape(it.when or '')} — {text}")
     for n in res.notes:
-        st.caption(n)
+        st.caption(md_escape(n))
 
 
 # ---------------------------------------------------------------- entry point

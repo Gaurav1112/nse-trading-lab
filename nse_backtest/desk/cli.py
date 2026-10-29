@@ -156,6 +156,9 @@ def cmd_check(a, profile) -> int:
     lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
     if not taken and card.reasons:
         lines += ["", f"The desk said {v.action.value} because:"] + [f"  {r}" for r in card.reasons]
+    if v.action is Action.WAIT and v.ticket:  # the desk's own conditional ticket, no override needed
+        lines += ["", "Desk's conditional ticket (type it in yourself only if it triggers):"]
+        lines += [f"  {t}" for t in v.ticket]
     if taken:
         lines += ["", "Ticket (type it in yourself):"] + [f"  {t}" for t in card.ticket]
         if a.choose:
@@ -166,7 +169,8 @@ def cmd_check(a, profile) -> int:
     elif choose:
         lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
     else:
-        lines += ["", f"No ticket: the desk says {v.action.value}. Add --choose to take it anyway "
+        now = " now" if v.action is Action.WAIT else ""
+        lines += ["", f"The desk says {v.action.value}. Add --choose to take it{now} anyway "
                       "(logged as your override)."]
     return _finish(lines)
 

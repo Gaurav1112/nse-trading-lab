@@ -182,3 +182,36 @@ def test_projected_vs_real_skips_and_counts_unpredicted():
     assert pairs == [(0.3, 1.5), (0.2, -1.0), (0.4, 0.2)]
     assert missing == 1
     assert projected_vs_real([]) == ([], [], [], 0)
+
+
+# ---------------------------------------------------------------- C7 fix 1: band from returns
+
+def test_price_band_from_returns_order_length_determinism():
+    from nse_backtest.desk.projections import price_band_from_returns
+    lr = np.random.default_rng(5).normal(0, 0.003, 300)
+    b = price_band_from_returns(100.0, lr, 12, paths=400)
+    assert b.steps == 12 and b.start is None
+    arr = np.array((b.p5, b.p25, b.p50, b.p75, b.p95))
+    assert arr.shape == (5, 12) and (np.diff(arr, axis=0) >= 0).all()
+    assert price_band_from_returns(100.0, lr, 12, paths=400) == b
+    assert price_band_from_returns(100.0, lr, 12, paths=400, seed=20) != b
+    assert abs(b.p50[0] - 100.0) < 1.0  # projected from the last close
+
+
+def test_price_band_from_returns_none_for_short_or_bad_input():
+    from nse_backtest.desk.projections import price_band_from_returns
+    assert price_band_from_returns(100.0, np.zeros(29), 5) is None
+    assert price_band_from_returns(100.0, [0.0] * 29 + [float("nan")] * 5, 5) is None
+    assert price_band_from_returns(float("nan"), np.zeros(40), 5) is None
+    assert price_band_from_returns(-1.0, np.zeros(40), 5) is None
+    with pytest.raises(ValueError):
+        price_band_from_returns(100.0, np.zeros(40), 0)
+
+
+def test_price_band_is_the_returns_band_from_the_last_close():
+    from dataclasses import replace as _rp
+    from nse_backtest.desk.projections import price_band_from_returns
+    s = closes()
+    lr = np.diff(np.log(s.to_numpy()))
+    assert price_band(s, 15, paths=300) == _rp(price_band_from_returns(float(s.iloc[-1]), lr, 15, paths=300),
+                                               start=s.index[-1])

@@ -6,7 +6,7 @@ are missing: no curve is ever made up.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -45,13 +45,36 @@ def outcome_money(card: TradeCard) -> OutcomeMoney | None:
 
 @dataclass(frozen=True)
 class PriceBand:
-    start: pd.Timestamp  # the last close's bar; step i is i+1 bars after it
+    start: pd.Timestamp | None  # the last close's bar; step i is i+1 bars after it (None: caller sets it)
     steps: int
     p5: tuple[float, ...]
     p25: tuple[float, ...]
     p50: tuple[float, ...]
     p75: tuple[float, ...]
     p95: tuple[float, ...]
+
+
+def _bootstrap(last: float, lr: np.ndarray, steps: int, paths: int, block: int, seed: int) -> PriceBand:
+    rng = np.random.default_rng(seed)
+    nblocks = -(-steps // block)
+    starts = rng.integers(0, len(lr) - block + 1, size=(paths, nblocks))
+    idx = (starts[:, :, None] + np.arange(block)).reshape(paths, -1)[:, :steps]
+    prices = last * np.exp(np.cumsum(lr[idx], axis=1))
+    bands = np.percentile(prices, [5, 25, 50, 75, 95], axis=0)
+    return PriceBand(None, steps, *(tuple(b.tolist()) for b in bands))
+
+
+def price_band_from_returns(last_close: float, log_returns, steps: int, *, paths: int = 2000, block: int = 5,
+                            seed: int = 19) -> PriceBand | None:
+    """Block bootstrap of the given log returns from ``last_close``, ``steps`` bars ahead (``start`` is None; the
+    caller sets it). None for fewer than 30 returns, a non-finite return or a non-finite / non-positive close."""
+    if steps < 1:
+        raise ValueError("steps must be >= 1")
+    lr = np.asarray(log_returns, dtype=float)
+    if (len(lr) < MIN_BAND_CLOSES or not np.isfinite(lr).all()
+            or not (math.isfinite(last_close) and last_close > 0)):
+        return None
+    return _bootstrap(float(last_close), lr, steps, paths, block, seed)
 
 
 def price_band(closes: pd.Series, steps: int, *, paths: int = 2000, block: int = 5,
@@ -63,14 +86,8 @@ def price_band(closes: pd.Series, steps: int, *, paths: int = 2000, block: int =
     px = np.asarray(closes, dtype=float)
     if len(px) < MIN_BAND_CLOSES or not (np.isfinite(px).all() and (px > 0).all()):
         return None
-    lr = np.diff(np.log(px))
-    rng = np.random.default_rng(seed)
-    nblocks = -(-steps // block)
-    starts = rng.integers(0, len(lr) - block + 1, size=(paths, nblocks))
-    idx = (starts[:, :, None] + np.arange(block)).reshape(paths, -1)[:, :steps]
-    prices = px[-1] * np.exp(np.cumsum(lr[idx], axis=1))
-    bands = np.percentile(prices, [5, 25, 50, 75, 95], axis=0)
-    return PriceBand(pd.Timestamp(closes.index[-1]), steps, *(tuple(b.tolist()) for b in bands))
+    band = _bootstrap(float(px[-1]), np.diff(np.log(px)), steps, paths, block, seed)
+    return replace(band, start=pd.Timestamp(closes.index[-1]))
 
 
 @dataclass(frozen=True)
