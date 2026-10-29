@@ -9,12 +9,19 @@ import pytest
 from dataclasses import replace
 
 from nse_backtest.desk.fills import entry_limit
-from nse_backtest.desk.models import Mode
+from nse_backtest.desk.markets import get_profile
+from nse_backtest.desk.models import Check, Mode, Sizing, TradePlan
+from nse_backtest.desk.models import Status as CheckStatus
 from nse_backtest.desk.scoreboard import (
     Candidate, Outcome, Status, default_session_of, load_candidates, resolve_intraday, resolve_swing, summarize,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
+# a verdict to log (for the audit-row tests)
+VNOW = datetime(2026, 10, 29, 10, 0, tzinfo=IST)
+P = TradePlan("ABC", "NSE", Mode.SWING, 100, 98, 103, 106, 2, 15, 100, "2026-10-28T00:00:00", "user")
+S = Sizing(250, "position cap", 640.0, 25_000.0, 140.0, False, "250 shares")
+OK = (Check("regime", CheckStatus.PASS, ""),)
 D0 = datetime(2026, 10, 26, 18, 0, tzinfo=IST)   # created after close Mon
 FILL = date(2026, 10, 27)
 NOW = datetime(2026, 11, 20, 12, 0, tzinfo=IST)
@@ -123,7 +130,7 @@ def test_intraday_not_filled_and_open():
     above_limit = _session({}, idle=(101, 101.5, 100.6, 101))  # C1: triggered above the 100.5 limit, never back
     for bars in (never_triggered, above_limit):
         o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-        assert o.status is Status.NOT_FILLED and o.note == "stop-limit not filled before flat-by"
+        assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
         assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
 
 
@@ -185,7 +192,6 @@ def test_audit_writes_enriched_fields(tmp_path):
     from nse_backtest.desk import audit
     from nse_backtest.desk.markets import NSE
     from nse_backtest.desk.verdict import decide
-    from tests.desk.test_verdict_service import NOW as VNOW, OK, P, S
     v = replace(decide(P, S, None, OK, NSE, 100.0, VNOW), cost_per_share=0.37)
     path = audit.append_verdict(v, tmp_path / "a.jsonl")
     rec = json.loads(path.read_text())
@@ -534,7 +540,6 @@ def test_audit_writes_last_close(tmp_path):
     from nse_backtest.desk import audit
     from nse_backtest.desk.markets import NSE
     from nse_backtest.desk.verdict import decide
-    from tests.desk.test_verdict_service import NOW as VNOW, OK, P, S
     v = replace(decide(P, S, None, OK, NSE, 100.0, VNOW), cost_per_share=0.37)
     rec = json.loads(audit.append_verdict(v, tmp_path / "a.jsonl").read_text())
     assert rec["last_close"] == P.last_close
@@ -662,17 +667,17 @@ def test_parse_row_uses_early_close_flat_by():
 
 
 # ---- review round R1 follow-up: a stop exit is never above the bar's open; LOST never books a gain
-def test_intraday_fill_bar_opening_below_stop_exits_at_open():
+def test_intraday_fill_bar_opening_below_stop_exits_at_the_stop():
     # probe_b: the first bar after the TAKE opens at 97 (below the 98 stop) and trades up through the 100 trigger:
-    # filled at 100, out at that bar's open 97, never at the higher stop (C1: stop-limit fill)
+    # filled at 100; the stop order exists only after that, so the later stop touch exits at the stop 98
     c = Candidate(datetime(2026, 10, 27, 10, 5, tzinfo=IST), "NSE", "ABC", Mode.INTRADAY, 100.0, 98.0, 103.0, 20,
                   0.0, 10, None, None, "h|x")
     rows = [(101, 101, 100.5, 101)] * 4 + [(97, 100.2, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
     idx = pd.date_range("2026-10-27 09:15", periods=len(rows), freq="15min")
     bars = pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
     o = resolve_intraday(c, bars, flat_by=time(15, 10), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
-    assert o.status is Status.LOST and o.fill_price == 100 and o.exit_price == 97
-    assert o.realised_r == pytest.approx(-1.5) and summarize([o])[0].wins == 0
+    assert o.status is Status.LOST and o.fill_price == 100 and o.exit_price == 98
+    assert o.realised_r == pytest.approx(-1.0) and summarize([o])[0].wins == 0
 
 
 def _random_bars(rng, n, base=100.0, spread=4.0):
@@ -691,7 +696,8 @@ def _check_invariants(c, o):
     if o.status is Status.WON:
         assert o.exit_price >= c.target_1 - 1e-9
     if o.fill_price is not None and c.mode is Mode.INTRADAY:  # a BUY stop-limit fills inside [trigger, limit]
-        assert c.entry - 1e-9 <= o.fill_price <= entry_limit(c.entry, c.stop, 0.05) + 1e-9
+        limit = c.entry_limit or entry_limit(c.entry, c.stop, get_profile(c.market).tick)
+        assert c.entry - 1e-9 <= o.fill_price <= limit + 1e-9
     elif o.fill_price is not None:
         assert o.fill_price <= c.entry + 1e-9  # a BUY LIMIT never pays above its limit
 
@@ -779,7 +785,7 @@ def test_load_candidates_reads_or_computes_entry_limit():
     assert swing.entry_limit is None
 
 
-@pytest.mark.parametrize("bad", [99.9, float("nan"), "x"])
+@pytest.mark.parametrize("bad", [99.9, float("nan"), "x", 100.6])  # 100.6: above the formula's 100.5 + one tick
 def test_load_candidates_rejects_bad_entry_limit(bad):
     row = dict(action="TAKE", market="NSE", symbol="ABC", mode="intraday", entry=100, stop=98, target_1=103,
                qty=10, input_hash="h", created_at="2026-10-27T10:00:00+05:30", entry_limit=bad)
@@ -787,12 +793,37 @@ def test_load_candidates_rejects_bad_entry_limit(bad):
     assert not cands and "entry_limit" in rejects[0][1]
 
 
+def test_load_candidates_accepts_entry_limit_up_to_one_tick_over_the_formula():
+    row = dict(action="TAKE", market="NSE", symbol="ABC", mode="intraday", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-10-27T10:00:00+05:30", entry_limit=100.55)
+    (c,), _ = load_candidates([row])
+    assert c.entry_limit == 100.55
+
+
 def test_audit_writes_entry_limit(tmp_path):
     from nse_backtest.desk import audit
     from nse_backtest.desk.markets import NSE
     from nse_backtest.desk.verdict import decide
-    from tests.desk.test_verdict_service import NOW as VNOW, OK, P, PI, S
+    PI = replace(P, mode=Mode.INTRADAY, entry_limit=100.5)
     rec = json.loads(audit.append_verdict(decide(PI, S, None, OK, NSE, 100.0, VNOW), tmp_path / "i.jsonl").read_text())
     assert rec["entry_limit"] == 100.5
     rec = json.loads(audit.append_verdict(decide(P, S, None, OK, NSE, 100.0, VNOW), tmp_path / "s.jsonl").read_text())
     assert rec["entry_limit"] is None
+
+
+# ---- C1 fix round: the scoreboard fills only inside the desk's entry window, like the Time Machine
+def test_intraday_trigger_after_the_entry_window_is_not_filled():
+    late = _session({"14:45": (100.1, 100.4, 100.0, 100.3), "15:00": (100.3, 103.5, 100.2, 103)})
+    o = resolve_intraday(_ic(), late, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
+
+
+def test_intraday_resting_limit_back_after_the_entry_window_is_not_filled():
+    # 14:15 triggers above the 100.5 limit; price is back to the limit only at 14:45, after the window
+    bars = _session({"14:15": (101, 101.5, 100.8, 101), "14:30": (101, 101.4, 100.7, 101),
+                     "14:45": (100.6, 100.7, 100.2, 100.4)}, idle=(99, 99.5, 98.9, 99.2))
+    o = resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.NOT_FILLED and o.note == "not filled inside the entry window (cancel by 14:30)"
+    inside = _session({"14:15": (101, 101.5, 100.8, 101), "14:30": (100.6, 100.7, 100.2, 100.4)})
+    o = resolve_intraday(_ic(), inside, flat_by=time(15, 15), now=NOW)
+    assert o.fill_price == pytest.approx(100.5) and o.fill_at.startswith("2026-10-27 14:30")

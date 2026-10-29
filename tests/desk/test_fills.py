@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from nse_backtest.desk.fills import entry_limit, stop_limit_fill
+from nse_backtest.desk.fills import entry_limit, limit_or_default, stop_limit_fill
 
 def test_entry_limit_caps_at_quarter_R_or_half_percent_rounded_up_to_tick():
     assert entry_limit(100.0, 98.0, 0.05) == 100.50          # min(0.5, 0.5) = 0.5
@@ -38,3 +38,8 @@ def test_property_fill_always_between_trigger_and_limit():
             k, px = res
             assert 100.0 <= px <= 100.5
             assert hi[: k + 1].max() >= 100.0
+
+
+def test_limit_or_default_keeps_a_given_limit_else_computes_it():
+    assert limit_or_default(100.3, 100.0, 98.0, 0.05) == 100.3
+    assert limit_or_default(None, 100.0, 98.0, 0.05) == 100.5

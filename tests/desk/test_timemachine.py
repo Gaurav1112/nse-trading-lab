@@ -270,10 +270,11 @@ def test_c1_open_inside_the_limit_fills_at_open():
     assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]
 
 
-def test_c1_fill_bar_opening_below_the_stop_exits_at_its_open():
-    # 09:30 opens 99.6 (below the stop 100), trades up through 101 (filled at 101), and back below the stop
+def test_c1_fill_bar_stop_exits_at_the_stop_even_when_the_bar_opened_below_it():
+    # 09:30 opens 99.6 (below the stop 100), trades up through 101 (filled at 101), then back down to the stop:
+    # the stop order exists only after the fill, so it fills at the stop, never at the earlier open
     bars = [("09:15", 100, 101, 99, 100), ("09:30", 99.6, 101.1, 99.5, 100.2), ("09:45", 100.2, 104, 100.1, 103.5)]
-    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(-1.4)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(-1.0)]
 
 
 def test_a9_breakout_bar_touching_stop_is_a_stop_out():

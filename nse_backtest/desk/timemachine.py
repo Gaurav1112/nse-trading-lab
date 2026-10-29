@@ -153,7 +153,8 @@ def _intraday_history(df, plan, cost_per_share):
     fills.stop_limit_fill over the bars inside [no_entry_before, no_entry_after]: a breakout outside the window,
     or one that gaps above the limit and never trades back to it there, is no trade. Target = fill + rr_t1 x R,
     R measured from the actual fill. On the fill bar only the stop counts (its Low at or below the stop is a
-    stop-out at min(Open, stop): we cannot know it reached target first); then later bars are walked.
+    stop-out at the stop: the fill came after price traded up through the trigger, so the stop order did not
+    exist at that bar's Open; we cannot know it reached target first); then later bars are walked.
     No later bars = time exit at the fill bar's Close."""
     prof = get_profile(plan.market)
     op, hi, lo, cl = (df[c].to_numpy(dtype=float) for c in ("Open", "High", "Low", "Close"))
@@ -187,7 +188,7 @@ def _intraday_history(df, plan, cost_per_share):
         target = entry + plan.rr_t1 * risk
         rest = pos[pos > k]
         if lo[k] <= stop:
-            px = min(op[k], stop)  # stop wins on the fill bar itself; a bar opening below it is out at its open
+            px = stop  # stop wins on the fill bar itself, at the stop (the stop order postdates the bar's Open)
         elif len(rest) == 0:
             px = cl[k]  # accepted trade with nothing after: time exit at the fill bar's Close
         else:

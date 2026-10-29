@@ -14,6 +14,11 @@ def entry_limit(entry: float, stop: float, tick: float) -> float:
     return round(math.ceil(round(raw / tick, 9)) * tick, 10)
 
 
+def limit_or_default(limit: float | None, entry: float, stop: float, tick: float) -> float:
+    """The logged/planned limit price, or entry_limit(entry, stop, tick) when there is none."""
+    return limit if limit is not None else entry_limit(entry, stop, tick)
+
+
 def stop_limit_fill(op, hi, lo, k_start: int, k_end: int, trigger: float, limit: float
                     ) -> tuple[int, float] | None:
     """(bar index, fill price) of a buy stop-limit over bars k_start..k_end inclusive, or None.

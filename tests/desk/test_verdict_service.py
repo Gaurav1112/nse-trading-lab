@@ -39,11 +39,11 @@ def test_us_and_intraday_tickets():
     us = ticket_lines(replace(P, market="US"), S, US)
     assert us == ("BUY 250 ABC LIMIT 100.00 — bracket: stop-loss 98.00, take-profit 103.00, GTC",)
     mis = ticket_lines(PI, S, NSE)  # C1: the intraday entry is a stop-limit (SL) order
-    assert mis == ("BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "SL-M SELL 250 ABC trigger 98.00",
-                   "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")
+    assert mis == ("BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "Cancel the entry if not filled by 14:30 IST",
+                   "SL-M SELL 250 ABC trigger 98.00", "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")
     us_mis = ticket_lines(replace(PI, market="US"), S, US)
     assert us_mis == ("BUY 250 ABC STOP-LIMIT stop 100.00 limit 100.50 — bracket: stop-loss 98.00, "
-                      "take-profit 103.00, DAY", "Flat by 15:55 ET")
+                      "take-profit 103.00, DAY", "Cancel the entry if not filled by 15:00 ET", "Flat by 15:55 ET")
     # a plan built without a limit price gets the same formula (entry 100, stop 98, NSE tick)
     assert ticket_lines(replace(P, mode=Mode.INTRADAY), S, NSE)[0] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
 

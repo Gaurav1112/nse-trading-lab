@@ -18,9 +18,7 @@ from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan
 
 def stop_limit(plan: TradePlan, profile: MarketProfile) -> float:
     """The intraday buy stop-limit's limit price (computed for a plan built without one)."""
-    if plan.entry_limit is not None:
-        return plan.entry_limit
-    return fills.entry_limit(plan.entry, plan.stop, profile.tick)
+    return fills.limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
 
 
 def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile) -> tuple[str, ...]:
@@ -30,11 +28,13 @@ def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile) -> tup
         if intraday:
             return (f"BUY {qty} {sym} STOP-LIMIT stop {plan.entry:.2f} limit {stop_limit(plan, profile):.2f} — "
                     f"bracket: stop-loss {plan.stop:.2f}, take-profit {plan.target_1:.2f}, DAY",
+                    f"Cancel the entry if not filled by {profile.no_entry_after:%H:%M} ET",
                     f"Flat by {profile.flat_by:%H:%M} ET")
         return (f"BUY {qty} {sym} LIMIT {plan.entry:.2f} — bracket: stop-loss {plan.stop:.2f}, "
                 f"take-profit {plan.target_1:.2f}, GTC",)
     if intraday:
         return (f"BUY {qty} {sym} MIS SL trigger {plan.entry:.2f} limit {stop_limit(plan, profile):.2f}",
+                f"Cancel the entry if not filled by {profile.no_entry_after:%H:%M} IST",
                 f"SL-M SELL {qty} {sym} trigger {plan.stop:.2f}",
                 f"SELL {qty} {sym} LIMIT {plan.target_1:.2f}",
                 f"Square off by {profile.flat_by:%H:%M} IST")

@@ -135,8 +135,10 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   of 0.25R and 0.5%, rounded up to the tick): 15-minute bars after the verdict; the first bar whose high
   reaches the trigger fills at its open or the trigger, whichever is higher, when it opens at or below the
   limit; a bar opening above the limit leaves a resting limit, filled at the limit when price trades back
-  to it. Flat by the session's flat-by time. The Time Machine's intraday history uses the same rule. When
-  a bar touches both stop and target, the stop wins.
+  to it. Only bars inside the entry window count (the ticket says to cancel the entry if not filled by
+  then); a later fill is `not_filled`. On the fill bar a stop touch exits at the stop. Flat by the
+  session's flat-by time. The Time Machine's intraday history uses the same rule. When a bar touches
+  both stop and target, the stop wins.
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.
