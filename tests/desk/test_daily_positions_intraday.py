@@ -102,3 +102,39 @@ def test_a2_unknown_regime_daily_plan_lands_on_watch():
     assert {v.plan.symbol for v in dp.watch} == {"AAA", "BBB"}
     for v in dp.watch:
         assert [c.name for c in v.blocks()] == ["regime"]
+
+
+def test_a7_daily_plan_uses_given_regime_and_tape(monkeypatch):
+    from nse_backtest.desk import daily
+    def boom(df):
+        raise AssertionError("assess_tape must not be called")
+    monkeypatch.setattr(daily.tape_monitor, "assess_tape", boom)
+    dp = daily_plan(NSE, {"AAA": series()}, series(step=0.997), Limits(capital=100_000), ctx(), replays=300,
+                    regime="TRENDING", tape=None)
+    assert dp.regime == "TRENDING"
+
+
+def test_a7_daily_plan_assess_tape_exception_degrades_to_none(monkeypatch):
+    from nse_backtest.desk import daily
+    monkeypatch.setattr(daily.tape_monitor, "assess_tape", lambda df: (_ for _ in ()).throw(RuntimeError("x")))
+    dp = daily_plan(NSE, {"AAA": series()}, series(), Limits(capital=100_000), ctx(), replays=300)
+    assert dp.regime is None and dp.take == ()
+
+
+def test_a5_daily_plan_quote_lookup_only_for_candidates():
+    from datetime import timedelta
+    from nse_backtest.desk.models import LiveQuote
+    asked = []
+    frames = {"AAA": series(), "BBB": series(step=1.003), "FAR": series()}
+    far = frames["FAR"].copy(); far.iloc[-1, far.columns.get_loc("Close")] = far.High.tail(20).max() / 1.2
+    frames["FAR"] = far
+    def lookup(sym):
+        asked.append(sym)
+        px = float(frames[sym]["Close"].iloc[-1])
+        return LiveQuote(price=px, day_open=px, as_of=NOW - timedelta(minutes=1))
+    dp = daily_plan(NSE, frames, series(step=1.004), Limits(capital=100_000), ctx(), replays=300,
+                    top_take=1, quote_lookup=lookup)
+    assert "FAR" not in asked and 1 <= len(asked) <= 2
+    for v in dp.take + dp.watch:
+        if v.plan.symbol in asked:
+            assert [c for c in v.checks if c.name == "live_price"][0].status.value == "PASS"

@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import replace
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from nse_backtest import tape_monitor
 
 from . import loaders
-from .daily import DailyPlan, daily_plan, market_stats
+from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .models import DeskVerdict, Limits, Mode
 from .service import check_trade
@@ -30,24 +34,64 @@ def limits_with_status(profile) -> tuple[Limits, bool]:
     return loaders.load_limits_with_status(profile)
 
 
-def regime_of(regime_df, on_warning: Warn = None) -> str | None:
-    """Tape regime name for a regime-index frame; None when it cannot be assessed (fail-closed downstream)."""
+_REGIME_MAX_AGE_DAYS = 3
+
+
+def _regime_stale(regime_df, profile) -> str | None:
+    """Warning text when the regime index's last bar is too old for market-today, else None."""
     try:
-        tape = tape_monitor.assess_tape(regime_df)
-        return tape.regime if tape else None
+        last = pd.Timestamp(regime_df.index[-1]).date()
+    except Exception:  # noqa: BLE001 - unreadable dates: treat as stale
+        return "Regime index data is stale (last bar unknown)"
+    today = datetime.now(ZoneInfo(profile.tz)).date()
+    if (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS):
+        return f"Regime index data is stale (last bar {last})"
+    return None
+
+
+def assess(regime_df, on_warning: Warn = None, profile=None):
+    """TapeAssessment for a regime-index frame, or None when missing, stale or unclassifiable."""
+    if regime_df is None:
+        return None
+    if profile is not None:
+        stale = _regime_stale(regime_df, profile)
+        if stale:
+            _warn(on_warning, stale)
+            return None
+    try:
+        return tape_monitor.assess_tape(regime_df)
     except Exception as e:  # noqa: BLE001
         _warn(on_warning, f"regime unavailable: {e}")
         return None
 
 
-def resolve_regime(profile, on_warning: Warn = None) -> str | None:
-    """Load the regime index and classify it; None when either step fails."""
+def regime_of(regime_df, on_warning: Warn = None, profile=None) -> str | None:
+    """Tape regime name for a regime-index frame; None when it cannot be assessed (fail-closed downstream)."""
+    tape = assess(regime_df, on_warning, profile)
+    return tape.regime if tape else None
+
+
+def resolve_tape(profile, on_warning: Warn = None):
+    """(regime_df, tape). Load failures and stale data reach on_warning; tape is None then."""
     try:
         df = loaders.load_regime(profile)
     except Exception as e:  # noqa: BLE001
         _warn(on_warning, f"regime unavailable: {e}")
-        return None
-    return regime_of(df, on_warning)
+        return None, None
+    return df, assess(df, on_warning, profile)
+
+
+def resolve_regime(profile, on_warning: Warn = None) -> str | None:
+    """Load the regime index and classify it; None when either step fails or the data is stale."""
+    tape = resolve_tape(profile, on_warning)[1]
+    return tape.regime if tape else None
+
+
+def quote_for(profile, symbol: str, on_warning: Warn = None):
+    q = loaders.live_quote(profile, symbol)
+    if q is None:
+        _warn(on_warning, f"live price unavailable for {symbol} — using the last close")
+    return q
 
 
 def context_for(profile, limits: Limits, symbol_df=None, regime: str | None = None):
@@ -78,16 +122,30 @@ def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, s
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, daily, regime)
     nxt, checked = loaders.next_earnings(profile, sym)
-    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked)
-    return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target)
+    quote = quote_for(profile, sym, on_warning)
+    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote))
+    return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target, quote=quote)
 
 
-def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: Warn = None) -> DailyPlan:
+def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: Warn = None, *,
+                   regime=_RESOLVE, tape=None) -> DailyPlan:
+    """Daily plan. Pass the page header's `regime`/`tape` so header and plan agree; otherwise the
+    regime is resolved here, once, and handed to daily_plan (which then does not re-assess it)."""
     frames = load_frames(profile, symbols, on_warning)
-    regime_df = loaders.load_regime(profile)
-    ctx = context_for(profile, limits, regime=regime_of(regime_df, on_warning))
+    if regime is _RESOLVE:
+        regime_df, tape = resolve_tape(profile, on_warning)
+        regime = tape.regime if tape else None
+    else:
+        regime_df = None
+        try:
+            regime_df = loaders.load_regime(profile)
+        except Exception as e:  # noqa: BLE001 - only the flip conditions need it
+            _warn(on_warning, f"regime index unavailable for flip conditions: {e}")
+    ctx = context_for(profile, limits, regime=regime)
     return daily_plan(profile, frames, regime_df, limits, ctx,
-                      earnings_lookup=lambda s: loaders.next_earnings(profile, s))
+                      earnings_lookup=lambda s: loaders.next_earnings(profile, s),
+                      quote_lookup=lambda s: quote_for(profile, s, on_warning),
+                      regime=regime, tape=tape)
 
 
 def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLVE,
@@ -96,17 +154,19 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, regime=regime)
-    frames15, load_failures, per_symbol = {}, [], {}
+    frames15, load_failures, per_symbol, quotes = {}, [], {}, {}
     for s in symbols:
         try:
             frames15[s] = loaders.load_intraday(profile, s)
         except Exception as e:  # noqa: BLE001
             load_failures.append((s, str(e)))
             continue
+        quotes[s] = quote_for(profile, s, on_warning)
         try:  # daily bars give the liquidity (turnover) and gap checks something to read
-            turnover, gap = market_stats(loaders.load_daily(profile, s))
-            per_symbol[s] = replace(ctx, turnover_20d=turnover, today_gap_pct=gap)
+            daily = loaders.load_daily(profile, s)
+            per_symbol[s] = replace(ctx, turnover_20d=turnover_20d(daily),
+                                    today_gap_pct=today_gap_pct(daily, quotes[s]))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
-    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol)
+    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)
     return verdicts, load_failures + list(failures)

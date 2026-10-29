@@ -1,5 +1,13 @@
 import numpy as np, pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
+
+
+@pytest.fixture(autouse=True)
+def _no_live_quote(monkeypatch):
+    """No network from the page: the live quote is unavailable unless a test stubs one."""
+    from nse_backtest.desk import loaders
+    monkeypatch.setattr(loaders, "live_quote", lambda p, s: None)
 
 
 def series(n=400):
@@ -302,3 +310,36 @@ def test_positions_refresh_recovers_from_error(monkeypatch, tmp_path):
     at.button(key="desk_refresh_pos").click().run()
     assert "positions.json is corrupt" not in _errors(at)
     assert any("No open" in i.value for i in at.info)
+
+
+# ---------------------------------------------------------------- final fix wave A6/A7
+
+def test_a6_stale_regime_warns_and_is_not_cached(monkeypatch, tmp_path):
+    loaders = _patch_ok(monkeypatch, tmp_path)
+    stale = series()
+    stale.index = stale.index - pd.Timedelta(days=10)
+    calls = {"n": 0}
+
+    def regime(p):
+        calls["n"] += 1
+        return stale if calls["n"] == 1 else series()
+    monkeypatch.setattr(loaders, "load_regime", regime)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    assert any("HOSTILE" in w.value and "stale" in w.value for w in at.warning)
+    at.run()
+    assert calls["n"] == 2 and not any("HOSTILE" in w.value for w in at.warning)
+
+
+def test_a7_plan_uses_header_regime_and_tape(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    seen = {}
+
+    def build(*a, **k):
+        seen.update(k)
+        return _plan_with()
+    monkeypatch.setattr(session, "run_daily_plan", build)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.button(key="desk_build_plan").click().run()
+    assert seen.get("regime") == "TRENDING" and seen.get("tape") is not None
+    assert seen["tape"].regime == "TRENDING"

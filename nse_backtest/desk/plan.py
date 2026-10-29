@@ -19,6 +19,8 @@ def _validate(df: pd.DataFrame) -> None:
         raise ValueError(f"missing columns: {', '.join(missing)}")
     if len(df) == 0:
         raise ValueError("empty frame")
+    if df.index.has_duplicates or not df.index.is_monotonic_increasing:
+        raise ValueError("bars are not in time order (duplicate or unsorted timestamps)")
 
 
 def _require_finite(**values: float) -> None:
@@ -88,7 +90,8 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
         hold = max(1, int((flat_dt - last_ts.to_pydatetime().replace(tzinfo=None)) / _BAR))
     r = e - s
     t1 = target if target is not None else e + r1 * r
-    _require_finite(entry=e, stop=s, target_1=t1, atr=a)
+    last_close = float(df["Close"].iloc[-1])
+    _require_finite(entry=e, stop=s, target_1=t1, atr=a, last_close=last_close)
     if s >= e:
         raise ValueError("stop must be below entry")
     if t1 <= e:
@@ -96,5 +99,5 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
     t2 = max(t1, e + r_mult2 * r)
     return TradePlan(symbol=symbol, market=profile.code, mode=mode, entry=float(e), stop=float(s),
                      target_1=float(t1), target_2=float(t2), atr=a, max_hold_bars=hold,
-                     last_close=float(df["Close"].iloc[-1]), last_bar=last_ts.isoformat(),
+                     last_close=last_close, last_bar=last_ts.isoformat(),
                      stop_basis=basis)

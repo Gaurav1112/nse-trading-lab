@@ -22,7 +22,7 @@ from . import nse_lists
 from .audit import data_dir
 from .checks import CheckContext
 from .markets import MarketProfile
-from .models import Limits
+from .models import LiveQuote, Limits
 
 log = logging.getLogger(__name__)
 
@@ -33,10 +33,48 @@ _SETTINGS_FILE = "desk_settings.json"
 
 # ---------------------------------------------------------------- market data
 
-def load_daily(profile: MarketProfile, symbol: str, years: int = 4) -> pd.DataFrame:
+_OHLC = ["Open", "High", "Low", "Close"]
+
+
+def _clean_bars(df: pd.DataFrame, what: str) -> pd.DataFrame:
+    """Drop bars with a missing O/H/L/C, keep the last of duplicate timestamps, sort by time."""
+    missing = [c for c in _OHLC if c not in df.columns]
+    if missing:
+        raise ValueError(f"{what}: missing columns {', '.join(missing)}")
+    df = df.dropna(subset=_OHLC)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    if not df.index.is_monotonic_increasing:
+        raise ValueError(f"{what}: bars are not in time order")
+    if len(df) == 0:
+        raise ValueError(f"{what}: no usable bars")
+    return df
+
+
+def _market_now(profile: MarketProfile, now: datetime | None = None) -> datetime:
+    now = now or datetime.now(ZoneInfo(profile.tz))
+    return now.astimezone(ZoneInfo(profile.tz)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(profile.tz))
+
+
+def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: datetime | None = None) -> pd.DataFrame:
+    """Completed daily bars. Today's bar is fetched when it exists and dropped while the session is open."""
     from nse_backtest.data import fetch_nse
-    start = (date.today() - timedelta(days=int(365.25 * years))).isoformat()
-    return fetch_nse(symbol, start, exchange=profile.exchange)
+    now = _market_now(profile, now)
+    today = now.date()
+    start = (today - timedelta(days=int(365.25 * years))).isoformat()
+    df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange)
+    df = _clean_bars(df, f"daily bars for {symbol}")
+    if pd.Timestamp(df.index[-1]).date() == today and now.time() < profile.session_close:
+        df = df.iloc[:-1]  # partial bar: plans are built on completed bars
+        if len(df) == 0:
+            raise ValueError(f"daily bars for {symbol}: no completed bars")
+    return df
+
+
+def _yf_frame(df) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    return df.copy()
 
 
 def load_intraday(profile: MarketProfile, symbol: str) -> pd.DataFrame:
@@ -45,28 +83,54 @@ def load_intraday(profile: MarketProfile, symbol: str) -> pd.DataFrame:
                            progress=False, auto_adjust=False)
     if df is None or len(df) == 0:
         raise ValueError(f"no intraday data for {symbol}")
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.copy()
-        df.columns = df.columns.get_level_values(0)
-    df = df.copy()
+    df = _yf_frame(df)
     idx = pd.DatetimeIndex(df.index)
     if idx.tz is None:
         idx = idx.tz_localize("UTC")
     df.index = idx.tz_convert(profile.tz).tz_localize(None)
-    return df
+    return _clean_bars(df, f"intraday bars for {symbol}")
 
 
-def load_regime(profile: MarketProfile) -> pd.DataFrame | None:
+def live_quote(profile: MarketProfile, symbol: str) -> LiveQuote | None:
+    """Latest price from today's 1-minute bars; None on any failure (the desk then WARNs)."""
+    from nse_backtest.data import _validate_symbol
     try:
-        from nse_backtest.data import fetch_nse
-        start = (date.today() - timedelta(days=800)).isoformat()
-        # index symbols (^NSEI, ^GSPC) take no exchange suffix: '^NSEI.NS' does not exist on Yahoo
-        exchange = "" if profile.regime_index.startswith("^") else profile.exchange
-        df = fetch_nse(profile.regime_index, start, exchange=exchange)
-        return df if df is not None and len(df) else None
-    except Exception as e:  # noqa: BLE001 - regime unknown is handled fail-closed downstream
-        log.warning("regime data unavailable for %s: %s", profile.regime_index, e)
+        _validate_symbol(symbol)
+    except ValueError as e:
+        log.warning("live quote: invalid symbol %r: %s", symbol, e)
         return None
+    try:
+        import yfinance
+        df = yfinance.download(profile.yf_symbol(symbol), period="1d", interval="1m",
+                               progress=False, auto_adjust=False)
+        if df is None or len(df) == 0:
+            raise ValueError("no 1-minute bars")
+        df = _yf_frame(df)
+        closes = pd.to_numeric(df["Close"], errors="coerce")
+        opens = pd.to_numeric(df["Open"], errors="coerce")
+        closes = closes[closes.map(lambda x: math.isfinite(x) and x > 0)]
+        opens = opens[opens.map(lambda x: math.isfinite(x) and x > 0)]
+        if len(closes) == 0 or len(opens) == 0:
+            raise ValueError("no finite prices in 1-minute bars")
+        ts = pd.Timestamp(closes.index[-1])
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+        return LiveQuote(price=float(closes.iloc[-1]), day_open=float(opens.iloc[0]),
+                         as_of=ts.tz_convert(profile.tz).to_pydatetime())
+    except Exception as e:  # noqa: BLE001 - no quote -> live_price WARNs
+        log.warning("live quote unavailable for %s: %s", symbol, e)
+        return None
+
+
+def load_regime(profile: MarketProfile) -> pd.DataFrame:
+    """Regime-index daily bars. Raises on failure so the caller can surface the reason."""
+    from nse_backtest.data import fetch_nse
+    start = (date.today() - timedelta(days=800)).isoformat()
+    # index symbols (^NSEI, ^GSPC) take no exchange suffix: '^NSEI.NS' does not exist on Yahoo
+    exchange = "" if profile.regime_index.startswith("^") else profile.exchange
+    df = fetch_nse(profile.regime_index, start, exchange=exchange)
+    if df is None or len(df) == 0:
+        raise ValueError(f"no regime index data for {profile.regime_index}")
+    return _clean_bars(df, f"regime index {profile.regime_index}")
 
 
 def _to_date(x) -> date | None:
@@ -275,10 +339,11 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
     ban = None
     if profile.has_ban_list:
         ban = nse_lists.fetch_fno_ban(data_dir() / "cache", now.date())
-    turnover = gap = None
+    turnover = None
     if symbol_df is not None:
-        from .daily import market_stats
-        turnover, gap = market_stats(symbol_df)
+        from .daily import turnover_20d
+        turnover = turnover_20d(symbol_df)
+    # today's gap needs a live day-open: set by the caller from a quote, else None (gap WARNs)
     return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
                         governor_can_trade=can_trade, governor_reasons=reasons, ban=ban, regime=regime,
-                        turnover_20d=turnover, today_gap_pct=gap, journal_readable=journal_readable)
+                        turnover_20d=turnover, today_gap_pct=None, journal_readable=journal_readable)

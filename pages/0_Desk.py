@@ -14,7 +14,6 @@ import pandas as pd
 import streamlit as st
 
 from components import theme
-from nse_backtest import tape_monitor
 from nse_backtest.desk import loaders, session
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
@@ -189,15 +188,18 @@ with st.sidebar:
 # ---------------------------------------------------------------- header: regime
 
 def _regime_state(profile):
-    """(regime_df, tape, error). Only a successful load is cached (per market and day); a failure retries."""
+    """(regime_df, tape, error). Cached per market and day only when the tape was classified;
+    a failed, stale or unclassifiable regime is retried on the next run."""
     key = ("regime", profile.code, _today())
     if key in st.session_state:
         return st.session_state[key]
+    warns: list[str] = []
     try:
-        df = loaders.load_regime(profile)
-        tape = tape_monitor.assess_tape(df)
+        df, tape = session.resolve_tape(profile, warns.append)
     except Exception as e:  # noqa: BLE001
         return None, None, str(e) or type(e).__name__
+    if tape is None:
+        return df, None, "; ".join(warns) or None
     st.session_state[key] = (df, tape, None)
     return st.session_state[key]
 
@@ -225,7 +227,8 @@ with tab_plan:
     plan_key = ("plan", market, _today())
     if st.button("Build today's plan", key="desk_build_plan"):
         with st.spinner("Scanning the universe — this can take a few minutes the first time..."):
-            state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile))
+            state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile),
+                             regime=regime_name, tape=tape)  # the header's regime: header and plan agree
         if "ok" in state:
             state["at"] = _now_hhmm(profile)
         st.session_state[plan_key] = state  # a failure REPLACES any earlier success

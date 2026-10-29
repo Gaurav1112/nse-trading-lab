@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 
@@ -87,6 +88,14 @@ class Odds:
     noise_expectancy_min: float | None
     noise_expectancy_max: float | None
     noise_negative_frac: float | None
+
+
+@dataclass(frozen=True)
+class LiveQuote:
+    """Latest traded price from 1-minute bars. `as_of` is tz-aware (market tz)."""
+    price: float
+    day_open: float
+    as_of: datetime
 
 
 @dataclass(frozen=True)

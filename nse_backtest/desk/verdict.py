@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
@@ -63,7 +64,12 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
     blocks = [c.name for c in checks if c.status is Status.BLOCK]
     ticket: tuple[str, ...] = ()
     trigger: float | None = None
-    if blocks:
+    price_ok = (isinstance(current_price, (int, float)) and not isinstance(current_price, bool)
+                and math.isfinite(current_price) and current_price > 0)
+    if not price_ok:
+        action = Action.SKIP
+        headline = f"SKIP {sym} — current price unavailable"
+    elif blocks:
         action = Action.SKIP
         headline = f"SKIP {sym} — blocked by: {', '.join(blocks)}"
     elif current_price < plan.entry * (1 - 0.001):

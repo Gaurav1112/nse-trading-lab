@@ -13,7 +13,7 @@ import pandas as pd
 from nse_backtest import tape_monitor
 
 from .checks import CheckContext
-from .models import Action, DeskVerdict, Limits, Mode
+from .models import Action, DeskVerdict, LiveQuote, Limits, Mode
 from .service import check_trade
 
 
@@ -29,21 +29,29 @@ class DailyPlan:
     unavailable: tuple[str, ...]
 
 
-def market_stats(df) -> tuple[float | None, float | None]:
-    """(turnover_20d, today_gap_pct); None for anything that cannot be computed. Never raises."""
-    turnover = gap = None
+def turnover_20d(df) -> float | None:
+    """Median Close*Volume over the last 20 bars; None when it cannot be computed. Never raises."""
     try:
         t = float((df["Close"] * df["Volume"]).tail(20).median())
-        turnover = t if math.isfinite(t) else None
+        return t if math.isfinite(t) else None
     except Exception:  # noqa: BLE001
-        pass
+        return None
+
+
+def today_gap_pct(daily_df, quote: LiveQuote | None) -> float | None:
+    """(today's open / previous completed daily close - 1) * 100, from a live quote; None without one."""
+    if quote is None or daily_df is None:
+        return None
     try:
-        if len(df) >= 2:
-            g = (float(df["Open"].iloc[-1]) / float(df["Close"].iloc[-2]) - 1) * 100
-            gap = g if math.isfinite(g) else None
-    except Exception:  # noqa: BLE001
-        pass
-    return turnover, gap
+        day = quote.as_of.date()
+        dates = pd.DatetimeIndex(daily_df.index).date
+        prev = daily_df["Close"][dates < day]
+        if len(prev) == 0:
+            return None
+        g = (float(quote.day_open) / float(prev.iloc[-1]) - 1) * 100
+        return g if math.isfinite(g) else None
+    except Exception:  # noqa: BLE001 - unknown gap WARNs
+        return None
 
 
 def flip_conditions(regime_df: pd.DataFrame | None, profile) -> tuple[str, ...]:
@@ -92,16 +100,40 @@ def _watch_eligible(v: DeskVerdict) -> bool:
 
 
 def _closeness(v: DeskVerdict) -> float:
-    return (v.trigger or v.plan.entry) / v.current_price
+    px = v.current_price
+    if not (isinstance(px, (int, float)) and math.isfinite(px) and px > 0):
+        return float("inf")
+    return (v.trigger or v.plan.entry) / px
+
+
+_UNSET = object()
+
+
+def _tape_or_none(regime_df):
+    try:
+        return tape_monitor.assess_tape(regime_df)
+    except Exception:  # noqa: BLE001 - unknown regime is handled fail-closed (swing BLOCK)
+        return None
 
 
 def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limits, ctx_base: CheckContext,
                *, top_take: int = 3, top_watch: int = 5, replays: int = 3000,
                audit_path: Path | None = None,
-               earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None) -> DailyPlan:
-    tape = tape_monitor.assess_tape(regime_df)
-    regime = tape.regime if tape else None
-    regime_text = tape.recommendation if tape else "Regime unknown — treat as HOSTILE"
+               earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None,
+               quote_lookup: Callable[[str], LiveQuote | None] | None = None,
+               regime=_UNSET, tape=None) -> DailyPlan:
+    """Pass 1 ranks every symbol on its last close. Pass 2 re-checks only the TAKE/WATCH candidates
+    with the live quote, earnings date and robustness. `regime`/`tape`, when given, are used as-is
+    (so the page header and the plan agree) and the tape is not re-assessed."""
+    if regime is _UNSET:
+        tape = _tape_or_none(regime_df)
+        regime = tape.regime if tape else None
+    if tape is not None and getattr(tape, "regime", None) == regime:
+        regime_text = tape.recommendation
+    elif regime:
+        regime_text = f"Regime {regime}"
+    else:
+        regime_text = "Regime unknown — treat as HOSTILE"
     ctx = replace(ctx_base, regime=regime)
 
     skipped: list[tuple[str, str]] = []
@@ -123,8 +155,7 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
         if e is not None and np.isnan(e):
             skipped.append((sym, "not near a setup"))
             continue
-        turnover, gap = market_stats(df)
-        c = replace(ctx, turnover_20d=turnover, today_gap_pct=gap)
+        c = replace(ctx, turnover_20d=turnover_20d(df), today_gap_pct=None)
         try:
             v = check_trade(df, sym, profile, Mode.SWING, limits, c, entry=e,
                             robustness=False, replays=replays, audit=False)
@@ -140,34 +171,49 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
             skipped.append((sym, v.headline))
 
     takes.sort(key=_exp, reverse=True)
+    watch.sort(key=_closeness)
+    for v in takes[top_take:]:
+        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_take})"))
+    for v in watch[top_watch:]:
+        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_watch} watch)"))
+
     final_take: list[DeskVerdict] = []
-    for v in takes[:top_take]:
+    final_watch: list[DeskVerdict] = []
+    for v in takes[:top_take] + watch[:top_watch]:  # one network call of each kind per candidate
         sym = v.plan.symbol
         c2 = sym_ctx[sym]
-        if earnings_lookup is not None:  # only for final candidates: one network call each
+        if earnings_lookup is not None:
             try:
                 nxt, checked = earnings_lookup(sym)
             except Exception:  # noqa: BLE001 - unknown earnings WARNs, never passes
                 nxt, checked = None, False
             c2 = replace(c2, next_earnings=nxt, earnings_checked=checked)
+        quote = None
+        if quote_lookup is not None:
+            try:
+                quote = quote_lookup(sym)
+            except Exception:  # noqa: BLE001 - no quote: live_price and gap WARN
+                quote = None
+            c2 = replace(c2, today_gap_pct=today_gap_pct(frames[sym], quote))
         try:
             v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, c2, entry=entries[sym],
-                             robustness=True, replays=replays, audit=True, audit_path=audit_path)
+                             robustness=True, replays=replays, audit=True, audit_path=audit_path, quote=quote)
         except ValueError as err:
             skipped.append((sym, str(err)))
             continue
         if v2.action is Action.TAKE:
             final_take.append(v2)
         elif _watch_eligible(v2):
-            watch.append(v2)
+            final_watch.append(v2)
         else:
             skipped.append((sym, v2.headline))
-    for v in takes[top_take:]:
-        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_take})"))
 
     final_take.sort(key=_exp, reverse=True)
-    watch.sort(key=_closeness)
-    for v in watch[top_watch:]:
+    for v in final_take[top_take:]:
+        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_take})"))
+    final_watch.sort(key=_closeness)
+    for v in final_watch[top_watch:]:
         skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_watch} watch)"))
     return DailyPlan(profile.code, regime, regime_text, flip_conditions(regime_df, profile),
-                     tuple(final_take), tuple(watch[:top_watch]), tuple(skipped), tuple(unavailable))
+                     tuple(final_take[:top_take]), tuple(final_watch[:top_watch]), tuple(skipped),
+                     tuple(unavailable))

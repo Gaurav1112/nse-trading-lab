@@ -32,9 +32,9 @@ def by_name(checks):
     return {c.name: c.status for c in checks}
 
 
-def test_baseline_all_pass_with_sixteen_checks():
-    cs = run_checks(plan(), SIZE, ODDS, ctx())
-    assert len(cs) == 16 and all(c.status is Status.PASS for c in cs), [c for c in cs if c.status is not Status.PASS]
+def test_baseline_all_pass_with_seventeen_checks():
+    cs = run_checks(plan(), SIZE, ODDS, ctx(price_is_live=True, quote_as_of=NOW), current_price=100.0)
+    assert len(cs) == 17 and all(c.status is Status.PASS for c in cs), [c for c in cs if c.status is not Status.PASS]
     assert all(c.reason.strip() for c in cs)
 
 
@@ -437,3 +437,40 @@ def test_a2_unknown_regime_swing_blocks(reg):
 def test_a3_robustness_not_run_warns():
     c = _c("robustness", o=replace(ODDS, noise_negative_frac=None))
     assert c.status is Status.WARN and c.reason == "Robustness not run — edge not stress-tested"
+
+
+# ---- Final fix wave A5: live_price check (17th) ----
+def test_a5_live_price_is_the_ninth_of_seventeen_checks():
+    names = [c.name for c in run_checks(plan(), SIZE, ODDS, ctx())]
+    assert len(names) == 17 and names[names.index("freshness") + 1] == "live_price"
+
+
+def test_a5_live_price_not_live_warns():
+    c = _c("live_price")
+    assert c.status is Status.WARN
+    assert c.reason == "Price is the last close of 2026-10-28 — confirm the live price before entering"
+
+
+def _lp(current_price, **kw):
+    cs = run_checks(plan(), SIZE, ODDS, ctx(price_is_live=True, **kw), current_price=current_price)
+    return [c for c in cs if c.name == "live_price"][0]
+
+
+def test_a5_live_price_at_or_below_stop_blocks():
+    c = _lp(98.0, quote_as_of=NOW)
+    assert c.status is Status.BLOCK and c.reason == "Price ₹98.00 is already at or below the stop ₹98.00"
+    assert _lp(97.0, quote_as_of=NOW).status is Status.BLOCK
+
+
+def test_a5_live_price_old_quote_during_session_warns():
+    from datetime import timedelta
+    c = _lp(100.0, quote_as_of=NOW - timedelta(minutes=25))
+    assert c.status is Status.WARN and c.reason == "Live price is 25 min old"
+    evening = datetime(2026, 10, 29, 18, 0, tzinfo=IST)
+    assert _lp(100.0, quote_as_of=evening - timedelta(hours=2), now=evening).status is Status.PASS
+
+
+def test_a5_live_price_fresh_passes_and_missing_time_warns():
+    assert _lp(100.0, quote_as_of=NOW).status is Status.PASS
+    assert _lp(100.0, quote_as_of=None).status is Status.WARN
+    assert _lp(float("nan"), quote_as_of=NOW).status is Status.BLOCK

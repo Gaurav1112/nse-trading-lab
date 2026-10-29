@@ -49,3 +49,71 @@ def test_load_regime_uses_no_exchange_suffix_for_index(monkeypatch):
     monkeypatch.setattr(data, "fetch_nse", fake)
     assert loaders.load_regime(NSE) is not None
     assert seen["args"] == ("^NSEI", "")
+
+
+# ---- Final fix wave A5-A7 ----
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+import pandas as pd
+from nse_backtest.desk.models import LiveQuote
+
+
+def test_a6_stale_regime_is_none_with_warning():
+    stale = series()
+    stale.index = stale.index - pd.Timedelta(days=10)
+    warns = []
+    assert session.regime_of(stale, warns.append, NSE) is None
+    assert warns == [f"Regime index data is stale (last bar {stale.index[-1].date()})"]
+    assert session.regime_of(series(), [].append, NSE) is not None
+
+
+def test_a6_resolve_tape_reports_stale(monkeypatch):
+    stale = series()
+    stale.index = stale.index - pd.Timedelta(days=10)
+    monkeypatch.setattr(loaders, "load_regime", lambda p: stale)
+    warns = []
+    df, tape = session.resolve_tape(NSE, warns.append)
+    assert tape is None and "stale" in warns[0]
+
+
+def test_a5_run_check_fetches_live_quote_and_gap(offline_desk, monkeypatch):
+    seen = []
+    daily = series()
+    prev_close = float(daily["Close"].iloc[-1])
+    now = datetime.now(ZoneInfo(NSE.tz))
+    q = LiveQuote(price=prev_close, day_open=prev_close * 1.03, as_of=now)
+    monkeypatch.setattr(loaders, "live_quote", lambda p, s: seen.append(s) or q)
+    v = session.run_check(NSE, "abc", Mode.SWING, Limits(capital=100_000))
+    assert seen == ["ABC"] and v.current_price == prev_close
+    gap = [c for c in v.checks if c.name == "gap"][0]
+    assert gap.status.value == "WARN" and "+3.0%" in gap.reason
+    assert [c for c in v.checks if c.name == "live_price"][0].status.value == "PASS"
+
+
+def test_a5_run_check_without_quote_warns_live_price_and_gap(offline_desk):
+    v = session.run_check(NSE, "ABC", Mode.SWING, Limits(capital=100_000))
+    st = {c.name: c.status.value for c in v.checks}
+    assert st["live_price"] == "WARN" and st["gap"] == "WARN"
+
+
+def test_a7_run_daily_plan_resolves_regime_once_and_passes_it(offline_desk, monkeypatch):
+    calls, kws = [], []
+    real_assess = session.tape_monitor.assess_tape
+    monkeypatch.setattr(session.tape_monitor, "assess_tape", lambda df: calls.append(1) or real_assess(df))
+    real = session.daily_plan
+    monkeypatch.setattr(session, "daily_plan", lambda *a, **k: kws.append(k) or real(*a, **k))
+    quotes = []
+    monkeypatch.setattr(loaders, "live_quote", lambda p, s: quotes.append(s) or None)
+    dp = session.run_daily_plan(NSE, Limits(capital=100_000), ["AAA", "BBB"])
+    assert len(calls) == 1 and kws[0]["regime"] == dp.regime and kws[0]["tape"] is not None
+    assert callable(kws[0]["quote_lookup"])
+    assert sorted(quotes) == ["AAA", "BBB"]  # only the TAKE/WATCH candidates, once each
+
+
+def test_a7_run_daily_plan_accepts_header_regime(offline_desk, monkeypatch):
+    def boom(df):
+        raise AssertionError("must not re-assess the tape")
+    monkeypatch.setattr(session.tape_monitor, "assess_tape", boom)
+    monkeypatch.setattr(loaders, "load_regime", lambda p: (_ for _ in ()).throw(AssertionError("no reload")))
+    dp = session.run_daily_plan(NSE, Limits(capital=100_000), ["AAA"], regime="HOSTILE", tape=None)
+    assert dp.regime == "HOSTILE" and dp.take == ()

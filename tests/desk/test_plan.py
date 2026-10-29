@@ -127,3 +127,19 @@ def test_validation_errors():
         atr(flat(0))
     with pytest.raises(ValueError, match="need at least 20 bars"):
         build_plan(flat(10), "X", Mode.SWING, NSE)
+
+
+# ---- Final fix wave A4 ----
+def test_a4_nonfinite_last_close_raises_even_with_user_geometry():
+    df = flat()
+    df.iloc[-1, df.columns.get_loc("Close")] = np.nan
+    with pytest.raises(ValueError, match="non-finite price data: last_close"):
+        build_plan(df, "X", Mode.SWING, NSE, entry=100, stop=98, target=103)
+
+
+@pytest.mark.parametrize("bad", ["dup", "unsorted"])
+def test_a4_bars_out_of_time_order_raise(bad):
+    df = flat()
+    df = pd.concat([df, df.iloc[[-1]]]) if bad == "dup" else df.iloc[::-1]
+    with pytest.raises(ValueError, match="time order"):
+        build_plan(df, "X", Mode.SWING, NSE)

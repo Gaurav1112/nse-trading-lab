@@ -269,7 +269,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
-    def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None):
+    def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None, quotes=None):
         seen["ctx"] = (ctx_by_symbol or {}).get("AAA")
         v = check_trade(series(), "AAA", profile, __import__("nse_backtest.desk.models", fromlist=["Mode"]).Mode.SWING,
                         limits, ctx, robustness=False, replays=200, audit=False)
@@ -347,3 +347,114 @@ def test_check_trade_does_not_halve_on_unreadable_journal(tmp_path):
     ctx = loaders.build_context(NSE, Limits(capital=5000))
     assert ctx.journal == () and ctx.journal_readable is False
     assert stoploss_streak(ctx.journal, "NSE") is False  # service halves only on this
+
+
+# ------------------------------------------------------------------ final fix wave A4-A6
+
+def _intraday_raw(n=5, nan_last=False):
+    idx = pd.date_range("2026-10-28 03:45", periods=n, freq="15min", tz="UTC")
+    df = pd.DataFrame({c: np.linspace(100, 101, n) for c in ("Open", "High", "Low", "Close")} | {"Volume": 1e5}, index=idx)
+    if nan_last:
+        df.iloc[-1, df.columns.get_loc("Close")] = np.nan
+    return df
+
+
+def test_a4_load_intraday_drops_trailing_nan_row(monkeypatch):
+    import yfinance
+    monkeypatch.setattr(yfinance, "download", lambda *a, **k: _intraday_raw(nan_last=True))
+    out = loaders.load_intraday(NSE, "INFY")
+    assert len(out) == 4 and np.isfinite(out[["Open", "High", "Low", "Close"]].to_numpy()).all()
+    assert out.index.is_monotonic_increasing and (out.index[-1].hour, out.index[-1].minute) == (10, 0)  # 10:15 NaN bar dropped
+
+
+def test_a4_load_intraday_dedupes_and_sorts(monkeypatch):
+    import yfinance
+    raw = _intraday_raw()
+    dup = raw.iloc[[-1]].copy()
+    dup["Close"] = 999.0
+    monkeypatch.setattr(yfinance, "download", lambda *a, **k: pd.concat([raw.iloc[::-1], dup]))
+    out = loaders.load_intraday(NSE, "INFY")
+    assert out.index.is_monotonic_increasing and not out.index.has_duplicates and out["Close"].iloc[-1] == 999.0
+
+
+def _patch_fetch(monkeypatch, frame):
+    import nse_backtest.data as data
+    seen = {}
+    def fake(sym, start, end=None, exchange="NS", **k):
+        seen.update(sym=sym, start=start, end=end, exchange=exchange)
+        return frame.copy()
+    monkeypatch.setattr(data, "fetch_nse", fake)
+    return seen
+
+
+def _daily_to(last: str, n=30):
+    idx = pd.bdate_range(end=last, periods=n)
+    return pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": np.arange(n, dtype=float) + 100,
+                         "Volume": 1e6}, index=idx)
+
+
+def test_a4_load_daily_dedupes_duplicated_last_row(monkeypatch):
+    f = _daily_to("2026-10-28")
+    f = pd.concat([f, f.iloc[[-1]].assign(Close=555.0)])
+    _patch_fetch(monkeypatch, f)
+    now = datetime(2026, 10, 29, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz))
+    out = loaders.load_daily(NSE, "INFY", now=now)
+    assert not out.index.has_duplicates and len(out) == 30 and out["Close"].iloc[-1] == 555.0
+
+
+def test_a5_load_daily_end_includes_today_and_drops_partial_bar(monkeypatch):
+    seen = _patch_fetch(monkeypatch, _daily_to("2026-10-29"))
+    tz = loaders.ZoneInfo(NSE.tz)
+    during = loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz))
+    assert seen["end"] == "2026-10-30"
+    assert during.index[-1].date() == date(2026, 10, 28)  # today's bar is partial: dropped
+    after = loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 16, 0, tzinfo=tz))
+    assert after.index[-1].date() == date(2026, 10, 29)  # completed bar kept
+
+
+def _minute_frame(tz="UTC", nan_first_open=False, nan_last_close=False):
+    idx = pd.date_range("2026-10-29 03:45", periods=4, freq="1min", tz=tz)
+    df = pd.DataFrame({"Open": [101.0, 102.0, 103.0, 104.0], "High": 105.0, "Low": 100.0,
+                       "Close": [101.5, 102.5, 103.5, 104.5], "Volume": 1e4}, index=idx)
+    if nan_first_open:
+        df.iloc[0, df.columns.get_loc("Open")] = np.nan
+    if nan_last_close:
+        df.iloc[-1, df.columns.get_loc("Close")] = np.nan
+    return df
+
+
+def test_a5_live_quote_parses_minute_bars(monkeypatch, real_live_quote):
+    import yfinance
+    calls = {}
+    def dl(sym, **kw):
+        calls.update(sym=sym, **kw)
+        return _minute_frame(nan_first_open=True, nan_last_close=True)
+    monkeypatch.setattr(yfinance, "download", dl)
+    q = real_live_quote(NSE, "INFY")
+    assert calls["sym"] == "INFY.NS" and calls["period"] == "1d" and calls["interval"] == "1m"
+    assert calls["auto_adjust"] is False and calls["progress"] is False
+    assert q.price == 103.5 and q.day_open == 102.0  # last finite close, first finite open
+    assert q.as_of.tzinfo is not None and q.as_of.utcoffset().total_seconds() == 5.5 * 3600
+    assert (q.as_of.hour, q.as_of.minute) == (9, 17)  # time of the bar the price came from
+
+
+@pytest.mark.parametrize("ret", [pd.DataFrame(), None, RuntimeError("down")])
+def test_a5_live_quote_failure_is_none(monkeypatch, real_live_quote, ret):
+    import yfinance
+    def dl(*a, **k):
+        if isinstance(ret, Exception):
+            raise ret
+        return ret
+    monkeypatch.setattr(yfinance, "download", dl)
+    assert real_live_quote(US, "AAPL") is None
+
+
+def test_a6_load_regime_failure_reaches_on_warning(monkeypatch):
+    import nse_backtest.data as data
+    def boom(*a, **k):
+        raise RuntimeError("yfinance failed after 3 attempts")
+    monkeypatch.setattr(data, "fetch_nse", boom)
+    warns = []
+    assert session.resolve_regime(NSE, warns.append) is None
+    assert warns and "yfinance failed after 3 attempts" in warns[0]
+

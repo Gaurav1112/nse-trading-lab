@@ -2,7 +2,7 @@
 name: trade-desk
 description: >-
   NSE + US trade desk for this repo. Turns a stock into a sized TAKE / WAIT / SKIP decision with
-  stop, targets, Monte Carlo odds, setup history and 16 risk checks; also the daily plan, position
+  stop, targets, Monte Carlo odds, setup history and 17 risk checks; also the daily plan, position
   review and intraday opening-range scan. Use when the user says "check RELIANCE", "should I buy",
   "size this trade", "what should I trade today", "review my positions", "any intraday setups",
   "set my capital / max loss". Never places orders.

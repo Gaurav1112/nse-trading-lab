@@ -1,4 +1,4 @@
-"""The 16 PASS/WARN/BLOCK safety checks. Missing data is never a PASS."""
+"""The 17 PASS/WARN/BLOCK safety checks. Missing data is never a PASS."""
 from __future__ import annotations
 
 import math
@@ -29,6 +29,8 @@ class CheckContext:
     today_gap_pct: float | None = None
     day_trades_5d: int = 0
     journal_readable: bool = True
+    quote_as_of: datetime | None = None  # tz-aware time of the live quote
+    price_is_live: bool = False  # True only when the current price came from a live quote
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -94,8 +96,15 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
     return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt.astimezone(tz)
 
 
-def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext) -> list[Check]:
+_QUOTE_MAX_AGE_MIN = 20
+
+
+def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext,
+               current_price: float | None = None) -> list[Check]:
+    """`current_price` is the price the verdict uses (live quote, else the plan's last close)."""
     p, lim, prof = plan, ctx.limits, ctx.profile
+    if current_price is None:
+        current_price = p.last_close
     mode = Mode(p.mode)
     now = ctx.now
     naive = now.tzinfo is None
@@ -234,7 +243,27 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         else:
             out.append(_ck("freshness", P, f"Last intraday bar is {age_min:.0f} minutes old (limit 30)"))
 
-    # 9 entry_window
+    # 9 live_price
+    cp = _num(current_price)
+    if ctx.price_is_live is not True:
+        when = bar.date().isoformat() if bar is not None else str(p.last_bar)[:10]
+        out.append(_ck("live_price", W, f"Price is the last close of {when} — confirm the live price before entering"))
+    elif cp is None or cp <= 0:
+        out.append(_ck("live_price", B, "Live price is not a valid number"))
+    elif cp <= p.stop:
+        out.append(_ck("live_price", B, f"Price {prof.money(cp)} is already at or below the stop {prof.money(p.stop)}"))
+    elif not isinstance(ctx.quote_as_of, datetime) or ctx.quote_as_of.tzinfo is None or naive:
+        out.append(_ck("live_price", W, "Live price time unknown — confirm the live price before entering"))
+    else:
+        as_of = ctx.quote_as_of.astimezone(tz)
+        age_min = (now - as_of).total_seconds() / 60
+        in_session = now.weekday() < 5 and prof.session_open <= now.time() <= prof.session_close
+        if in_session and age_min > _QUOTE_MAX_AGE_MIN:
+            out.append(_ck("live_price", W, f"Live price is {age_min:.0f} min old"))
+        else:
+            out.append(_ck("live_price", P, f"Live price {prof.money(cp)} as of {as_of:%H:%M}"))
+
+    # 10 entry_window
     if swing:
         out.append(_ck("entry_window", P, "Swing entries have no time-of-day window"))
     elif naive:
@@ -246,7 +275,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("entry_window", P, f"{now:%H:%M} is inside the entry window {prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"))
 
-    # 10 liquidity
+    # 11 liquidity
     turn = _num(ctx.turnover_20d)
     if turn is None:
         out.append(_ck("liquidity", W, "Liquidity unavailable: 20-day turnover could not be computed"))
@@ -255,7 +284,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("liquidity", P, f"20-day turnover {prof.money(turn)} meets the minimum {prof.money(prof.min_turnover)}"))
 
-    # 11 earnings
+    # 12 earnings
     ne = ctx.next_earnings
     if isinstance(ne, datetime):  # includes pd.Timestamp
         ne = ne.date()
@@ -285,7 +314,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         else:
             out.append(_ck("earnings", P, f"Next earnings on {ne} are not today"))
 
-    # 12 setup_history
+    # 13 setup_history
     if odds is None and not swing:
         out.append(_ck("setup_history", B, "Research only: setup history could not be computed for this stock"))
     elif odds is None:
@@ -306,7 +335,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         else:
             out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n:.0f} past samples"))
 
-    # 13 stoploss_streak
+    # 14 stoploss_streak
     if not ctx.journal_readable:
         out.append(_ck("stoploss_streak", W, "Could not read the trade journal — stop-out streak not verified"))
     elif stoploss_streak(ctx.journal, prof.code):
@@ -314,7 +343,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("stoploss_streak", P, f"No run of 3 straight losses in the {prof.code} journal"))
 
-    # 14 gap
+    # 15 gap
     g = _num(ctx.today_gap_pct)
     if g is None:
         out.append(_ck("gap", W, "Today's gap could not be measured: entry price may be off"))
@@ -323,7 +352,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("gap", P, f"Today's gap of {g:+.1f}% is within 2%"))
 
-    # 15 robustness
+    # 16 robustness
     raw_nf = odds.noise_negative_frac if odds is not None else None
     nf = _num(raw_nf)
     if raw_nf is None:
@@ -335,7 +364,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("robustness", P, f"Only {nf:.0%} of noisy replays lose money (limit 25%)"))
 
-    # 16 pdt
+    # 17 pdt
     if prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and ctx.day_trades_5d >= 3:
         out.append(_ck("pdt", B, f"Pattern day trader guard: {ctx.day_trades_5d} day trades in the last 5 days (limit 3)"))
     elif prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and not ctx.journal_readable:
