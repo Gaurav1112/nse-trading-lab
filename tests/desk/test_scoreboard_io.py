@@ -331,7 +331,8 @@ def test_market_filter_and_stats_never_combine(paths):
 
 # ---------------------------------------------------------------- CLI
 
-DISCLAIMER = "Paper record of the desk's TAKEs as if each ticket were followed exactly — not your real P&L."
+DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed exactly "
+              "— not your real P&L.")
 
 
 def _cli_env(tmp_path, monkeypatch, rows):
@@ -784,7 +785,8 @@ def test_r1_save_has_no_chmod_after_replace(tmp_path, monkeypatch):
 
 
 # ---- surfaces: coverage sentence, warnings and rejects on the page
-COVERAGE = "Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet."
+COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
+            "your overrides are scored as a separate record.")
 
 
 def test_r1_cli_disclaimer_line_2_and_note(tmp_path, monkeypatch, capsys):
@@ -858,3 +860,87 @@ def test_intraday_cached_outcome_needs_the_same_entry_limit(paths):
     write_audit(paths[0], [row(created, mode="intraday", entry_limit=100.3)])
     res = run(paths, intraday=boom_loader(), now=datetime(2027, 1, 29, 12, 0, tzinfo=IST))
     assert "cached result no longer matches the logged ticket (kept in cache)" in res.outcomes[0].note
+
+
+# ---- C2: desk picks and owner overrides are two records: separate candidates, cache slots and stats
+def _override(created, **kw):
+    return row(created, action="OVERRIDE", desk_action="SKIP", chosen_by="owner", **kw)
+
+
+def test_c2_desk_pick_and_override_of_the_same_ticket_are_two_records(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), _override(PRE_OPEN_16)])  # same hash, same instant, same session
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert sorted((o.candidate.record, o.status) for o in res.outcomes) == [("desk", Status.WON),
+                                                                            ("override", Status.WON)]
+    assert [(s.record, s.n) for s in res.stats] == [("desk", 1), ("override", 1)]
+    entries = json.loads(paths[1].read_text())["outcomes"]
+    assert sorted(e["candidate"]["record"] for e in entries.values()) == ["desk", "override"]
+    again = run(paths)  # both served from the cache: no loader may be called
+    assert sorted(o.candidate.record for o in again.outcomes) == ["desk", "override"]
+    assert [(s.record, s.n) for s in again.stats] == [("desk", 1), ("override", 1)]
+
+
+def test_c2_a_desk_cache_entry_is_never_served_as_an_override(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), _override(PRE_OPEN_16)])
+    run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    data = json.loads(paths[1].read_text())
+    desk_key = next(k for k, e in data["outcomes"].items() if e["candidate"]["record"] == "desk")
+    over_key = next(k for k in data["outcomes"] if k != desk_key)
+    data["outcomes"][over_key] = data["outcomes"][desk_key]  # a desk result under the override's slot
+    paths[1].write_text(json.dumps(data), encoding="utf-8")
+    ld = Loader({"ABC": frame(WIN_BARS)})
+    res = run(paths, ld)
+    assert ld.calls == [("NSE", "ABC")]  # the override was replayed, not served the desk's entry
+    assert sorted(o.candidate.record for o in res.outcomes) == ["desk", "override"]
+    assert json.loads(paths[1].read_text())["outcomes"][over_key]["candidate"]["record"] == "override"
+
+
+def test_c2_malformed_override_is_reported(paths):
+    write_audit(paths[0], [_override(PRE_OPEN_16, stop=101.0), row(PRE_OPEN_16, action="WAIT", h="w")])
+    res = run(paths)
+    assert res.outcomes == [] and res.rejects == [(1, "malformed OVERRIDE: invalid geometry stop=101.0 "
+                                                      "entry=100.0 target_1=103.0")]
+
+
+def test_c2_cli_prints_desk_picks_then_your_overrides_each_verdict_first(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [row(PRE_OPEN_16), _override(PRE_OPEN_16, symbol="XYZ", h="o")])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    d, o = out.index("Desk picks"), out.index("Your overrides")
+    assert d < o
+    assert out[d + 1].startswith("NSE swing: Not enough trades yet (1/30)")
+    assert out[o + 1].startswith("NSE swing: Not enough trades yet (1/30)")
+    trades = [x for x in out if " ABC " in x or " XYZ " in x]
+    assert any("desk" in x and "ABC" in x for x in trades) and any("override" in x and "XYZ" in x for x in trades)
+
+
+def test_c2_cli_says_when_there_are_no_overrides_yet(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [row(PRE_OPEN_16)])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    o = out.index("Your overrides")
+    assert out[o + 1] == "  No overrides logged yet."
+
+
+def test_c2_page_shows_the_two_records_under_separate_subheaders(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk.scoreboard import summarize
+    desk = _fake_result().outcomes
+    losing = [replace(desk[0], candidate=replace(desk[0].candidate, record="override", key=f"o{i}"),
+                      status=Status.LOST, exit_price=98.0, realised_r=-1.0) for i in range(30)]
+    outs = desk + losing
+    monkeypatch.setattr(session, "run_scoreboard",
+                        lambda market=None, **k: session.ScoreboardResult(outs, summarize(outs), [], None))
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    tab = at.tabs[4]
+    assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides"]
+    kids = [(type(e).__name__, e.value if type(e).__name__ in ("Subheader", "Info", "Error") else None)
+            for e in tab.children.values()]
+    d = kids.index(("Subheader", "Desk picks"))
+    o = kids.index(("Subheader", "Your overrides"))
+    assert kids[d + 1][0] == "Info" and "Not enough trades yet" in kids[d + 1][1]
+    assert kids[o + 1][0] == "Error" and "Losing" in kids[o + 1][1]  # the Losing verdict is always shown

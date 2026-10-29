@@ -273,7 +273,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
-    def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None, quotes=None):
+    def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None, quotes=None, audit_path=None):
         seen["ctx"] = (ctx_by_symbol or {}).get("AAA")
         v = check_trade(series(), "AAA", profile, __import__("nse_backtest.desk.models", fromlist=["Mode"]).Mode.SWING,
                         limits, ctx, robustness=False, replays=200, audit=False)

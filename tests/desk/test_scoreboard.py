@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 3  # C1: intraday fills are a stop-limit now: version-2 caches are not served
+    assert SCOREBOARD_VERSION == 4  # C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -827,3 +827,50 @@ def test_intraday_resting_limit_back_after_the_entry_window_is_not_filled():
     inside = _session({"14:15": (101, 101.5, 100.8, 101), "14:30": (100.6, 100.7, 100.2, 100.4)})
     o = resolve_intraday(_ic(), inside, flat_by=time(15, 15), now=NOW)
     assert o.fill_price == pytest.approx(100.5) and o.fill_at.startswith("2026-10-27 14:30")
+
+
+# ---- C2: owner overrides are their own record, never pooled with the desk's picks
+def _row(action, h="h", created="2026-10-27T10:00:00+05:30", **kw):
+    return {**dict(action=action, market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103,
+                   qty=10, input_hash=h, created_at=created), **kw}
+
+
+def test_load_candidates_take_is_desk_override_is_override_others_ignored():
+    rows = [_row("TAKE", "t"), _row("OVERRIDE", "o", symbol="XYZ", desk_action="SKIP", chosen_by="owner"),
+            _row("WAIT", "w", symbol="W1"), _row("SKIP", "s", symbol="S1"), _row("take", "x", symbol="LC")]
+    cands, rejects = load_candidates(rows)
+    assert rejects == [] and [(c.symbol, c.record) for c in cands] == [("ABC", "desk"), ("XYZ", "override")]
+
+
+def test_load_candidates_dedupe_is_per_record():
+    rows = [_row("TAKE", "t"), _row("OVERRIDE", "t"),  # same ticket, same instant: two records, two candidates
+            _row("OVERRIDE", "o2", created="2026-10-27T11:00:00+05:30")]  # same session, same record: deduped
+    cands, _ = load_candidates(rows)
+    assert sorted(c.record for c in cands) == ["desk", "override"]
+    desk, over = sorted(cands, key=lambda c: c.record)
+    assert desk.key != over.key  # one cache slot each
+    assert over.created_at.hour == 10  # earliest override kept
+
+
+def test_candidate_record_defaults_to_desk():
+    assert cand().record == "desk"
+
+
+def test_summarize_never_pools_records():
+    desk = _outs([1.0] * 3)
+    over = [replace(o, candidate=replace(o.candidate, record="override", key=o.candidate.key + "|o"))
+            for o in _outs([-1.0] * 2)]
+    stats = summarize(over + desk)
+    assert [(s.record, s.market, s.mode, s.n) for s in stats] == [("desk", "NSE", Mode.SWING, 3),
+                                                                  ("override", "NSE", Mode.SWING, 2)]
+    assert stats[0].mean_r == pytest.approx(1.0) and stats[1].mean_r == pytest.approx(-1.0)
+    (only,) = summarize(over)
+    assert only.record == "override" and only.n == 2
+
+
+def test_score_stats_record_is_the_last_field_defaulting_to_desk():
+    from dataclasses import fields
+    from nse_backtest.desk.scoreboard import ScoreStats
+    f = fields(ScoreStats)
+    assert f[-1].name == "record" and f[-1].default == "desk"
+    assert summarize(_outs([1.0]))[0].record == "desk"

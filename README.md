@@ -116,17 +116,19 @@ candles to see whether the edge survives noise.
 
 ### The Scoreboard
 
-The Scoreboard checks whether the desk's own TAKEs made money. It reads every TAKE in
-`desk_audit.jsonl` (written by Check a Trade, in the page or the CLI, and by Today's Plan) and replays
-each one against the prices that followed, as if the ticket had been typed in exactly. It is the
-desk's paper record, **not your real P&L**: it knows nothing about the orders you actually placed.
-It is read-only and places nothing.
-Covers TAKEs from Check a Trade and Today's Plan; Intraday-tab scan TAKEs are not logged yet.
+The Scoreboard checks whether the desk's own TAKEs made money, and whether your overrides of the desk
+(a WAIT or SKIP you chose anyway) do better or worse. It reads every TAKE and OVERRIDE in
+`desk_audit.jsonl` (TAKEs are written by Check a Trade, in the page or the CLI, by Today's Plan and by
+the Intraday-tab scan) and replays each one against the prices that followed, as if the ticket had been
+typed in exactly. TAKEs are scored as **Desk picks** and overrides as **Your overrides**: two separate
+records, never pooled. It is a paper record, **not your real P&L**: it knows nothing about the orders you
+actually placed. It is read-only and places nothing.
+Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; your overrides are scored as a separate record.
 
 Open the **Scoreboard** tab and press "Load scoreboard", or run
 `python3.13 -m nse_backtest.desk scoreboard [--market NSE|US|ALL] [--json]` (default ALL).
 
-- One TAKE per stock, mode and session is counted (the first one logged).
+- One TAKE per stock, mode and session is counted (the first one logged); likewise one override.
 - Fills and exits are conservative. Swing: a one-session LIMIT at the entry, filled if the day's low
   reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
   default) and a time exit at the last close. A swing TAKE logged while its fill session was open is

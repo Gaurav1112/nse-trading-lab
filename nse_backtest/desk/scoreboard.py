@@ -1,8 +1,9 @@
 """Desk scoreboard core (pure: no network, no file I/O).
 
-Replays every logged TAKE verdict against what prices actually did, using conservative fill and exit rules,
-then summarises per (market, mode). It is the desk's paper record as if every TAKE were taken exactly per its
-ticket, not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
+Replays every logged TAKE verdict (record "desk") and every owner override of a WAIT/SKIP (record "override")
+against what prices actually did, using conservative fill and exit rules, then summarises per (record, market,
+mode): the two records are never pooled. It is a paper record as if every ticket were taken exactly as printed,
+not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
 """
 from __future__ import annotations
 
@@ -23,11 +24,13 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 3  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
+SCOREBOARD_VERSION = 4  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
+RECORD_OF_ACTION = {"TAKE": "desk", "OVERRIDE": "override"}  # audit action -> scoreboard record
+RECORD_LABELS = {"desk": "Desk picks", "override": "Your overrides"}
 
 
 @dataclass(frozen=True)
@@ -44,10 +47,11 @@ class Candidate:
     qty: int
     mc_expectancy_r: float | None
     history_expectancy_r: float | None
-    key: str                    # f"{input_hash}|{created_at.isoformat()}"
+    key: str                    # f"{input_hash}|{created_at.isoformat()}", plus "|override" for an override
     last_bar: str | None = None     # the plan's last bar (ISO); None in rows logged before it was recorded
     last_close: float | None = None  # the plan's last daily Close; None in rows logged before R1
     entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (None: computed from the tick)
+    record: str = "desk"        # "desk" (a logged TAKE) or "override" (the owner chose a WAIT/SKIP anyway)
 
 
 class Status(str, Enum):
@@ -93,6 +97,7 @@ class ScoreStats:
     unavailable: int
     verdict: str
     pred_coverage: float | None = None   # share of resolved trades carrying an MC prediction
+    record: str = "desk"                 # which record these stats are for: "desk" or "override", never both
 
 
 # ---------------------------------------------------------------- candidates
@@ -115,6 +120,9 @@ def _opt(row: dict, key: str) -> float | None:
 
 
 def _parse_row(row: dict) -> Candidate:
+    record = RECORD_OF_ACTION.get(row.get("action"))
+    if record is None:
+        raise ValueError(f"not a scored action {row.get('action')!r}")
     for k in ("created_at", "market", "symbol", "mode", "input_hash"):
         if not row.get(k):
             raise ValueError(f"missing {k}")
@@ -161,9 +169,9 @@ def _parse_row(row: dict) -> Candidate:
         limit = fills.limit_or_default(raw, entry, stop, profile.tick)
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
-                     f"{row['input_hash']}|{created.isoformat()}",
+                     f"{row['input_hash']}|{created.isoformat()}" + ("|override" if record == "override" else ""),
                      str(last_bar) if last_bar not in (None, "") else None,
-                     last_close if last_close is not None and last_close > 0 else None, limit)
+                     last_close if last_close is not None and last_close > 0 else None, limit, record)
 
 
 def default_session_of(market: str, created_at: datetime) -> date:
@@ -173,14 +181,15 @@ def default_session_of(market: str, created_at: datetime) -> date:
 
 def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime], date] | None = None
                     ) -> tuple[list[Candidate], list[tuple[dict, str]]]:
-    """TAKE rows only (others are silently not candidates). Malformed TAKE rows come back with a reason.
-    Deduped by (market, symbol, mode, session the order belongs to), keeping the earliest; the session defaults
-    to the market-local date of created_at, or is session_of(market, created_at) when given."""
+    """TAKE rows (record "desk") and OVERRIDE rows (record "override") only; others are silently not candidates.
+    Malformed TAKE/OVERRIDE rows come back with a reason. Deduped by (record, market, symbol, mode, session the
+    order belongs to), keeping the earliest, so a desk pick and an override never share a slot; the session
+    defaults to the market-local date of created_at, or is session_of(market, created_at) when given."""
     session_of = session_of or default_session_of
     good: list[Candidate] = []
     rejects: list[tuple[dict, str]] = []
     for row in rows:
-        if not isinstance(row, dict) or row.get("action") != "TAKE":
+        if not isinstance(row, dict) or row.get("action") not in RECORD_OF_ACTION:
             continue
         try:
             good.append(_parse_row(row))
@@ -189,7 +198,7 @@ def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime
     best: dict[tuple, Candidate] = {}
     for c in sorted(good, key=lambda c: c.created_at):
         d = session_of(c.market, c.created_at)
-        best.setdefault((c.market, c.symbol, c.mode, d), c)
+        best.setdefault((c.record, c.market, c.symbol, c.mode, d), c)
     return sorted(best.values(), key=lambda c: c.created_at), rejects
 
 
@@ -539,7 +548,7 @@ def _mean(xs: list[float]) -> float | None:
     return float(np.mean(xs)) if xs else None
 
 
-def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: int) -> ScoreStats:
+def _stats(record: str, market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: int) -> ScoreStats:
     resolved = sorted((o for o in outs if o.status in (Status.WON, Status.LOST, Status.TIME)
                        and o.realised_r is not None), key=lambda o: o.candidate.created_at)
     rs = np.array([o.realised_r for o in resolved], dtype=float)
@@ -552,7 +561,7 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
     if n == 0:
         return ScoreStats(market, mode, 0, 0, None, None, mean_pred_mc, _mean(hist), _mean(gaps), None, None,
                           None, (), count(Status.NOT_FILLED), count(Status.OPEN), count(Status.UNAVAILABLE),
-                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0), None)
+                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0), None, record)
     rng = np.random.default_rng(seed)
     means = rng.choice(rs, size=(resamples, n), replace=True).mean(axis=1)
     ci_low, ci_high = (float(x) for x in np.percentile(means, [2.5, 97.5]))
@@ -565,12 +574,16 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
                       ci_low, ci_high, dd, tuple(float(x) for x in cum), count(Status.NOT_FILLED),
                       count(Status.OPEN), count(Status.UNAVAILABLE),
                       _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r, len(mc), count(Status.UNAVAILABLE)),
-                      len(mc) / n)
+                      len(mc) / n, record)
 
 
 def summarize(outcomes: Iterable[Outcome], *, seed: int = 19, resamples: int = 2000) -> list[ScoreStats]:
-    groups: dict[tuple[str, Mode], list[Outcome]] = {}
+    """Stats per (record, market, mode), desk picks first: a record's trades are never pooled with another's."""
+    groups: dict[tuple[str, str, Mode], list[Outcome]] = {}
     for o in outcomes:
-        groups.setdefault((o.candidate.market, o.candidate.mode), []).append(o)
-    return [_stats(m, md, groups[(m, md)], seed, resamples)
-            for m, md in sorted(groups, key=lambda k: (k[0], k[1].value))]
+        c = o.candidate
+        groups.setdefault((c.record, c.market, c.mode), []).append(o)
+    order = list(RECORD_LABELS)
+    return [_stats(r, m, md, groups[(r, m, md)], seed, resamples)
+            for r, m, md in sorted(groups, key=lambda k: (order.index(k[0]) if k[0] in order else len(order),
+                                                          k[0], k[1], k[2].value))]

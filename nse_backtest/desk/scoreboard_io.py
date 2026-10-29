@@ -1,4 +1,5 @@
-"""Scoreboard I/O: reads the audit log, keeps the resolved-outcome cache and replays every logged TAKE.
+"""Scoreboard I/O: reads the audit log, keeps the resolved-outcome cache and replays every logged TAKE and
+owner override (two records, each with its own candidates, cache entries and stats).
 
 The pure rules live in `scoreboard`; this module only feeds them bars and remembers final results.
 Safety rules: every candidate comes back (UNAVAILABLE, never dropped); only final statuses (won, lost, time,
@@ -24,17 +25,17 @@ from . import calendars as cal
 from .markets import get_profile
 from .models import Mode
 from .scoreboard import (
-    SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale, check_price_scale,
+    RECORD_OF_ACTION, SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale, check_price_scale,
     exit_status, load_candidates,
     logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 
 Warn = Callable[[str], None] | None
 
-SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs as if each ticket were followed exactly — "
-                         "not your real P&L.")
-SCOREBOARD_COVERAGE = ("Covers TAKEs from Check a Trade and Today's Plan; "
-                       "Intraday-tab scan TAKEs are not logged yet.")
+SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed "
+                         "exactly — not your real P&L.")
+SCOREBOARD_COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
+                       "your overrides are scored as a separate record.")
 AUDIT_FILE = "desk_audit.jsonl"
 CACHE_FILE = "desk_scoreboard.json"
 MAX_AUDIT_BYTES = 50 * 1024 * 1024
@@ -43,14 +44,14 @@ INTRADAY_MAX_AGE_DAYS = 58  # yfinance serves 15-minute bars for the last 60 day
 FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 _CANDIDATE_FIELDS = ("market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars", "cost_per_share",
-                     "qty", "last_bar", "last_close", "entry_limit")
+                     "qty", "last_bar", "last_close", "entry_limit", "record")
 
 
 @dataclass(frozen=True)
 class ScoreboardResult:
     outcomes: list[Outcome]            # every candidate, in created_at order — none silently dropped
     stats: list[ScoreStats]            # summarize(outcomes)
-    rejects: list[tuple[int, str]]     # (audit line number, reason) for unreadable lines and malformed TAKE rows
+    rejects: list[tuple[int, str]]     # (audit line number, reason): unreadable lines, malformed TAKE/OVERRIDE rows
     cache_note: str | None             # set when the cache was unreadable, of another version or not writable
     note: str | None = None            # set when there is no audit log at all
 
@@ -150,22 +151,24 @@ def _row_market(row: dict) -> str | None:
 
 
 def _screen(rows: list[dict], session_of) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """Rows whose TAKE parses and can be placed in a session; others come back with a reason. A single odd row
-    (a date at the edge of the calendar, a 1e999 quantity) must become a reject, never crash the scoreboard."""
+    """Rows whose TAKE/OVERRIDE parses and can be placed in a session; others come back with a reason. A single
+    odd row (a date at the edge of the calendar, a 1e999 quantity) must become a reject, never crash the
+    scoreboard. Rows of other actions are kept: load_candidates ignores them."""
     keep: list[dict] = []
     bad: list[tuple[dict, str]] = []
     for r in rows:
-        if r.get("action") != "TAKE":
+        action = r.get("action")
+        if action not in RECORD_OF_ACTION:
             keep.append(r)
             continue
         good, why = load_candidates([r], session_of=lambda m, t: None)
         if why:
-            bad.append((r, f"malformed TAKE: {why[0][1]}"))
+            bad.append((r, f"malformed {action}: {why[0][1]}"))
             continue
         try:
             session_of(good[0].market, good[0].created_at)
         except (ValueError, ArithmeticError, RuntimeError) as e:
-            bad.append((r, f"malformed TAKE: cannot place created_at in a session ({_err(e)})"))
+            bad.append((r, f"malformed {action}: cannot place created_at in a session ({_err(e)})"))
             continue
         keep.append(r)
     return keep, bad
@@ -173,9 +176,9 @@ def _screen(rows: list[dict], session_of) -> tuple[list[dict], list[tuple[dict, 
 
 def candidates_from(rows: list[tuple[int, dict]], market: str | None = None
                     ) -> tuple[list[Candidate], list[tuple[int, str]]]:
-    """Candidates (created_at order) and (line, reason) rejects for malformed TAKE rows. Swing rows are deduped on
-    the fill session, intraday rows on the market-local date of created_at. A row whose market cannot be read is
-    kept whatever the filter, so a malformed TAKE is always reported."""
+    """Candidates (created_at order) and (line, reason) rejects for malformed TAKE/OVERRIDE rows. Swing rows are
+    deduped on the fill session, intraday rows on the market-local date of created_at, each within its record. A
+    row whose market cannot be read is kept whatever the filter, so a malformed row is always reported."""
     if market is not None:
         rows = [(n, r) for n, r in rows if _row_market(r) in (market, None)]
     line_of = {id(r): n for n, r in rows}
@@ -188,7 +191,7 @@ def candidates_from(rows: list[tuple[int, dict]], market: str | None = None
         rejects += [(line_of[id(r)], why) for r, why in early]
         good, bad = load_candidates(group, session_of=session_of)
         out += good
-        rejects += [(line_of[id(r)], f"malformed TAKE: {why}") for r, why in bad]
+        rejects += [(line_of[id(r)], f"malformed {r.get('action')}: {why}") for r, why in bad]
     out.sort(key=lambda c: (c.created_at, c.key))
     return out, rejects
 
@@ -204,7 +207,7 @@ def _candidate_record(c: Candidate) -> dict:
             "target_1": c.target_1, "max_hold_bars": c.max_hold_bars, "cost_per_share": c.cost_per_share,
             "qty": c.qty, "created_at": c.created_at.isoformat(), "mc_expectancy_r": c.mc_expectancy_r,
             "history_expectancy_r": c.history_expectancy_r, "key": c.key, "last_bar": c.last_bar,
-            "last_close": c.last_close, "entry_limit": c.entry_limit}
+            "last_close": c.last_close, "entry_limit": c.entry_limit, "record": c.record}
 
 
 def _entry(o: Outcome) -> dict:

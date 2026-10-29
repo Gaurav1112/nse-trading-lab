@@ -224,8 +224,10 @@ def _num_r(x) -> str:
 
 
 def format_scoreboard(res, market_label: str) -> list[str]:
-    """Text scoreboard: disclaimer first; per (market, mode) the verdict line first, then the numbers."""
+    """Text scoreboard: disclaimer first; a "Desk picks" and a "Your overrides" section (never pooled), each with
+    per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
+    from .scoreboard import RECORD_LABELS
     lines = [SCOREBOARD_DISCLAIMER, SCOREBOARD_COVERAGE]
     if getattr(res, "note", None):
         lines.append(res.note)
@@ -233,20 +235,25 @@ def format_scoreboard(res, market_label: str) -> list[str]:
         lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
     elif not res.outcomes:
         lines.append(f"No TAKE verdicts logged yet for {market_label} — run `plan` or `check` to build a record.")
-    for s in res.stats:
-        win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
-        ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
-        dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
-        cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
-        lines += ["", f"{s.market} {s.mode.value}: {s.verdict}",
-                  f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
-                  f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
-                  f"  95% CI of mean realised {ci}  max drawdown {dd}",
-                  f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
-                  f"prediction coverage {cov}"]
+    for record, label in RECORD_LABELS.items() if res.outcomes else ():
+        stats = [s for s in res.stats if s.record == record]
+        lines += ["", label]
+        if not stats:
+            lines.append(f"  No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+        for s in stats:
+            win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
+            ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
+            dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
+            cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
+            lines += [f"{s.market} {s.mode.value}: {s.verdict}",
+                      f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
+                      f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
+                      f"  95% CI of mean realised {ci}  max drawdown {dd}",
+                      f"  not filled {s.not_filled}  open {s.open}  unavailable {s.unavailable}  "
+                      f"prediction coverage {cov}"]
     if res.outcomes:
         lines += ["", "Trades:",
-                  f"  {'date':<10} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
+                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
                   f"{'exit':>14} {'real R':>8} {'MC R':>8}  note"]
         for o in res.outcomes:
             c = o.candidate
@@ -256,7 +263,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} {o.status.value:<16} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} {o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
             lines.append("  (R in brackets = open trade marked to the last close; not counted in the stats)")

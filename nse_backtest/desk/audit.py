@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from .models import DeskVerdict
+from .models import Action, DeskVerdict
 
 
 def data_dir() -> Path:
@@ -22,11 +22,9 @@ def data_dir() -> Path:
     return d
 
 
-def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
-    path = Path(path) if path is not None else data_dir() / "desk_audit.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _row(v: DeskVerdict) -> dict:
     p, o, s = v.plan, v.odds, v.sizing
-    rec = {
+    return {
         "created_at": v.created_at, "action": v.action.value, "symbol": p.symbol, "market": p.market,
         "mode": p.mode.value, "entry": p.entry, "stop": p.stop, "target_1": p.target_1,
         "qty": s.qty, "risk_amount": s.risk_amount,
@@ -40,6 +38,11 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
         "last_close": p.last_close,  # the plan's last daily Close: the scoreboard's price-scale check
         "entry_limit": p.entry_limit,  # intraday stop-limit's limit price (None for swing)
     }
+
+
+def _append(rec: dict, path: Path | None) -> Path:
+    path = Path(path) if path is not None else data_dir() / "desk_audit.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.fchmod(fd, 0o600)  # the mode above applies only to a new file
@@ -49,3 +52,15 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, default=str) + "\n")
     return path
+
+
+def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
+    return _append(_row(v), path)
+
+
+def append_override(v: DeskVerdict, path: Path | None = None) -> Path:
+    """The owner chose a WAIT/SKIP verdict anyway: the verdict's row with action OVERRIDE, the desk's own action
+    as desk_action and chosen_by "owner". The scoreboard scores these apart from the desk's TAKEs."""
+    if v.action is Action.TAKE:
+        raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
+    return _append({**_row(v), "action": "OVERRIDE", "desk_action": v.action.value, "chosen_by": "owner"}, path)

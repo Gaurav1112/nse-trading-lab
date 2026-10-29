@@ -186,7 +186,8 @@ def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: 
 
 def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLVE,
                  on_warning: Warn = None) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
-    """Opening-range scan over 15m frames; (verdicts, failures) with load failures included."""
+    """Opening-range scan over 15m frames; (verdicts, failures) with load failures included. Every TAKE is
+    logged to the audit log, so the scoreboard scores it."""
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, regime=regime)
@@ -204,7 +205,8 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
                                     today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now, profile))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
-    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)
+    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes,
+                                  audit_path=data_dir() / scoreboard_io.AUDIT_FILE)  # scan TAKEs are scored
     return verdicts, load_failures + list(failures)
 
 

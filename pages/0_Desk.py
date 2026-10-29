@@ -18,6 +18,7 @@ import streamlit as st
 
 from components import theme
 from nse_backtest.desk import loaders, session
+from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
@@ -416,9 +417,33 @@ def _score_banner(s) -> None:
         st.info(text)
 
 
-def _render_scoreboard(res, profile, warnings=()) -> None:
-    for s in res.stats:
+def _render_record(stats) -> None:
+    """One record's verdict banners first, then its numbers and charts (records are never pooled)."""
+    for s in stats:
         _score_banner(s)
+    if stats:
+        st.dataframe(pd.DataFrame([{
+            "Mode": s.mode.value, "Trades": s.n, "Win %": None if s.win_pct is None else round(s.win_pct, 1),
+            "Mean realised": _r(s.mean_r), "Predicted MC": _r(s.mean_pred_mc_r),
+            "Predicted history": _r(s.mean_pred_hist_r),
+            "95% CI": "n/a" if s.ci_low is None else f"{_r(s.ci_low)} to {_r(s.ci_high)}",
+            "Max drawdown": "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R",
+            "Not filled": s.not_filled, "Open": s.open, "Unavailable": s.unavailable,
+            "Prediction coverage": _pct(s.pred_coverage)} for s in stats]), hide_index=True, width="stretch")
+        for s in stats:
+            if s.cumulative_r:
+                st.markdown(f"**Cumulative R — {s.mode.value}**")
+                st.line_chart(pd.DataFrame({"cumulative R": list(s.cumulative_r)}))
+
+
+def _render_scoreboard(res, profile, warnings=()) -> None:
+    if res.outcomes:
+        for record, label in RECORD_LABELS.items():
+            st.subheader(label)
+            stats = [s for s in res.stats if s.record == record]
+            if not stats:
+                st.caption(f"No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+            _render_record(stats)
     for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
         st.warning(w)
     if res.rejects:
@@ -428,22 +453,10 @@ def _render_scoreboard(res, profile, warnings=()) -> None:
         st.info(res.note)
     if not res.outcomes:
         st.info(f"No TAKE verdicts logged yet for {profile.code} — build a plan or check a trade to start a record.")
-    if res.stats:
-        st.dataframe(pd.DataFrame([{
-            "Mode": s.mode.value, "Trades": s.n, "Win %": None if s.win_pct is None else round(s.win_pct, 1),
-            "Mean realised": _r(s.mean_r), "Predicted MC": _r(s.mean_pred_mc_r),
-            "Predicted history": _r(s.mean_pred_hist_r),
-            "95% CI": "n/a" if s.ci_low is None else f"{_r(s.ci_low)} to {_r(s.ci_high)}",
-            "Max drawdown": "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R",
-            "Not filled": s.not_filled, "Open": s.open, "Unavailable": s.unavailable,
-            "Prediction coverage": _pct(s.pred_coverage)} for s in res.stats]), hide_index=True, width="stretch")
-        for s in res.stats:
-            if s.cumulative_r:
-                st.markdown(f"**Cumulative R — {s.mode.value}**")
-                st.line_chart(pd.DataFrame({"cumulative R": list(s.cumulative_r)}))
     if res.outcomes:
         st.dataframe(pd.DataFrame([{
             "Date": o.candidate.created_at.astimezone(ZoneInfo(profile.tz)).date().isoformat(),
+            "Record": RECORD_LABELS.get(o.candidate.record, o.candidate.record),
             "Symbol": o.candidate.symbol, "Mode": o.candidate.mode.value, "Status": o.status.value,
             "Fill": "" if o.fill_price is None else profile.money(o.fill_price),
             "Exit": "" if o.exit_price is None else profile.money(o.exit_price),
