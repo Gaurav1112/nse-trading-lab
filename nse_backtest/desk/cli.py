@@ -458,7 +458,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
                       _projected_line(res.outcomes, s)]
     if res.outcomes:
         lines += ["", "Trades:",
-                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
+                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<14} {'status':<16} {'fill':>14} "
                   f"{'exit':>14} {'real R':>8} {'MC R':>8}  note"]
         for o in res.outcomes:
             c = o.candidate
@@ -468,7 +468,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {_mode_label(c.mode, c.side):<9} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {_mode_label(c.mode, c.side):<14} "
                          f"{o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):

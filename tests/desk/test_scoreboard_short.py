@@ -740,3 +740,37 @@ def test_h5c_property_short_is_the_exact_mirror_of_the_long():
         for a, bb in ((s.realised_r, lg.realised_r), (s.mtm_r, lg.mtm_r)):
             assert (a is None and bb is None) or a == pytest.approx(bb, abs=1e-9)
     assert compared > 0.9 * PATHS
+
+
+# ---------------------------------------------------------------- H5c minors
+def test_h5c_off_grid_early_close_keeps_the_square_off_bar(monkeypatch):
+    """A fictional 14:05 close: flat-by 13:50, so the short squares off inside the 13:45 bar; its target never
+    counts and a time exit is at its High."""
+    from nse_backtest.desk import calendars
+    monkeypatch.setitem(calendars.EARLY_CLOSES, "NSE", {date(2026, 10, 27): time(14, 5)})
+    flat = calendars.flat_by_for(NSE, date(2026, 10, 27))
+    assert flat == time(13, 50) and sb.short_hold(NSE, date(2026, 10, 27)) == (time(14, 0), time(13, 45))
+    assert sb.short_hold(NSE, date(2026, 10, 27), time(13, 30)) == (time(13, 30), None)  # an earlier caller cap
+    base = {"10:15": (99.9, 100.0, 99.7, 99.8)}
+    bars = _session({**base, "13:45": (99.0, 99.2, 96.0, 96.5)}, last="13:45")
+    o = sb.resolve_intraday(scand(), bars, flat_by=flat, now=NOW)
+    assert o.status is Status.TIME and o.exit_price == 99.2 and o.exit_at == "2026-10-27 13:45:00"
+    assert o.note == sb.SQUARE_OFF_NOTE
+    stop = sb.resolve_intraday(scand(), _session({**base, "13:45": (99.0, 102.4, 98.0, 99.0)}, last="13:45"),
+                               flat_by=flat, now=NOW)
+    assert stop.status is Status.LOST and stop.exit_price == 102.0
+
+
+@pytest.mark.parametrize("blocks", ["short_fno", {"ban_list": 1}, 7])
+def test_h5c_unreadable_blocks_field_fails_closed(blocks):
+    good, bad = load_candidates([_srow(blocks=blocks)])
+    assert good == [] and "unreadable blocks field" in bad[0][1]
+
+
+def test_h5c_cli_mode_column_fits_intraday_short(tmp_path):
+    from nse_backtest.desk.cli import format_scoreboard
+    lines = format_scoreboard(_build(tmp_path, _io_rows(), _Loader(_io_bars())), "NSE")
+    head = next(ln for ln in lines if ln.lstrip().startswith("date"))
+    rows = [ln for ln in lines if ln.startswith("  2026-10-27")]
+    col = head.index("status")
+    assert all(r[col - 1] == " " and r[col] != " " for r in rows)  # every status starts under its header

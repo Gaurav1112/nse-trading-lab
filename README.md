@@ -269,11 +269,11 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
 - Each trade gets a status: `won`, `lost`, `time` (time exit), `not_filled`, `open` (still running;
   shown marked to the last close, not counted) or `data_unavailable` (bars could not be loaded, have
   gaps, or are missing). Nothing is dropped silently; malformed audit lines are listed by line number.
-- Per market, mode and side it shows trades, win %, mean realised R against the mean predicted Monte Carlo
+- Per record, market, mode and side it shows trades, win %, mean realised R against the mean predicted Monte Carlo
   and history R, a 95% bootstrap interval of the mean realised R, max drawdown in R and a cumulative
   R chart.
 
-The verdict, per market and mode, is the first of these that applies:
+The verdict, per record, market, mode and side, is the first of these that applies:
 
 | Verdict | When |
 |---|---|

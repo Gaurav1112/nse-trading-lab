@@ -37,7 +37,7 @@ trades on HOSTILE days with a positive expectancy at 2× slippage; without today
 Use `scoreboard` when the user asks whether the desk is working or whether its odds hold up. It is
 read-only: it replays the TAKEs in `desk_audit.jsonl` against later prices (conservative fills) and
 caches final results in `desk_scoreboard.json`; it writes no trades and places nothing. It is the
-desk's paper record, not the user's real P&L. Report the verdict per market and mode first (needs 30
+desk's paper record, not the user's real P&L. Report the verdict per record, market, mode and side first (needs 30
 resolved trades; Losing / Worse than the desk's odds / Matching the odds / Inconclusive), then n, mean
 realised R vs predicted MC R and the 95% interval, then the count of `data_unavailable` trades. ORB shorts are
 scored separately as "intraday short" (mirrored rules) and must never be added to the long figures.

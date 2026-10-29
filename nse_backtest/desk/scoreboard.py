@@ -2,7 +2,7 @@
 
 Replays every logged TAKE verdict (record "desk") and every owner override of a WAIT/SKIP (record "override")
 against what prices actually did, using conservative fill and exit rules, then summarises per (record, market,
-mode): the two records are never pooled. It is a paper record as if every ticket were taken exactly as printed,
+mode, side): the two records are never pooled, nor shorts with longs. It is a paper record as if every ticket were taken exactly as printed,
 not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
 
 A replay starts at max(created_at, quote_as_of): the ticket can't be typed before the quote it was
@@ -238,9 +238,12 @@ def _check_short_row(row: dict, profile, mode: Mode, entry: float, stop: float, 
         raise ValueError(f"short trade on {profile.code}: shorts are NSE only")
     if not (0 < t1 < entry < stop):
         raise ValueError(f"invalid short geometry stop={stop} entry={entry} target_1={t1}")
-    blocks = row.get("blocks") or ()
-    safety = sorted({str(b) for b in blocks if group_of(str(b), Side.SHORT) == "safety"}) \
-        if isinstance(blocks, (list, tuple)) else []
+    blocks = row.get("blocks")
+    if blocks is None:
+        blocks = []
+    if not isinstance(blocks, (list, tuple)):  # fail closed: a corrupt field must not skip the safety screen
+        raise ValueError(f"short with an unreadable blocks field {blocks!r}: not scored")
+    safety = sorted({str(b) for b in blocks if group_of(str(b), Side.SHORT) == "safety"})
     if safety:
         raise ValueError(f"short with a safety block ({', '.join(safety)}): it could never be traded, so it is "
                          "not scored")
@@ -757,13 +760,13 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     return _as_logged(c, _resolve_intraday_at(_from_quote(c), bars15, flat_by=flat_by, now=now))
 
 
-def short_hold(profile, d: date) -> tuple[time, time | None]:
+def short_hold(profile, d: date, cap: time | None = None) -> tuple[time, time | None]:
     """(flat_by, square) for a short on day d. The square-off is plan.short_flat_by (15:10; earlier on an early
-    close). Bars that start before it are held, so flat_by is the square-off rounded up to the 15-minute grid. When
+    close), or ``cap`` (a caller's flat-by) when that is earlier. Bars that start before it are held, so flat_by is the square-off rounded up to the 15-minute grid. When
     the square-off is off the grid, ``square`` is the start of the bar that spans it (15:00): only that bar's stop
     counts and, with no stop, the time exit is at its High (the worst buy-back price consistent with the bar), so an
     owner who squares off at any time up to 15:10 is never scored better than he could have done."""
-    sq = short_flat_by(profile, d)
+    sq = short_flat_by(profile, d) if cap is None else min(cap, short_flat_by(profile, d))
     m = sq.hour * 60 + sq.minute
     if m % 15 == 0:
         return sq, None
@@ -795,9 +798,7 @@ def _resolve_short_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now:
     profile = get_profile(c.market)
     day = c.created_at.astimezone(ZoneInfo(profile.tz)).date()
     limit = fills.short_limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
-    hold, square = short_hold(profile, day)
-    if flat_by < hold:  # a caller's earlier flat-by wins (it is never later than the square-off)
-        hold, square = flat_by, None
+    hold, square = short_hold(profile, day, flat_by)  # an off-grid square-off keeps its square-off bar
     o = _resolve_intraday_at(_mirror_candidate(c, limit), _mirror_bars(bars15), flat_by=hold, now=now, square=square)
     note = o.note
     if o.status is Status.UNAVAILABLE and note.startswith("logged live price "):
