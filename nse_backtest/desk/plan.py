@@ -17,6 +17,7 @@ _BAR = timedelta(minutes=15)
 # A retail MIS short must be bought back the same day: the desk squares off by 15:10 IST, before the broker's
 # auto square-off (which charges per order), and earlier on an early close.
 SHORT_SQUARE_OFF = time(15, 10)
+SHORT_RR_T1 = 1.5  # an auto short plan's T1 (entry - 1.5R); the pooled short history replays the same target
 
 
 def short_flat_by(profile: MarketProfile, d) -> time:
@@ -138,7 +139,7 @@ def _short_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfil
         s, basis = stop, "user"
     else:
         s, basis = (float(orb["High"]) + float(orb["Low"])) / 2, "opening-range mid"
-    r1, r_mult2 = 1.5, 3.0
+    r1, r_mult2 = SHORT_RR_T1, 3.0
     flat_dt = datetime.combine(last_ts.date(), short_flat_by(profile, last_ts.date()))
     hold = max(1, int((flat_dt - last_ts.to_pydatetime().replace(tzinfo=None)) / _BAR))
     r = s - e

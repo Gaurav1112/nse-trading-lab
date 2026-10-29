@@ -1,0 +1,238 @@
+"""H5b: the pooled ORB-short edge gate, the regime per historical day and the daily cache. No network."""
+import json
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from nse_backtest.desk import shortcheck
+from nse_backtest.desk.markets import NSE, US
+from nse_backtest.desk.models import ShortEdge
+from nse_backtest.desk.shortcheck import (MIN_TRADES, load_edge, pooled_short_edge, regime_by_day, save_edge)
+from nse_backtest.desk.timemachine import short_cost_fn, short_trades
+
+
+# ---------------------------------------------------------------- frames with one known short per session
+
+def _session(d, win: bool, base=100.0):
+    """One 15-minute session: OR base-1..base+1 (trigger base-1, stop base), a breakdown at 09:45, then either the
+    target (win) or the stop (loss) on 10:00."""
+    b = base
+    bars = [("09:15", b, b + 1, b - 1, b), ("09:30", b, b + 1, b - 0.9, b),
+            ("09:45", b - 1, b - 0.5, b - 1.6, b - 1.2)]
+    bars.append(("10:00", b - 1.2, b - 1.1, b - 3, b - 2.8) if win else ("10:00", b - 1.2, b + 0.5, b - 1.3, b + 0.2))
+    return [(pd.Timestamp(f"{d.date()} {t}"), o, h, lo, c) for t, o, h, lo, c in bars]
+
+
+def frame(n_days, win=True, start="2026-01-05"):
+    """n_days replayable sessions plus a trailing latest session (left out of every replay)."""
+    days = pd.bdate_range(start, periods=n_days + 1)
+    rows = [r for k, d in enumerate(days) for r in _session(d, win if k < n_days else True)]
+    df = pd.DataFrame([r[1:] for r in rows], columns=["Open", "High", "Low", "Close"],
+                      index=pd.DatetimeIndex([r[0] for r in rows]))
+    df["Volume"] = 1e5
+    return df
+
+
+def all_hostile(*frames, regime="HOSTILE"):
+    return {d.date(): regime for f in frames for d in pd.unique(f.index.normalize())}
+
+
+def test_each_synthetic_session_is_exactly_one_short():
+    f = frame(3)
+    ts = short_trades(f, NSE, all_hostile(f))
+    assert [t.outcome for t in ts] == ["won"] * 3 and ts[0].entry == 99 and ts[0].stop == 100
+    assert [t.outcome for t in short_trades(frame(2, win=False), NSE, all_hostile(frame(2, win=False)))] == ["lost"] * 2
+
+
+# ---------------------------------------------------------------- the pooled gate
+
+def test_200_winning_trades_at_2x_slippage_are_proven():
+    a, b = frame(100), frame(100, start="2026-01-06")
+    edge = pooled_short_edge(NSE, {"AAA": a, "BBB": b}, all_hostile(a, b))
+    assert isinstance(edge, ShortEdge) and edge.n == 200 == MIN_TRADES
+    fn = short_cost_fn(NSE, 2.0)
+    assert edge.expectancy_r == pytest.approx(1.5 - fn(99.0, 97.5))
+    assert edge.proven is True
+
+
+def test_199_trades_are_not_proven_however_good():
+    a, b = frame(100), frame(99)
+    edge = pooled_short_edge(NSE, {"AAA": a, "BBB": b}, all_hostile(a, b))
+    assert edge.n == 199 and edge.expectancy_r > 1 and edge.proven is False
+
+
+def test_negative_expectancy_is_not_proven():
+    a, b = frame(100, win=False), frame(100)
+    edge = pooled_short_edge(NSE, {"AAA": a, "BBB": b}, all_hostile(a, b))
+    fn = short_cost_fn(NSE, 2.0)
+    assert edge.n == 200 and edge.expectancy_r == pytest.approx(
+        ((-1 - fn(99.0, 100.0)) + (1.5 - fn(99.0, 97.5))) / 2)
+    a2 = frame(150, win=False)
+    edge2 = pooled_short_edge(NSE, {"AAA": a2, "BBB": frame(60)}, all_hostile(a2, frame(60)))
+    assert edge2.n == 210 and edge2.expectancy_r < 0 and edge2.proven is False
+
+
+def test_zero_expectancy_is_not_proven():
+    assert ShortEdge.from_trades(250, 0.0).proven is False
+    assert ShortEdge.from_trades(0, None).proven is False
+
+
+def test_only_hostile_days_are_pooled():
+    a, b = frame(100), frame(100, start="2026-01-06")
+    reg = all_hostile(a, b)
+    for d in list(reg)[::2]:
+        reg[d] = "MIXED"
+    edge = pooled_short_edge(NSE, {"AAA": a, "BBB": b}, reg)
+    assert edge.n < 200 and edge.proven is False
+    assert pooled_short_edge(NSE, {"AAA": a}, {}).n == 0
+
+
+def test_the_gate_is_costed_at_twice_the_slippage():
+    a = frame(30)
+    one = pooled_short_edge(NSE, {"AAA": a}, all_hostile(a), slippage_mult=1.0)
+    two = pooled_short_edge(NSE, {"AAA": a}, all_hostile(a))
+    assert two.expectancy_r < one.expectancy_r
+    assert two.expectancy_r == pytest.approx(1.5 - short_cost_fn(NSE, 2.0)(99.0, 97.5))
+
+
+def test_the_gate_is_deterministic_and_order_free():
+    a, b = frame(40), frame(37, win=False, start="2026-02-02")
+    reg = all_hostile(a, b)
+    x = pooled_short_edge(NSE, {"AAA": a, "BBB": b}, reg)
+    y = pooled_short_edge(NSE, {"BBB": b, "AAA": a}, reg)
+    assert x == y and repr(x.expectancy_r) == repr(y.expectancy_r)
+
+
+def test_missing_or_broken_frames_are_skipped_not_fatal():
+    a = frame(20)
+    bad = a.drop(columns=["Close"])
+    edge = pooled_short_edge(NSE, {"AAA": a, "BAD": bad, "NONE": None}, all_hostile(a))
+    assert edge.n == 20
+
+
+def test_the_gate_is_nse_only():
+    with pytest.raises(ValueError, match="NSE"):
+        pooled_short_edge(US, {}, {})
+
+
+# ---------------------------------------------------------------- the regime of each past day, without look-ahead
+
+def index_frame(n=500, end="2026-10-29", seed=4):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(end=end, periods=n)
+    close = 20000 * np.exp(np.cumsum(rng.normal(0.0004, 0.01, n)))
+    return pd.DataFrame({"Open": close, "High": close * 1.004, "Low": close * 0.996, "Close": close,
+                         "Volume": 1e6}, index=idx)
+
+
+def test_regime_of_day_d_is_the_tape_classifier_on_the_bars_before_d():
+    from nse_backtest import tape_monitor
+    idx = index_frame()
+    days = [d.date() for d in idx.index[-40:]]
+    reg = regime_by_day(idx, days)
+    assert set(reg) == set(days)
+    for d in days[::7]:
+        assert reg[d] == tape_monitor.assess_tape(idx[idx.index.normalize() < pd.Timestamp(d)]).regime
+
+
+def test_regime_of_day_d_never_looks_at_day_d_or_later():
+    idx = index_frame()
+    idx["Close"] = 20000 * 1.003 ** np.arange(len(idx))  # a clean uptrend: TRENDING every day
+    days = [d.date() for d in idx.index[-40:]]
+    reg = regime_by_day(idx, days)
+    d = days[20]
+    crashed = idx.copy()
+    later = crashed.index.normalize() >= pd.Timestamp(d)
+    crashed.loc[later, ["Open", "High", "Low", "Close"]] *= 0.5  # day d's own bar and every later one
+    reg2 = regime_by_day(crashed, days)
+    assert set(reg.values()) == {"TRENDING"}
+    assert all(reg2[x] == reg[x] for x in days if x <= d)
+    assert any(reg2[x] != reg[x] for x in days if x > d)  # the crash is visible from the next day on
+
+
+def test_a_crash_before_day_d_does_show_on_day_d():
+    idx = index_frame(seed=8)
+    d = idx.index[-5].date()
+    up = idx.copy()
+    up["Close"] = 20000 * 1.003 ** np.arange(len(up))  # a clean uptrend: TRENDING
+    assert regime_by_day(up, [d])[d] == "TRENDING"
+    up.iloc[-60:-5, up.columns.get_loc("Close")] *= 0.8  # a crash in the 60 days before d
+    assert regime_by_day(up, [d])[d] == "HOSTILE"
+
+
+def test_days_without_enough_or_recent_index_history_are_left_out():
+    idx = index_frame(n=300)
+    first = idx.index[150].date()  # only 150 bars before it: the classifier needs 200
+    assert first not in regime_by_day(idx, [first])
+    late = date(2026, 12, 15)  # weeks after the index's last bar: stale, not classified
+    assert regime_by_day(idx, [late]) == {}
+    assert regime_by_day(None, [first]) == {}
+
+
+# ---------------------------------------------------------------- the daily cache
+
+DAY = date(2026, 10, 30)
+
+
+def test_cache_round_trip_for_the_same_day(tmp_path):
+    p = tmp_path / "desk_shortcheck.json"
+    e = ShortEdge.from_trades(212, 0.0712)
+    save_edge(p, NSE, DAY, e, symbols=31)
+    got, why = load_edge(p, NSE, DAY)
+    assert got == e and why == ""
+    assert json.loads(p.read_text())["day"] == "2026-10-30"
+
+
+def test_cache_from_another_day_is_not_used(tmp_path):
+    p = tmp_path / "s.json"
+    save_edge(p, NSE, date(2026, 10, 29), ShortEdge.from_trades(250, 0.2), symbols=40)
+    got, why = load_edge(p, NSE, DAY)
+    assert got is None and "not computed today" in why
+
+
+def test_missing_cache(tmp_path):
+    got, why = load_edge(tmp_path / "nope.json", NSE, DAY)
+    assert got is None and "not computed today" in why
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]", '{"version": 1}', ""])
+def test_unreadable_cache_fails_closed(tmp_path, body):
+    p = tmp_path / "s.json"
+    p.write_text(body)
+    got, why = load_edge(p, NSE, DAY)
+    assert got is None and "unreadable" in why
+
+
+@pytest.mark.parametrize("patch", [
+    {"proven": True, "n": 150},             # a proven flag the numbers do not support
+    {"n": -3}, {"n": 2.5}, {"n": True},
+    {"expectancy_r": "0.3"}, {"expectancy_r": float("nan")},
+    {"slippage_mult": 1.0},                 # computed under another rule
+    {"min_trades": 50},
+    {"market": "US"},
+])
+def test_tampered_or_foreign_cache_fails_closed(tmp_path, patch):
+    p = tmp_path / "s.json"
+    save_edge(p, NSE, DAY, ShortEdge.from_trades(250, 0.2), symbols=40)
+    d = json.loads(p.read_text())
+    d.update(patch)
+    p.write_text(json.dumps(d))
+    got, why = load_edge(p, NSE, DAY)
+    assert got is None and why
+
+
+def test_cache_write_is_atomic_and_leaves_no_temp_files(tmp_path):
+    p = tmp_path / "s.json"
+    save_edge(p, NSE, DAY, ShortEdge.from_trades(10, -0.1), symbols=5)
+    save_edge(p, NSE, DAY, ShortEdge.from_trades(11, -0.2), symbols=5)
+    assert [x.name for x in tmp_path.iterdir()] == ["s.json"]
+    assert load_edge(p, NSE, DAY)[0].n == 11
+
+
+def test_edge_text():
+    assert shortcheck.edge_line(ShortEdge.from_trades(143, 0.0512)) == \
+        "143 trades, +0.05R at 2× slippage, HOSTILE days: not proven (needs at least 200 trades and a positive R)"
+    assert shortcheck.edge_line(ShortEdge.from_trades(0, None)).startswith("0 trades, no expectancy yet")
+    assert shortcheck.edge_line(ShortEdge.from_trades(240, 0.11)).endswith(": proven")

@@ -280,3 +280,287 @@ def test_c1_fill_bar_stop_exits_at_the_stop_even_when_the_bar_opened_below_it():
 def test_a9_breakout_bar_touching_stop_is_a_stop_out():
     bars = [("09:15", 100, 101, 99, 100), ("09:30", 100.5, 103, 99.8, 102.9), ("09:45", 103, 106, 102.9, 105)]
     assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(-1.0)]
+
+
+# ---------------------------------------------------------------- H5b: long odds are byte-identical (pinned)
+import hashlib as _hashlib  # noqa: E402
+import json as _json  # noqa: E402
+from dataclasses import asdict as _asdict  # noqa: E402
+
+
+def _odds_digest(o) -> str:
+    return _hashlib.sha256(_json.dumps(_asdict(o), sort_keys=True, allow_nan=True).encode()).hexdigest()
+
+
+def test_h5b_long_odds_are_pinned():
+    """Pinned before any short odds existed: the long Time Machine must not move by a single bit."""
+    from nse_backtest.desk.markets import NSE
+    from nse_backtest.desk.plan import build_plan
+    from tests.desk.test_plan import sessions15
+    from tests.desk.test_verdict_service import rising
+    p = build_plan(rising(), "ABC", Mode.SWING, NSE)
+    assert _odds_digest(odds(rising(), p, cost_per_share=0.2, replays=2000)) == \
+        "681a70e426f2de3678aca8c8ae502f0c8b97e1219d2c1098662166c3a405f7e1"
+    df = sessions15(n_days=40)
+    pi = build_plan(df, "ABC", Mode.INTRADAY, NSE)
+    assert _odds_digest(odds(df, pi, cost_per_share=0.05, replays=2000)) == \
+        "10eb818397d6297c775c15392de1245de5073d2db449067398efd349a8453807"
+
+
+# ---------------------------------------------------------------- H5b: the short Monte Carlo (mirror)
+from nse_backtest.desk.timemachine import monte_carlo_rs, monte_carlo_rs_short  # noqa: E402
+
+
+def test_h5b_short_mc_downtrend_hits_target_every_path():
+    # each bar falls 1%: from 100 a short with stop 103 and target 97 reaches the target
+    pt, ps, ptime, exp, rs = monte_carlo_rs_short(const_ratios(1.0, 1.002, 0.988, 0.99), 100, 103, 97, 15)
+    assert (pt, ps, ptime) == (1.0, 0.0, 0.0) and exp == pytest.approx(1.0) and rs.shape == (10_000,)
+
+
+def test_h5b_short_mc_time_exit_when_hold_too_short():
+    pt, ps, ptime, exp, _ = monte_carlo_rs_short(const_ratios(1.0, 1.002, 0.988, 0.99), 100, 103, 97, 2)
+    assert ptime == 1.0 and exp == pytest.approx((100 - 100 * 0.99 ** 2) / 3)
+
+
+def test_h5b_short_mc_stop_wins_when_bar_touches_both():
+    pt, ps, ptime, exp, _ = monte_carlo_rs_short(const_ratios(1.0, 1.04, 0.96, 1.0), 100, 103, 97, 15)
+    assert ps == 1.0 and exp == pytest.approx(-1.0)
+
+
+def test_h5b_short_mc_gap_through_stop_fills_at_open():
+    pt, ps, ptime, exp, _ = monte_carlo_rs_short(const_ratios(1.05, 1.06, 1.04, 1.05), 100, 103, 97, 15)
+    assert ps == 1.0 and exp == pytest.approx(-5 / 3)  # bought back at the 105 open, worse than the stop
+
+
+def test_h5b_short_mc_gap_through_target_fills_at_open():
+    pt, ps, ptime, exp, _ = monte_carlo_rs_short(const_ratios(0.95, 0.96, 0.94, 0.95), 100, 103, 97, 15)
+    assert pt == 1.0 and exp == pytest.approx(5 / 3)
+
+
+def test_h5b_short_mc_costs_reduce_expectancy_and_it_is_deterministic():
+    rng = np.random.default_rng(3)
+    r = 1 + rng.normal(0, 0.01, (300, 4))
+    r[:, 1] = np.maximum(r[:, 1], r[:, [0, 3]].max(axis=1)) + 0.002
+    r[:, 2] = np.minimum(r[:, 2], r[:, [0, 3]].min(axis=1)) - 0.002
+    a = monte_carlo_rs_short(r, 100, 102, 97, 20, seed=7)
+    b = monte_carlo_rs_short(r, 100, 102, 97, 20, seed=7)
+    c = monte_carlo_rs_short(r, 100, 102, 97, 20, seed=7, cost_per_share=0.3)
+    assert a[:4] == b[:4] and np.array_equal(a[4], b[4])
+    assert c[3] == pytest.approx(a[3] - 0.3 / 2)
+
+
+def test_h5b_short_mc_input_guards():
+    r = const_ratios(1.0, 1.01, 0.99, 1.0)
+    with pytest.raises(ValueError, match="stop must be above entry"):
+        monte_carlo_rs_short(r, 100, 99, 97, 5)
+    with pytest.raises(ValueError, match="target must be below entry"):
+        monte_carlo_rs_short(r, 100, 103, 101, 5)
+    with pytest.raises(ValueError):
+        monte_carlo_rs_short(r, 100, 103, 97, 0)
+    with pytest.raises(ValueError):
+        monte_carlo_rs_short(r[:3], 100, 103, 97, 5)
+    with pytest.raises(ValueError):
+        monte_carlo_rs_short(r, float("nan"), 103, 97, 5)
+
+
+def test_h5b_short_mc_is_the_long_mc_on_inverted_prices():
+    """Price p -> 1/p turns a short into a long (High <-> Low): with the same seed the same replays win, lose and
+    time out, so P(target), P(stop) and P(time) are equal."""
+    rng = np.random.default_rng(11)
+    for _ in range(20):
+        r = 1 + rng.normal(0, 0.012, (200, 4))
+        r[:, 1] = np.maximum(r[:, 1], r[:, [0, 3]].max(axis=1)) + rng.uniform(0, 0.004, 200)
+        r[:, 2] = np.minimum(r[:, 2], r[:, [0, 3]].min(axis=1)) - rng.uniform(0, 0.004, 200)
+        inv = np.column_stack([1 / r[:, 0], 1 / r[:, 2], 1 / r[:, 1], 1 / r[:, 3]])
+        e, s, t = 100.0, 101.7, 97.3
+        short = monte_carlo_rs_short(r, e, s, t, 18, replays=2000, seed=5)
+        long = monte_carlo_rs(inv, 1 / e, 1 / s, 1 / t, 18, replays=2000, seed=5)
+        assert short[:3] == pytest.approx(long[:3], abs=1e-3)  # a boundary tie may flip on rounding
+
+
+def test_h5b_short_mc_property_lost_replays_lose_won_replays_win():
+    rng = np.random.default_rng(23)
+    for seed in range(10):
+        r = 1 + rng.normal(0, 0.01, (150, 4))
+        r[:, 1] = np.maximum(r[:, 1], r[:, [0, 3]].max(axis=1)) + 0.001
+        r[:, 2] = np.minimum(r[:, 2], r[:, [0, 3]].min(axis=1)) - 0.001
+        pt, ps, ptime, _, rs = monte_carlo_rs_short(r, 100, 102, 97, 20, replays=200, seed=seed)
+        assert pt + ps + ptime == pytest.approx(1.0)
+        assert (rs >= -10).all() and np.isfinite(rs).all()
+        # a stop at 102 risks 2: a lost replay bought back at or above the stop (R <= -1), a won one at or below
+        # the target (R >= +1.5); time exits sit strictly between (they touched neither)
+        assert (rs <= -1 + 1e-9).mean() == pytest.approx(ps) and (rs >= 1.5 - 1e-9).mean() == pytest.approx(pt)
+
+
+# ---------------------------------------------------------------- H5b: ORB-short history (mirror of the long replay)
+from datetime import date as _date  # noqa: E402
+
+from nse_backtest.desk import fills as _fills  # noqa: E402
+from nse_backtest.desk.models import Side  # noqa: E402
+from nse_backtest.desk.timemachine import short_cost_fn, short_trades  # noqa: E402
+
+NSE_P = get_profile("NSE")
+SFLAT = (100, 101, 99.1, 100)  # just above the 99 OR low: a sell stop at 99 triggers on Low <= 99
+OR_BAR = ("09:15", 100, 101, 99, 100)  # OR 99-101: trigger 99, stop 100, sell limit 99 - min(0.25, 0.495) = 98.75
+
+
+def hostile(df, regime="HOSTILE"):
+    return {d.date(): regime for d in pd.unique(df.index.normalize())}
+
+
+def strades(bars, regime="HOSTILE", day="2026-10-27", cost_fn=None):
+    df = intraday_frame((day, bars))
+    return short_trades(df, NSE_P, hostile(df, regime), rr=1.5, cost_fn=cost_fn)
+
+
+def test_h5b_short_breakdown_with_later_bars_hits_target():
+    # fill-bar Low already reaches the target, but on the fill bar only the stop counts (mirror of the long A9)
+    t, = strades([OR_BAR, ("09:30", *SFLAT), ("09:45", 99, 99.5, 97.5, 98), ("10:00", 98, 98.5, 94, 94.5)])
+    assert (t.entry, t.stop, t.target, t.exit_price, t.outcome) == (99, 100, 97.5, 97.5, "won")
+    assert t.r == pytest.approx(1.5) and t.trigger == 99 and t.entry_limit == pytest.approx(98.75)
+
+
+def test_h5b_short_with_no_later_bars_is_a_time_exit_at_the_fill_bar_close():
+    t, = strades([OR_BAR, ("09:30", 99, 99.5, 97.6, 98)])
+    assert t.outcome == "time" and t.exit_price == 98 and t.r == pytest.approx(1.0)
+
+
+def test_h5b_short_breakdown_outside_the_entry_window_is_no_trade():
+    bars = [OR_BAR]
+    ts = pd.Timestamp("2026-10-27 09:30")
+    while ts.time() <= pd.Timestamp("2026-10-27 14:30").time():
+        bars.append((ts.strftime("%H:%M"), *SFLAT)); ts += pd.Timedelta(minutes=15)
+    bars += [("14:45", 99, 99.2, 97, 97.5), ("15:00", 97.5, 97.8, 90, 91)]
+    assert strades(bars) == []
+
+
+def test_h5b_short_session_without_an_opening_bar_is_skipped():
+    assert strades([("09:30", 100, 101, 99, 100), ("09:45", 99, 99.5, 97.5, 98), ("10:00", 98, 98.5, 94, 94.5)]) == []
+
+
+def test_h5b_short_gap_below_the_sell_limit_that_never_returns_is_no_trade():
+    assert strades([OR_BAR, ("09:30", 98, 98.2, 97.8, 97.9), ("09:45", 97.9, 98, 94, 95)]) == []
+
+
+def test_h5b_short_gap_below_the_sell_limit_fills_at_the_limit_when_price_returns():
+    t, = strades([OR_BAR, ("09:30", 98, 98.2, 97.8, 97.9), ("09:45", 98.4, 98.8, 98.3, 98.5),
+                  ("10:00", 98.7, 98.8, 96, 96.5)])
+    # filled at 98.75 on 09:45 (R = 1.25, target 96.875), target hit on 10:00
+    assert t.entry == pytest.approx(98.75) and t.target == pytest.approx(96.875) and t.r == pytest.approx(1.5)
+
+
+def test_h5b_short_open_inside_the_limit_fills_at_the_open():
+    t, = strades([OR_BAR, ("09:30", 98.8, 98.9, 98.5, 98.6), ("09:45", 98.6, 98.7, 96, 96.5)])
+    assert t.entry == pytest.approx(98.8) and t.r == pytest.approx(1.5)  # R = 1.2, target 97.0
+
+
+def test_h5b_short_fill_bar_stop_exits_at_the_stop_even_when_the_bar_opened_above_it():
+    # 09:30 opens 100.4 (above the stop 100), trades down through 99 (sold at 99), then back up through the stop:
+    # the stop order exists only after the fill, so it fills at the stop, never at the earlier open
+    t, = strades([OR_BAR, ("09:30", 100.4, 100.5, 98.9, 99.6), ("09:45", 99.6, 99.7, 95, 95.5)])
+    assert t.entry == 99 and t.exit_price == 100 and t.outcome == "lost" and t.r == pytest.approx(-1.0)
+
+
+def test_h5b_short_breakdown_bar_touching_the_stop_is_a_stop_out():
+    t, = strades([OR_BAR, ("09:30", 99.5, 100.2, 97, 97.1), ("09:45", 97, 97.1, 94, 95)])
+    assert t.outcome == "lost" and t.r == pytest.approx(-1.0)
+
+
+def test_h5b_short_gap_through_the_stop_exits_at_the_open():
+    t, = strades([OR_BAR, ("09:30", 99, 99.5, 98.5, 99.2), ("09:45", 100.6, 101, 100.5, 100.8)])
+    assert t.outcome == "lost" and t.exit_price == 100.6 and t.r == pytest.approx(-1.6)
+
+
+def test_h5b_short_time_exit_is_before_the_1510_square_off():
+    # filled 09:30; nothing resolves; the 14:45 bar is the last one that ends by 15:10 (15:00 ends at 15:15)
+    bars = [OR_BAR, ("09:30", 99, 99.5, 98.6, 99)]
+    ts = pd.Timestamp("2026-10-27 09:45")
+    while ts.time() <= pd.Timestamp("2026-10-27 14:30").time():
+        bars.append((ts.strftime("%H:%M"), 99, 99.4, 98.6, 99)); ts += pd.Timedelta(minutes=15)
+    bars += [("14:45", 99, 99.4, 98.6, 98.5), ("15:00", 98.5, 98.6, 90, 90.5)]
+    t, = strades(bars)
+    assert t.outcome == "time" and t.exit_price == 98.5 and t.r == pytest.approx(0.5)
+
+
+def test_h5b_short_history_counts_hostile_days_only():
+    bars = [OR_BAR, ("09:30", *SFLAT), ("09:45", 99, 99.5, 97.5, 98), ("10:00", 98, 98.5, 94, 94.5)]
+    assert strades(bars, regime="MIXED") == [] and strades(bars, regime="TRENDING") == []
+    df = intraday_frame(("2026-10-27", bars))
+    assert short_trades(df, NSE_P, {}, rr=1.5) == []  # a day with no regime is not a HOSTILE day
+    assert len(short_trades(df, NSE_P, {_date(2026, 10, 27): "hostile "}, rr=1.5)) == 1
+
+
+def test_h5b_short_tiny_risk_below_a_tenth_of_atr_is_skipped():
+    wide = [("09:15", 100, 101, 99, 100)] + [(f"{h:02d}:{m:02d}", *SFLAT) for h, m in
+            [(9, 30), (9, 45), (10, 0), (10, 15), (10, 30), (10, 45), (11, 0), (11, 15), (11, 30)]]
+    tiny = [("09:15", 100, 100.1, 100, 100.05), ("09:30", 100.05, 100.06, 99.9, 99.95)]  # R = 0.05
+    df = intraday_frame(("2026-10-26", wide), ("2026-10-27", tiny))
+    assert [t.day for t in short_trades(df, NSE_P, hostile(df), rr=1.5)] == []
+
+
+def test_h5b_short_costs_use_the_short_stt_side_and_doubled_slippage():
+    from nse_backtest.desk.costs import DEFAULT_SPREAD, side_cost
+    fn = short_cost_fn(NSE_P, 2.0)
+    assert fn(99.0, 97.5) == pytest.approx(
+        side_cost(NSE_P, Mode.INTRADAY, 99.0, 97.5, 1, 2 * DEFAULT_SPREAD, side=Side.SHORT))
+    assert fn(99.0, 97.5) > short_cost_fn(NSE_P, 1.0)(99.0, 97.5)
+    # STT is on the sell leg: the short's entry (99), not its exit
+    from nse_backtest.desk.costs import round_trip_cost
+    assert fn(99.0, 97.5) == pytest.approx(round_trip_cost(NSE_P, Mode.INTRADAY, 97.5, 99.0, 1, 2 * DEFAULT_SPREAD))
+    t, = strades([OR_BAR, ("09:30", *SFLAT), ("09:45", 99, 99.5, 97.5, 98), ("10:00", 98, 98.5, 94, 94.5)],
+                 cost_fn=fn)
+    assert t.r == pytest.approx((99 - 97.5 - fn(99.0, 97.5)) / 1.0)
+
+
+def test_h5b_setup_history_for_a_short_plan_uses_the_short_replay_at_2x_slippage():
+    bars = [OR_BAR, ("09:30", *SFLAT), ("09:45", 99, 99.5, 97.5, 98), ("10:00", 98, 98.5, 94, 94.5)]
+    df = intraday_frame(("2026-10-27", bars))
+    sp = TradePlan("X", "NSE", Mode.INTRADAY, 99.0, 100.0, 97.5, 96.0, 1.0, 20, 99.0, "x", "opening-range mid",
+                   98.75, Side.SHORT)
+    fn = short_cost_fn(NSE_P, 2.0)
+    assert setup_history(df, sp, regime_by_day=hostile(df)) == [pytest.approx(1.5 - fn(99.0, 97.5))]
+    assert setup_history(df, sp) == []  # no regime per day: no HOSTILE day is known, so no history (fail closed)
+
+
+def _random_sessions(seed, n_days=101):
+    """Random 15-minute sessions built so that breakdowns, limit gaps, stop gaps and fill-bar stops all occur."""
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range("2026-01-05", periods=n_days)
+    rows, idx = [], []
+    for d in days:
+        px = 100 * float(np.exp(rng.normal(0, 0.02)))
+        for b in range(25):
+            gap = rng.normal(0, 0.006) if rng.random() < 0.15 else 0.0
+            o = px * (1 + gap)
+            c = o * (1 + rng.normal(-0.0005, 0.004))
+            h = max(o, c) * (1 + rng.uniform(0, 0.003))
+            lo = min(o, c) * (1 - rng.uniform(0, 0.003))
+            idx.append(d + pd.Timedelta(hours=9, minutes=15 + 15 * b)); rows.append((o, h, lo, c))
+            px = c
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close"], index=pd.DatetimeIndex(idx))
+
+
+def test_h5b_short_property_fills_exits_and_r_over_2000_random_sessions():
+    """Mirror of the long invariants: every fill lies in [entry_limit, trigger]; LOST => R <= 0 and the exit is at
+    or above the stop (the stop itself, or the open of a bar that gapped through it); WON => exit <= target."""
+    seen = {"won": 0, "lost": 0, "time": 0, "gap_stop": 0, "limit_fill": 0}
+    fn = short_cost_fn(NSE_P, 2.0)
+    for seed in range(20):
+        df = _random_sessions(seed)
+        op = df["Open"].to_numpy()
+        for t in short_trades(df, NSE_P, hostile(df), rr=1.5, cost_fn=fn):
+            assert t.entry_limit - 1e-9 <= t.entry <= t.trigger + 1e-9
+            assert t.entry_limit == _fills.entry_limit_short(t.trigger, t.stop, NSE_P.tick)
+            assert t.stop > t.entry and t.target < t.entry
+            assert t.r == pytest.approx((t.entry - t.exit_price - fn(t.entry, t.exit_price)) / (t.stop - t.entry))
+            seen[t.outcome] += 1
+            if t.outcome == "lost":
+                assert t.r <= 0 and t.exit_price >= t.stop - 1e-12
+                gapped = t.exit_price == op[t.exit_index] and op[t.exit_index] >= t.stop
+                assert t.exit_price == t.stop or gapped
+                seen["gap_stop"] += gapped and t.exit_price > t.stop
+            elif t.outcome == "won":
+                assert t.exit_price <= t.target + 1e-12
+            seen["limit_fill"] += t.entry == t.entry_limit
+    assert sum(seen[k] for k in ("won", "lost", "time")) >= 300
+    assert min(seen.values()) > 0, seen  # every branch was exercised

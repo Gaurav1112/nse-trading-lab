@@ -1,6 +1,7 @@
 """Desk data models and enums."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
@@ -111,6 +112,24 @@ class Odds:
 def summary_fields(x) -> dict:
     """A dataclass's fields as a shallow dict, without those marked ``metadata={"serialize": False}``."""
     return {f.name: getattr(x, f.name) for f in fields(x) if f.metadata.get("serialize", True)}
+
+
+SHORT_EDGE_MIN_TRADES = 200  # pooled ORB-short trades the gate needs before a short may be a desk TAKE
+
+
+@dataclass(frozen=True)
+class ShortEdge:
+    """The pooled ORB-short history over the eligible universe, HOSTILE days only, at 2x slippage (shortcheck)."""
+    n: int
+    expectancy_r: float | None  # None only when n == 0
+    proven: bool  # n >= SHORT_EDGE_MIN_TRADES and expectancy_r > 0
+
+    @classmethod
+    def from_trades(cls, n: int, expectancy_r: float | None) -> "ShortEdge":
+        """The edge with ``proven`` derived from the numbers, never taken on trust."""
+        proven = (n >= SHORT_EDGE_MIN_TRADES and expectancy_r is not None and math.isfinite(expectancy_r)
+                  and expectancy_r > 0)
+        return cls(int(n), None if expectancy_r is None else float(expectancy_r), bool(proven))
 
 
 @dataclass(frozen=True)
