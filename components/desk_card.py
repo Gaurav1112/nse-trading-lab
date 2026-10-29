@@ -191,6 +191,21 @@ def side_levels(p) -> dict:
     return {"side": p.side} if p.is_short else {}
 
 
+def _check_args(v: DeskVerdict) -> dict:
+    """The run_check keyword arguments a Re-check / Full check of ``v`` passes (one source for both). Swing: the
+    plan's own entry (the breakout trigger, never silently the last close), plus the owner's stop and target when
+    they set them. Intraday: nothing — a re-check rebuilds from today's opening range (yesterday's levels are not
+    today's plan). A short also passes its side."""
+    p = v.plan
+    args: dict = {}
+    if p.mode is Mode.SWING:
+        args["entry"] = p.entry
+        if p.stop_basis == "user":
+            args.update(stop=p.stop, target=p.target_1)
+    args.update(side_levels(p))
+    return args
+
+
 def _bullets(checks) -> str:
     return "\n".join(f"- {c.status.value} {c.name} — {c.reason}" for c in checks)
 
@@ -296,16 +311,15 @@ def recheck_prompt(v: DeskVerdict, profile, limits, key: str, wkey: str, reason:
 
 def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str, *, broken: bool = False) -> None:
     """The stale-verdict prompt: no ticket and no override box, only a Re-check that runs the full desk check for
-    this symbol and mode and replaces the card's verdict. ``broken`` (the data is broken) shows it in red."""
+    this symbol and mode with _check_args and replaces the card's verdict. ``broken`` (the data is broken) shows it
+    in red."""
     (st.error if broken else st.warning)(reason)
     rk = (RECHECK_KEY, key, v.input_hash)
     if st.button("Re-check", key=f"{wkey}_recheck"):
         p = v.plan
-        levels = (dict(entry=p.entry, stop=p.stop, target=p.target_1) if p.stop_basis == "user" else {})
-        levels.update(side_levels(p))
         with st.spinner(f"Re-checking {p.symbol}..."):
             try:
-                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **_check_args(v))}
             except Exception as e:  # noqa: BLE001 - shown under the prompt
                 st.session_state[rk] = {"error": _msg(e)}
         if "ok" in st.session_state[rk]:
@@ -316,19 +330,16 @@ def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str, 
 
 
 def _full_check(v: DeskVerdict, profile, limits, key: str, wkey: str) -> None:
-    """The quick-verdict gate: no ticket and no override box, only a Full check that runs the full desk check at
-    the plan's own entry (and the owner's stop/target when they set them) and replaces the card's verdict."""
+    """The quick-verdict gate: no ticket and no override box, only a Full check that runs the full desk check with
+    _check_args (the plan's own entry, and the owner's stop/target when they set them) and replaces the card's
+    verdict."""
     st.warning(QUICK_CHECK_MSG)
     rk = (RECHECK_KEY, key, v.input_hash)
     if st.button("Full check", key=f"{wkey}_fullcheck"):
         p = v.plan
-        levels = dict(entry=p.entry)
-        if p.stop_basis == "user":
-            levels.update(stop=p.stop, target=p.target_1)
-        levels.update(side_levels(p))
         with st.spinner(f"Running the full check for {p.symbol}..."):
             try:
-                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **_check_args(v))}
             except Exception as e:  # noqa: BLE001 - shown under the prompt
                 st.session_state[rk] = {"error": _msg(e)}
         if "ok" in st.session_state[rk]:
