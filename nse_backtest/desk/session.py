@@ -252,7 +252,8 @@ def run_shortcheck(profile, *, refresh: bool = False, on_warning: Warn = None, o
     if not frames:
         raise ValueError("no intraday bars for any eligible symbol")
     days = sorted({d.date() for f in frames.values() for d in pd.unique(f.index.normalize())})
-    edge = shortcheck.pooled_short_edge(profile, frames, shortcheck.regime_by_day(index_df, days))
+    edge = shortcheck.pooled_short_edge(profile, frames, shortcheck.regime_by_day(index_df, days),
+                                        eligible=len(syms))  # symbols that failed to load count against coverage
     shortcheck.save_edge(path, profile, today, edge, symbols=len(frames), now=now)
     return ShortcheckResult(edge, today, len(frames), False, tuple(failures))
 

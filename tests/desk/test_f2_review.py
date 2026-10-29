@@ -314,3 +314,59 @@ def test_m11_fo_mktlots_parses_quoted_csv_cells():
     from nse_backtest.desk.nse_lists import parse_fno_underlyings
     text = 'UNDERLYING,SYMBOL,OCT-26\n"Nifty, 50",NIFTY,75\nAlpha Ltd,"ALPHA",500\n'
     assert parse_fno_underlyings(text) == frozenset({"NIFTY", "ALPHA"})
+
+
+# ---------------------------------------------------------------- M6/M11: pooled coverage floor, cache digest
+
+def covered(edge, pooled=40, eligible=40):
+    """``edge`` with its coverage: ``pooled`` of ``eligible`` symbols replayed (fictional symbols and dates)."""
+    from dataclasses import replace
+    syms = tuple((f"S{i:02d}", "2026-10-29") for i in range(pooled))
+    return replace(ShortEdge.from_trades(edge.n, edge.expectancy_r, pooled=pooled, eligible=eligible),
+                   skipped=edge.skipped, skip_reason=edge.skip_reason, pooled_symbols=syms)
+
+
+def test_m6_proven_needs_80_percent_of_the_eligible_symbols_pooled():
+    from nse_backtest.desk.checks import short_edge_check
+    from tests.desk.test_checks import sctx, splan
+    assert ShortEdge.from_trades(250, 0.2, pooled=32, eligible=40).proven  # exactly 80%
+    thin = ShortEdge.from_trades(250, 0.2, pooled=31, eligible=40)
+    assert not thin.proven
+    forged = covered(ShortEdge.from_trades(250, 0.2), pooled=31, eligible=40)
+    from dataclasses import replace
+    c = short_edge_check(sctx(short_edge=replace(forged, proven=True)), splan())
+    assert c.status is Status.WARN and "pooled 31 of 40 symbols (needs 80%)" in c.reason
+
+
+def test_m6_pooled_short_edge_counts_coverage_and_the_line_says_it():
+    from nse_backtest.desk.shortcheck import edge_line, pooled_short_edge
+    from tests.desk.test_shortcheck import all_hostile, frame
+    a, b = frame(150), frame(150)
+    e = pooled_short_edge(NSE, {"AAA": a, "BBB": b, "NONE": None}, all_hostile(a, b), eligible=5)
+    assert (e.pooled, e.eligible) == (2, 5) and not e.proven  # 2 of 5: under 80% however many trades
+    assert [s for s, _ in e.pooled_symbols] == ["AAA", "BBB"]
+    assert "pooled 2 of 5 symbols; 3 skipped" in edge_line(e)
+
+
+def test_m11_cache_round_trip_keeps_coverage_and_rejects_a_tampered_list(tmp_path):
+    import json
+    from datetime import date
+    from nse_backtest.desk.shortcheck import load_edge, save_edge
+    p, day = tmp_path / "c.json", date(2026, 10, 29)
+    e = covered(ShortEdge.from_trades(250, 0.1), pooled=36, eligible=40)
+    save_edge(p, NSE, day, e, symbols=36)
+    got, why = load_edge(p, NSE, day)
+    assert why == "" and got.proven and (got.pooled, got.eligible) == (36, 40)
+    good = json.loads(p.read_text())
+    assert len(good["digest"]) == 64
+    for patch in ({"pooled_symbols": good["pooled_symbols"][:-1]},  # a symbol dropped
+                  {"pooled_symbols": [["XX", "2026-10-29"]] + good["pooled_symbols"][1:]},  # a symbol swapped
+                  {"n": 260, "proven": True},  # the numbers edited
+                  {"eligible": 36},  # the coverage edited
+                  {"digest": "0" * 64}):
+        p.write_text(json.dumps({**good, **patch}))
+        got, why = load_edge(p, NSE, day)
+        assert got is None and "unreadable" in why, patch
+    old = {k: v for k, v in good.items() if k not in ("digest", "pooled_symbols", "pooled", "eligible")}
+    p.write_text(json.dumps({**old, "version": 1}))
+    assert load_edge(p, NSE, day)[0] is None  # an old-format cache is recomputed, never trusted

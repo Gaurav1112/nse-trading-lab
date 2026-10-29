@@ -115,6 +115,16 @@ def summary_fields(x) -> dict:
 
 
 SHORT_EDGE_MIN_TRADES = 200  # pooled ORB-short trades the gate needs before a short may be a desk TAKE
+SHORT_EDGE_MIN_COVERAGE = 0.8  # ... over at least this share of the eligible symbols (the rest could not be replayed)
+
+
+def coverage_ok(pooled: int | None, eligible: int | None) -> bool:
+    """True when ``pooled`` of ``eligible`` symbols meets SHORT_EDGE_MIN_COVERAGE; unknown counts never do."""
+    if isinstance(pooled, bool) or isinstance(eligible, bool):
+        return False
+    if not (isinstance(pooled, int) and isinstance(eligible, int)) or not (0 <= pooled <= eligible) or eligible < 1:
+        return False
+    return pooled >= SHORT_EDGE_MIN_COVERAGE * eligible - 1e-9
 
 
 @dataclass(frozen=True)
@@ -122,17 +132,31 @@ class ShortEdge:
     """The pooled ORB-short history over the eligible universe, HOSTILE days only, at 2x slippage (shortcheck)."""
     n: int
     expectancy_r: float | None  # None only when n == 0
-    proven: bool  # n >= SHORT_EDGE_MIN_TRADES and expectancy_r > 0
+    proven: bool  # n >= SHORT_EDGE_MIN_TRADES and expectancy_r > 0 (and, when known, the coverage floor)
     # frames that could not be replayed (missing or broken bars): they add no trades; shown, never hidden
     skipped: int = field(default=0, compare=False)
     skip_reason: str = field(default="", compare=False)  # the first one, "SYMBOL: why"
+    # Coverage: symbols replayed of those eligible (None = not recorded; shortcheck always records both) and the
+    # replayed (symbol, last bar date) pairs the daily cache's digest covers.
+    pooled: int | None = field(default=None, compare=False)
+    eligible: int | None = field(default=None, compare=False)
+    pooled_symbols: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
 
     @classmethod
-    def from_trades(cls, n: int, expectancy_r: float | None) -> "ShortEdge":
-        """The edge with ``proven`` derived from the numbers, never taken on trust."""
+    def from_trades(cls, n: int, expectancy_r: float | None, *, pooled: int | None = None,
+                    eligible: int | None = None) -> "ShortEdge":
+        """The edge with ``proven`` derived from the numbers, never taken on trust. With a coverage given
+        (``eligible`` not None), proven also needs ``pooled`` to be at least 80% of ``eligible``."""
         proven = (n >= SHORT_EDGE_MIN_TRADES and expectancy_r is not None and math.isfinite(expectancy_r)
-                  and expectancy_r > 0)
-        return cls(int(n), None if expectancy_r is None else float(expectancy_r), bool(proven))
+                  and expectancy_r > 0 and (eligible is None or coverage_ok(pooled, eligible)))
+        return cls(int(n), None if expectancy_r is None else float(expectancy_r), bool(proven),
+                   pooled=pooled, eligible=eligible)
+
+    def coverage_line(self) -> str:
+        """"pooled X of Y symbols; Z skipped", or "" when the coverage was not recorded."""
+        if self.pooled is None or self.eligible is None:
+            return ""
+        return f"pooled {self.pooled} of {self.eligible} symbols; {self.eligible - self.pooled} skipped"
 
 
 @dataclass(frozen=True)

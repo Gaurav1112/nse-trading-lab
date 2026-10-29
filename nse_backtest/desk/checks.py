@@ -11,7 +11,8 @@ import numpy as np
 
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
-from nse_backtest.desk.models import Check, Limits, Mode, Odds, ShortEdge, Side, Sizing, Status, TradePlan
+from nse_backtest.desk.models import (SHORT_EDGE_MIN_COVERAGE, Check, Limits, Mode, Odds, ShortEdge, Side, Sizing,
+                                     Status, TradePlan, coverage_ok)
 from nse_backtest.desk.nse_lists import BanList
 from nse_backtest.desk.plan import SHORT_RR_T1
 
@@ -198,10 +199,13 @@ def short_edge_check(ctx: CheckContext, plan: TradePlan | None = None) -> Check:
     if n is None or n < 0:
         return _ck("short_edge", Status.WARN, f"{SHORT_EDGE_UNAVAILABLE} (trade count unreadable)")
     shown = "no expectancy yet" if exp is None else f"{exp:+.2f}R"
-    sure = ShortEdge.from_trades(int(n), exp)
-    if not sure.proven:
+    if not ShortEdge.from_trades(int(n), exp).proven:
         return _ck("short_edge", Status.WARN,
                    f"edge not proven on the desk's own history yet ({n:.0f} trades, {shown})")
+    if e.eligible is not None and not coverage_ok(e.pooled, e.eligible):
+        return _ck("short_edge", Status.WARN,
+                   f"edge not proven: pooled {e.pooled} of {e.eligible} symbols (needs "
+                   f"{SHORT_EDGE_MIN_COVERAGE:.0%}) ({n:.0f} trades, {shown})")
     proven = f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)"
     off_rule = _off_pooled_rule(plan, ctx)
     if off_rule:  # the pooled replay proves the desk's own geometry only, not a user's stop or target

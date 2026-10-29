@@ -5,6 +5,7 @@ Deterministic: no random draws; trades are pooled in (symbol, day) order and ave
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
@@ -25,7 +26,7 @@ from .timemachine import SHORT_SLIPPAGE_MULT, short_cost_fn, short_trades
 
 MIN_TRADES = SHORT_EDGE_MIN_TRADES
 CACHE_FILE = "desk_shortcheck.json"
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # 2: coverage (pooled of eligible) and a digest of the pooled symbols and bar dates
 _REGIME_MAX_GAP_DAYS = 7  # an index bar older than this before day d leaves d unclassified (stale index)
 
 __all__ = ["ShortEdge", "MIN_TRADES", "CACHE_FILE", "pooled_short_edge", "regime_by_day", "save_edge", "load_edge",
@@ -57,17 +58,21 @@ def regime_by_day(index_df: pd.DataFrame | None, days: Iterable[date]) -> dict[d
 
 
 def pooled_short_edge(profile: MarketProfile, frames15: Mapping[str, pd.DataFrame | None],
-                      regime_by_day: Mapping[date, str], *, slippage_mult: float = SHORT_SLIPPAGE_MULT) -> ShortEdge:
+                      regime_by_day: Mapping[date, str], *, slippage_mult: float = SHORT_SLIPPAGE_MULT,
+                      eligible: int | None = None) -> ShortEdge:
     """Every ORB short the desk's live rule would have taken on a HOSTILE day across ``frames15`` (the eligible
     universe's 15-minute bars; each frame's latest session is left out), at ``slippage_mult`` x the slippage, pooled.
     proven = at least 200 trades and a positive expectancy. A frame that is missing or cannot be replayed is
     skipped (it adds no trades: it can only make proving harder) and counted in ``skipped`` with the first reason.
+    ``eligible`` (default: the frames given) is the eligible universe's size, including symbols whose bars could not
+    be loaded at all: proven also needs the replayed symbols to be at least 80% of it (models.coverage_ok).
     Survivorship: the universe is TODAY's F&O list; stocks that left it, and past F&O-ban days, are not replayed."""
     if profile.code != "NSE":
         raise ValueError("ORB shorts are NSE only")
     cost = short_cost_fn(profile, slippage_mult)
     rs: list[float] = []
     skipped: list[str] = []
+    pooled: list[tuple[str, str]] = []
     for sym in sorted(frames15):
         df = frames15[sym]
         if df is None:
@@ -75,12 +80,16 @@ def pooled_short_edge(profile: MarketProfile, frames15: Mapping[str, pd.DataFram
             continue
         try:
             trades = short_trades(df, profile, regime_by_day, rr=SHORT_RR_T1, cost_fn=cost)
-        except (KeyError, ValueError, TypeError) as e:
+            last = pd.Timestamp(df.index[-1]).date().isoformat()
+        except (KeyError, ValueError, TypeError, IndexError) as e:
             skipped.append(f"{sym}: {type(e).__name__}: {e}")
             continue
         rs += [t.r for t in trades if math.isfinite(t.r)]
-    edge = ShortEdge.from_trades(len(rs), math.fsum(rs) / len(rs) if rs else None)
-    return replace(edge, skipped=len(skipped), skip_reason=skipped[0] if skipped else "")
+        pooled.append((sym, last))
+    total = len(frames15) if eligible is None else int(eligible)
+    edge = ShortEdge.from_trades(len(rs), math.fsum(rs) / len(rs) if rs else None, pooled=len(pooled),
+                                 eligible=total)
+    return replace(edge, skipped=len(skipped), skip_reason=skipped[0] if skipped else "", pooled_symbols=tuple(pooled))
 
 
 SURVIVORSHIP_NOTE = "universe = today's F&O list, past bans not replayed"
@@ -90,6 +99,8 @@ def edge_line(e: ShortEdge) -> str:
     """One line: the numbers, whether they prove the edge, and the survivorship caveat."""
     exp = "no expectancy yet" if e.expectancy_r is None else f"{e.expectancy_r:+.2f}R"
     head = f"{e.n} trades, {exp} at {SHORT_SLIPPAGE_MULT:g}× slippage, HOSTILE days"
+    if e.coverage_line():
+        head += f" ({e.coverage_line()})"
     if e.proven:
         return f"{head}: proven; {SURVIVORSHIP_NOTE}"
     return f"{head}: not proven (needs at least {MIN_TRADES} trades and a positive R); {SURVIVORSHIP_NOTE}"
@@ -111,9 +122,20 @@ def save_edge(path: Path, profile: MarketProfile, day: date, edge: ShortEdge, *,
     body = {"version": CACHE_VERSION, "market": profile.code, "day": day.isoformat(), "n": edge.n,
             "expectancy_r": edge.expectancy_r, "proven": edge.proven, "slippage_mult": SHORT_SLIPPAGE_MULT,
             "min_trades": MIN_TRADES, "symbols": int(symbols), "skipped": int(edge.skipped),
-            "skip_reason": str(edge.skip_reason),
+            "skip_reason": str(edge.skip_reason), "pooled": edge.pooled, "eligible": edge.eligible,
+            "pooled_symbols": [list(x) for x in edge.pooled_symbols],
             "computed_at": (now or datetime.now(ZoneInfo(profile.tz))).astimezone(ZoneInfo(profile.tz)).isoformat()}
+    body["digest"] = _digest(body)
     _atomic_write(path, json.dumps(body, indent=2, allow_nan=False) + "\n")
+
+
+_DIGESTED = ("market", "day", "n", "expectancy_r", "pooled", "eligible", "pooled_symbols")
+
+
+def _digest(body: dict) -> str:
+    """sha256 over the figure, its coverage and the pooled (symbol, last bar date) list: an edited cache fails."""
+    blob = json.dumps({k: body.get(k) for k in _DIGESTED}, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _bad(why: str) -> tuple[None, str]:
@@ -146,14 +168,26 @@ def load_edge(path: Path, profile: MarketProfile, day: date) -> tuple[ShortEdge 
             return _bad("expectancy")
     elif isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
         return _bad("expectancy")
-    edge = ShortEdge.from_trades(n, exp)
+    pooled, eligible, syms = d.get("pooled"), d.get("eligible"), d.get("pooled_symbols")
+    if any(isinstance(x, bool) or not isinstance(x, int) for x in (pooled, eligible)) or not 0 <= pooled <= eligible:
+        return _bad("coverage")
+    if not (isinstance(syms, list) and len(syms) == pooled
+            and all(isinstance(x, list) and len(x) == 2 and all(isinstance(y, str) for y in x) for x in syms)):
+        return _bad("pooled symbol list")
+    try:
+        sealed = d.get("digest") == _digest(d)
+    except (TypeError, ValueError):
+        sealed = False
+    if not sealed:
+        return _bad("digest mismatch")
+    edge = ShortEdge.from_trades(n, exp, pooled=pooled, eligible=eligible)
     if d.get("proven") is not edge.proven:
         return _bad("proven flag does not match the numbers")
+    edge = replace(edge, pooled_symbols=tuple((a, b) for a, b in syms))
     skipped, why = d.get("skipped", 0), d.get("skip_reason", "")
     if isinstance(skipped, int) and not isinstance(skipped, bool) and skipped >= 0 and isinstance(why, str):
         edge = replace(edge, skipped=skipped, skip_reason=why)
     return edge, ""
-
 
 
 def cached_symbols(path: Path) -> int | None:

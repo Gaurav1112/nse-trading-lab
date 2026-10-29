@@ -540,7 +540,7 @@ def cmd_shortcheck(a, profile) -> int:
     if a.json:
         _emit_json({"market": profile.code, "day": res.day, "n": e.n, "expectancy_r": e.expectancy_r,
                     "proven": e.proven, "symbols": res.symbols, "cached": res.cached, "failures": res.failures,
-                    "skipped": e.skipped, "skip_reason": e.skip_reason})
+                    "skipped": e.skipped, "skip_reason": e.skip_reason, "pooled": e.pooled, "eligible": e.eligible})
         return 0
     from .checks import CheckContext
     gate = short_edge_check(CheckContext(profile, loaders.default_limits(profile), market_now(profile),

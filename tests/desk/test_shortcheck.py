@@ -181,7 +181,9 @@ DAY = date(2026, 10, 30)
 def test_cache_round_trip_for_the_same_day(tmp_path):
     from dataclasses import replace as _r
     p = tmp_path / "desk_shortcheck.json"
-    e = _r(ShortEdge.from_trades(212, 0.0712), skipped=3, skip_reason="ZZZ: no bars")
+    from tests.desk.test_f2_review import covered  # F2/M6+M11: a cached figure carries its coverage and digest
+    e = covered(_r(ShortEdge.from_trades(212, 0.0712), skipped=3, skip_reason="ZZZ: no bars"), pooled=31,
+                eligible=34)
     save_edge(p, NSE, DAY, e, symbols=31)
     got, why = load_edge(p, NSE, DAY)
     assert got == e and why == "" and (got.skipped, got.skip_reason) == (3, "ZZZ: no bars")
@@ -229,8 +231,9 @@ def test_tampered_or_foreign_cache_fails_closed(tmp_path, patch):
 
 def test_cache_write_is_atomic_and_leaves_no_temp_files(tmp_path):
     p = tmp_path / "s.json"
-    save_edge(p, NSE, DAY, ShortEdge.from_trades(10, -0.1), symbols=5)
-    save_edge(p, NSE, DAY, ShortEdge.from_trades(11, -0.2), symbols=5)
+    from tests.desk.test_f2_review import covered  # F2/M6+M11: a cached figure carries its coverage and digest
+    save_edge(p, NSE, DAY, covered(ShortEdge.from_trades(10, -0.1), pooled=5, eligible=5), symbols=5)
+    save_edge(p, NSE, DAY, covered(ShortEdge.from_trades(11, -0.2), pooled=5, eligible=5), symbols=5)
     assert [x.name for x in tmp_path.iterdir()] == ["s.json"]
     assert load_edge(p, NSE, DAY)[0].n == 11
 
