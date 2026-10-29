@@ -24,7 +24,8 @@ from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
-from nse_backtest.desk.models import Action, DeskVerdict, Mode
+from nse_backtest.desk.models import Action, DeskVerdict, Mode, Side
+from nse_backtest.desk.shortcheck import edge_line
 from nse_backtest.desk.positions import review_positions
 from nse_backtest.desk.textsafe import shown
 from nse_backtest.desk.tradecard import build_card
@@ -126,10 +127,10 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, 
     st.caption(f"Size: {s.qty} shares · binding limit {s.binding_limit} · risk {m(s.risk_amount)} · "
                f"notional {m(s.notional)} · costs {m(s.costs)}. {s.note}")
 
-    st.markdown("**Odds** (expectancy in R first)")
-    if o is None and p.is_short:  # H5b replaces this with the short odds
-        st.info("Odds unavailable — short odds model arrives in the next update")
-    elif o is None:
+    st.markdown("**Odds** (expectancy in R first)" + (" — a short: the stock's own HOSTILE days, 2× slippage in the "
+                                                      "history; the pooled short_edge check decides TAKE"
+                                                      if p.is_short else ""))
+    if o is None:
         st.info("Odds unavailable — not enough history for a reliable estimate.")
     else:
         row1 = st.columns(4)
@@ -326,6 +327,14 @@ with tab_check:
     c1, c2 = st.columns([2, 1])
     symbol = c1.text_input("Symbol", key="desk_symbol", placeholder="e.g. RELIANCE" if market == "NSE" else "e.g. AAPL")
     mode = c2.radio("Mode", ["swing", "intraday"], key="desk_mode", horizontal=True)
+    side = "long"
+    if market == "NSE":  # shorts are NSE only (F&O stocks, MIS)
+        side = c2.radio("Side", ["long", "short"], key="desk_side", horizontal=True)
+        if side == "short":
+            mode = "intraday"
+            st.caption("Shorts are intraday (MIS) only: an opening-range breakdown short on an F&O stock, squared off "
+                       "by 15:10 IST. Same checks as the scan; at most WAIT until the pooled short history proves "
+                       "the edge.")
     e1, e2, e3 = st.columns(3)
     entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry",
                             help="0 = the desk's own entry (breakout above the 20-day high for swing), the same entry "
@@ -334,13 +343,13 @@ with tab_check:
     stop = e2.number_input("Stop (0 = auto)", min_value=0.0, value=0.0, key="desk_stop")
     target = e3.number_input("Target (0 = auto)", min_value=0.0, value=0.0, key="desk_target")
     result_key = ("check", market, _today(profile), _limits_key(limits), symbol.strip().upper(), mode,
-                  entry, stop, target)
+                  entry, stop, target, side)
     if st.button("Check this trade", key="desk_check"):
         with st.spinner("Checking..."):
             try:
                 v = session.run_check(profile, symbol, Mode(mode), limits, entry=entry or None,
                                       stop=stop or None, target=target or None, regime=regime_name,
-                                      desk_entry=True)
+                                      desk_entry=True, side=Side(side))
                 cstate = {"ok": v, "at": _now_hhmm(profile)}
             except ValueError as e:
                 cstate = {"error": shown(e) if str(e) else "Invalid input"}
@@ -398,11 +407,56 @@ with tab_pos:
 
 # ---------------------------------------------------------------- Intraday
 
+def _show_edge(edge, *, symbols=None, cached=False) -> None:
+    syms = "" if symbols is None else f" over {symbols} eligible symbol{'' if symbols == 1 else 's'}"
+    when = "cached for today" if cached else "computed now, cached for today"
+    line = f"Short edge{syms}: {edge_line(edge)} ({when})."
+    if edge.proven:
+        st.success(line + " Shorts can be a desk TAKE when every other check passes.")
+    else:
+        st.warning(line + " Every short stays at most WAIT (still your call to override).")
+
+
+def _short_edge_panel(profile) -> None:
+    """Today's pooled ORB-short figure (read from the daily cache, no fetch), and a button that computes it."""
+    key = ("shortcheck", profile.code, _today(profile))
+    c1, c2 = st.columns([1, 1])
+    run = c1.button("Check the short edge (pooled history)", key="desk_shortcheck",
+                    help="Replays the desk's ORB short on every HOSTILE day of the F&O universe's 15-minute bars at "
+                         "2× slippage. Fetches bars once; the figure is cached for the day.")
+    redo = c2.button("Recompute", key="desk_shortcheck_refresh")
+    if run or redo:
+        bar = st.progress(0.0, text="Loading 15-minute bars...")
+
+        def _progress(done, total, sym):
+            bar.progress(min(1.0, (done - 1) / max(total, 1)), text=f"Replaying {sym} ({done} of {total})...")
+        try:
+            res = session.run_shortcheck(profile, refresh=bool(redo), on_progress=_progress)
+            st.session_state[key] = {"ok": res}
+        except Exception as e:  # noqa: BLE001 - never a blank tab; the gate stays closed
+            st.session_state[key] = {"error": f"Short edge check failed: {shown(e)}"}
+        bar.empty()
+    state = st.session_state.get(key)
+    if state is not None and "error" in state:
+        st.error(state["error"])
+    elif state is not None:
+        res = state["ok"]
+        _show_edge(res.edge, symbols=res.symbols, cached=res.cached)
+    else:
+        edge, why = session.short_edge_today(profile)
+        if edge is None:
+            st.info(f"Short edge not computed today ({shown(why)}) — every short stays at most WAIT until it is.")
+        else:
+            _show_edge(edge, cached=True)
+
+
 with tab_intra:
     if session.shorts_today(profile, regime_name):
         st.caption("HOSTILE NSE day: the scan also checks each symbol as an opening-range breakdown SHORT (MIS, F&O "
                    "stocks only, squared off by 15:10 IST). Shorts stay at most WAIT until the desk has proven the "
                    "edge on its own history.")
+    if market == "NSE":
+        _short_edge_panel(profile)
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni, key=f"desk_intra_syms_{market}")
     scan_key = SCAN_KEY

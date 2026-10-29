@@ -170,4 +170,101 @@ def test_h5a_fix_stale_short_headline_keeps_short(monkeypatch, tmp_path):
 def test_h5a_fix_short_odds_caption(monkeypatch, tmp_path):
     v = _short(monkeypatch, tmp_path)
     at, _ = _tab(monkeypatch, tmp_path, [v])
-    assert "Odds unavailable — short odds model arrives in the next update" in _texts(at.tabs[4].info)
+    assert "Odds unavailable — not enough history for a reliable estimate." in _texts(at.tabs[4].info)
+    assert "next update" not in _texts(at.tabs[4].info)
+
+
+# ---- H5b: short odds on the card, the short-edge button, and Long/Short on Check a Trade ----
+def test_h5b_short_with_odds_shows_its_numbers(monkeypatch, tmp_path):
+    base = _short(monkeypatch, tmp_path)
+    v = replace(base, odds=_base(monkeypatch, tmp_path).odds)  # the long fixture's odds stand in for the short's
+    at, _ = _tab(monkeypatch, tmp_path, [v])
+    assert list(at.tabs[4].dataframe[0].value["MC R"]) == [f"{v.odds.mc_expectancy_r:+.2f}R"]
+    labels = [m.label for m in at.tabs[4].metric]
+    assert "MC expectancy" in labels and "P(target)" in labels
+
+
+def _edge_page(monkeypatch, tmp_path, *, cached=None, result=None, error=None):
+    from nse_backtest.desk import session
+    from tests.test_desk_page_smoke import _patch_ok
+    _patch_ok(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(session, "short_edge_today", lambda p, now=None: (cached, "" if cached else
+                                                                            "not computed today: run shortcheck"))
+
+    def run(profile, *, refresh=False, on_warning=None, on_progress=None, now=None):
+        calls.append(refresh)
+        if on_progress:
+            on_progress(1, 2, "AAA")
+        if error:
+            raise ValueError(error)
+        return result
+    monkeypatch.setattr(session, "run_shortcheck", run)
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    assert not at.exception
+    return at, calls
+
+
+def test_h5b_intraday_tab_shows_todays_short_edge_and_computes_it_on_the_button(monkeypatch, tmp_path):
+    from datetime import date
+    from nse_backtest.desk.models import ShortEdge
+    from nse_backtest.desk.session import ShortcheckResult
+    res = ShortcheckResult(ShortEdge.from_trades(143, 0.0512), date(2026, 10, 30), 38, False)
+    at, calls = _edge_page(monkeypatch, tmp_path, result=res)
+    assert "Short edge not computed today" in _texts(at.tabs[4].info)
+    assert calls == []  # nothing is fetched until the button
+    at.button(key="desk_shortcheck").click().run()
+    assert not at.exception and calls == [False]
+    text = _texts(at.tabs[4].warning)
+    assert "143 trades, +0.05R at 2× slippage, HOSTILE days: not proven" in text
+    assert "Every short stays at most WAIT" in text and "38 eligible symbols" in text
+
+
+def test_h5b_intraday_tab_proven_edge_and_recompute(monkeypatch, tmp_path):
+    from datetime import date
+    from nse_backtest.desk.models import ShortEdge
+    from nse_backtest.desk.session import ShortcheckResult
+    e = ShortEdge.from_trades(240, 0.12)
+    at, calls = _edge_page(monkeypatch, tmp_path, cached=e, result=ShortcheckResult(e, date(2026, 10, 30), 40, False))
+    assert "240 trades, +0.12R at 2× slippage, HOSTILE days: proven" in _texts(at.tabs[4].success)
+    at.button(key="desk_shortcheck_refresh").click().run()
+    assert not at.exception and calls == [True]
+
+
+def test_h5b_intraday_tab_short_edge_failure_is_shown(monkeypatch, tmp_path):
+    at, _ = _edge_page(monkeypatch, tmp_path, error="could not verify F&O eligibility: needs the list")
+    at.button(key="desk_shortcheck").click().run()
+    assert not at.exception
+    assert "Short edge check failed: could not verify F&O eligibility" in _texts(at.tabs[4].error)
+
+
+def test_h5b_check_a_trade_offers_long_or_short_on_nse(monkeypatch, tmp_path):
+    from nse_backtest.desk import loaders, session
+    from nse_backtest.desk.models import Mode, Side
+    v = _short(monkeypatch, tmp_path)
+    asked = []
+    monkeypatch.setattr(session, "run_check", lambda p, sym, mode, limits, **k: asked.append((mode, k)) or v)
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: pd.DataFrame(  # the card's chart: no fetch
+        columns=["Open", "High", "Low", "Close", "Volume"], index=pd.DatetimeIndex([])))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    assert at.radio(key="desk_side").options == ["long", "short"]
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.radio(key="desk_side").set_value("short")
+    at.button(key="desk_check").click().run()
+    assert not at.exception
+    mode, kw = asked[-1]
+    assert mode is Mode.INTRADAY and kw["side"] is Side.SHORT  # a short is intraday whatever the Mode radio says
+    assert "WAIT ABC SHORT" in _texts(at.tabs[2].markdown)
+    assert list(at.tabs[2].dataframe[0].value["Mode"]) == ["intraday SHORT"]
+    assert "Shorts are intraday (MIS)" in _texts(at.tabs[2].caption)
+    at.radio(key="desk_side").set_value("long")
+    at.button(key="desk_check").click().run()
+    assert asked[-1][0] is Mode.SWING and asked[-1][1]["side"] is Side.LONG
+
+
+def test_h5b_check_a_trade_has_no_short_on_us(monkeypatch, tmp_path):
+    _base(monkeypatch, tmp_path)
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    at.radio(key="desk_market").set_value("US").run()
+    assert not at.exception
+    assert not [r for r in at.radio if r.key == "desk_side"]
