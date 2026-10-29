@@ -168,6 +168,9 @@ def sat_out_refusal(v: DeskVerdict, profile: MarketProfile) -> str | None:
     blocks = {g: [c.name for c in cs if c.status is Status.BLOCK] for g, cs in block_groups(v).items()}
     if blocks.pop("market") != ["regime"] or any(blocks.values()):
         return "the market regime is not the only BLOCK"
+    regime = v.regime.strip().upper() if isinstance(v.regime, str) else ""
+    if regime not in _KNOWN_REGIMES:  # missing regime data blocks fail-closed: that is not the desk choosing cash
+        return "the regime is unknown (missing data), not a known regime the desk sat out"
     try:
         now = datetime.fromisoformat(v.created_at)
     except (TypeError, ValueError):

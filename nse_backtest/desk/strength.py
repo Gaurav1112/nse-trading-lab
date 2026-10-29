@@ -41,26 +41,54 @@ def index_problem(index_df) -> str | None:
     return None
 
 
-def holding_up(frames: dict[str, pd.DataFrame], index_df, *, n: int = TOP_N) -> list[tuple[str, float]]:
-    """[(symbol, relative strength)] best first, at most ``n``: relative strength is the symbol's 60-day % return
-    minus the index's, over the same bars (a symbol whose last bar is not the index's is left out). Only symbols
-    whose last close is above their own 50-EMA qualify. Fails closed: an unusable index gives []; a symbol with
-    missing or bad data is left out. Ties break on the symbol, so the list is deterministic."""
-    if index_problem(index_df) is not None:
-        return []
+MISMATCH = "index and stock data end on different days (index {index}, stocks {stocks}) — holding-up list unavailable"
+EMPTY = "No stock is beating the index while above its 50-EMA today"
+NOT_A_TRADE = "ready for when the regime turns — not a trade"
+
+
+def _day(ts) -> str:
+    try:
+        return pd.Timestamp(ts).date().isoformat()
+    except Exception:  # noqa: BLE001
+        return str(ts)
+
+
+def holding_up_report(frames: dict[str, pd.DataFrame], index_df, *, n: int = TOP_N
+                      ) -> tuple[list[tuple[str, float]], str | None]:
+    """(list, reason). The list: [(symbol, relative strength)] best first, at most ``n``, where relative strength is
+    the symbol's 60-day % return minus the index's over the same bars. Only symbols that BEAT the index (> 0) while
+    closing above their own 50-EMA qualify; ties break on the symbol. Fails closed with a reason: an unusable index,
+    or any stock whose last bar is not the index's (a mixed-date ranking is not comparable; an empty list must never
+    read as a market fact). A symbol with missing or bad data is left out."""
+    why = index_problem(index_df)
+    if why is not None:
+        return [], why
     idx_close = _closes(index_df)
     idx_ret = _ret(idx_close)
     idx_last = idx_close.index[-1]
     out: list[tuple[str, float]] = []
+    off_days: set[str] = set()
     for sym, df in frames.items():
         close = _closes(df)
-        if close is None or len(close) < LOOKBACK + 1 or close.index[-1] != idx_last:
+        if close is None or len(close) < LOOKBACK + 1:
+            continue
+        if close.index[-1] != idx_last:
+            off_days.add(_day(close.index[-1]))
             continue
         r = _ret(close)
         ema = float(close.ewm(span=EMA_SPAN, adjust=False).mean().iloc[-1])
         last = float(close.iloc[-1])
         if r is None or not math.isfinite(ema) or not last > ema:
             continue
-        out.append((str(sym), r - idx_ret))
+        rs = r - idx_ret
+        if rs > 0:
+            out.append((str(sym), rs))
+    if off_days:
+        return [], MISMATCH.format(index=_day(idx_last), stocks=", ".join(sorted(off_days)))
     out.sort(key=lambda t: (-t[1], t[0]))
-    return out[:max(int(n), 0)]
+    return out[:max(int(n), 0)], None
+
+
+def holding_up(frames: dict[str, pd.DataFrame], index_df, *, n: int = TOP_N) -> list[tuple[str, float]]:
+    """holding_up_report's list alone ([] whenever it has a reason)."""
+    return holding_up_report(frames, index_df, n=n)[0]

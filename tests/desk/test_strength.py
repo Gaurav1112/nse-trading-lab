@@ -26,6 +26,8 @@ def _ret60(df):
 def test_ranks_by_60_day_return_minus_the_index_and_excludes_symbols_below_their_50_ema():
     index = _trend(1.001)
     fr = {"SLOW": _trend(1.002), "FAST": _trend(1.006), "MID": _trend(1.004),
+          "LAG": _trend(1.0005),  # above its own 50-EMA but behind the index: not holding up
+          "EVEN": _trend(1.001),  # exactly the index's return: not beating it
           # rallied over 60 days but has just fallen below its own 50-EMA: excluded
           "BROKE": _frame(list(100 * 1.008 ** np.arange(115)) + [100 * 1.008 ** 114 * 0.75] * 5)}
     assert fr["BROKE"]["Close"].iloc[-1] < fr["BROKE"]["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
@@ -52,6 +54,13 @@ def test_takes_at_most_n_and_defaults_to_ten():
     assert [s for s, _ in strength.holding_up(fr, index, n=3)] == ["S14", "S13", "S12"]
 
 
+def test_only_stocks_beating_the_index_are_listed():
+    index = _trend(1.003)
+    fr = {"BEHIND": _trend(1.002), "AHEAD": _trend(1.004)}
+    assert [s for s, _ in strength.holding_up(fr, index)] == ["AHEAD"]
+    assert strength.holding_up({"BEHIND": _trend(1.002)}, index) == []
+
+
 def test_ties_break_on_symbol_so_the_list_is_deterministic():
     index = _trend(1.0)
     fr = {"B": _trend(1.002), "A": _trend(1.002)}
@@ -68,6 +77,7 @@ def test_fails_closed_when_the_index_is_missing_or_unusable(index):
         df.iloc[-61, df.columns.get_loc("Close")] = math.nan
     assert strength.holding_up(fr, df) == []
     assert strength.index_problem(df)  # a reason the page shows
+    assert strength.holding_up_report(fr, df) == ([], strength.index_problem(df))
 
 
 def test_index_problem_is_none_for_a_usable_index():
@@ -79,6 +89,18 @@ def test_symbols_with_too_little_bad_or_stale_data_are_left_out_never_raise():
     bad = _trend(1.004)
     bad.iloc[-1, bad.columns.get_loc("Close")] = math.nan
     fr = {"OK": _trend(1.004), "SHORT": _trend(1.004, n=30), "NONE": None, "NAN": bad,
-          "STALE": _trend(1.006, end="2026-10-20"),  # its last bar is not the index's: not comparable
           "NOCOL": _trend(1.004).drop(columns=["Close"])}
     assert [s for s, _ in strength.holding_up(fr, index)] == ["OK"]
+    assert strength.holding_up_report(fr, index) == ([("OK", strength.holding_up(fr, index)[0][1])], None)
+
+
+def test_a_date_mismatch_is_a_reason_never_a_quiet_empty_list():
+    index = _trend(1.001, n=121, end="2026-10-29")  # the index is one bar ahead
+    fr = {"A": _trend(1.004), "B": _trend(1.005)}
+    held, why = strength.holding_up_report(fr, index)
+    assert held == [] and why == ("index and stock data end on different days (index 2026-10-29, stocks 2026-10-28)"
+                                  " — holding-up list unavailable")
+    assert strength.holding_up(fr, index) == []
+    one_stale = {"A": _trend(1.004), "OLD": _trend(1.006, end="2026-10-20")}
+    held, why = strength.holding_up_report(one_stale, _trend(1.001))
+    assert held == [] and "stocks 2026-10-20" in why  # fail closed: a mixed-date ranking is not comparable

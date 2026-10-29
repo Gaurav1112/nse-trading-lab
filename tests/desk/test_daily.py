@@ -192,11 +192,27 @@ def test_sat_out_failure_never_stops_the_plan(tmp_path, monkeypatch):
 def test_plan_carries_the_holding_up_list():
     dp = _plan(regime="HOSTILE")
     syms = [s for s, _ in dp.holding_up]
-    # ranked by 60-day return minus the index's (which steps 1.004 like A)
-    assert syms == ["D", "A", "C", "B", "F"]  # FAR closed 20% under its high: below its own 50-EMA
+    # only stocks beating the index (steps 1.004): D. A ties it (0), B/C/F lag it, FAR is below its 50-EMA
+    assert syms == ["D"] and dp.holding_up[0][1] > 0
     assert dp.holding_up_note is None
 
 
 def test_plan_holding_up_fails_closed_without_the_index():
     dp = daily_plan(NSE, _frames(), None, Limits(capital=100_000), ctx(), replays=300, regime="HOSTILE")
     assert dp.holding_up == () and dp.holding_up_note and "index" in dp.holding_up_note
+
+
+def test_no_sat_out_when_the_regime_is_unknown(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    dp = _plan(audit_path=path, regime=None)
+    assert any(c.name == "regime" for v in dp.watch for c in v.blocks())  # blocked fail-closed on missing data
+    assert _sat_outs(path) == []
+
+
+def test_plan_holding_up_says_so_when_the_index_and_stocks_end_on_different_days():
+    import pandas as pd
+    idx = series(step=1.004, n=401, end="2026-10-29")  # one bar ahead of every stock
+    dp = daily_plan(NSE, _frames(), idx, Limits(capital=100_000), ctx(), replays=300, regime="HOSTILE")
+    assert dp.holding_up == ()
+    assert dp.holding_up_note == ("index and stock data end on different days (index 2026-10-29, stocks 2026-10-28)"
+                                  " — holding-up list unavailable")

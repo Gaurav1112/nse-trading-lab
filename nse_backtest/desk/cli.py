@@ -12,7 +12,7 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
-from . import audit, loaders, session
+from . import audit, loaders, session, strength
 from . import calendars as cal
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, Side, summary_fields
@@ -240,7 +240,7 @@ def cmd_plan(a, profile) -> int:
     if a.json:
         if failed:
             print(failed, file=sys.stderr)
-        _emit_json(plan)
+        print(json.dumps(_plan_json(plan), indent=2))
         return 1 if failed else 0
     lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
@@ -275,7 +275,17 @@ def _holding_up_lines(plan, profile) -> list[str]:
     note = getattr(plan, "holding_up_note", None)
     if note:
         return lines + [f"  {note}"]
-    return lines + ([f"  {s:<12} {rs:+.1f} pts" for s, rs in held] or ["  none above their 50-EMA today"])
+    return lines + ([f"  {s:<12} {rs:+.1f} pts" for s, rs in held] or [f"  {strength.EMPTY}"])
+
+
+def _plan_json(plan) -> dict:
+    """The plan as JSON, with holding_up labelled as a watchlist (never a trade) and its reason beside it."""
+    d = to_jsonable(plan)
+    d.pop("holding_up_note", None)
+    d["holding_up"] = {"note": strength.NOT_A_TRADE,
+                       "stocks": [{"symbol": s, "vs_index_pts": rs} for s, rs in getattr(plan, "holding_up", ())],
+                       "unavailable": getattr(plan, "holding_up_note", None)}
+    return d
 
 
 def _plan_failed(plan) -> str | None:

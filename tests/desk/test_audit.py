@@ -128,8 +128,8 @@ from nse_backtest.desk.models import Check, Mode, Status  # noqa: E402
 REGIME = Check("regime", Status.BLOCK, "regime HOSTILE")
 
 
-def _sat(checks=(REGIME,), price=100.0, plan=None):
-    return replace(decide(plan or P, S, None, checks, NSE, price, VNOW), cost_per_share=0.37)
+def _sat(checks=(REGIME,), price=100.0, plan=None, regime="HOSTILE"):
+    return replace(decide(plan or P, S, None, checks, NSE, price, VNOW), cost_per_share=0.37, regime=regime)
 
 
 def test_append_sat_out_is_the_verdict_row_with_action_sat_out(tmp_path):
@@ -179,3 +179,11 @@ def test_append_sat_out_refuses_intraday_and_quick_verdicts(tmp_path):
 def test_append_sat_out_defaults_to_the_data_dir_audit(tmp_path, monkeypatch):
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     assert audit.append_sat_out(_sat()) == tmp_path / "desk_audit.jsonl"
+
+
+@pytest.mark.parametrize("regime", [None, "", "UNKNOWN", "sideways"])
+def test_append_sat_out_refuses_a_block_from_an_unknown_regime(tmp_path, regime):
+    """Missing regime data blocks swing fail-closed; that is not the desk choosing cash in a known regime."""
+    with pytest.raises(ValueError, match="unknown"):
+        audit.append_sat_out(_sat(regime=regime), tmp_path / "a.jsonl")
+    assert not (tmp_path / "a.jsonl").exists()

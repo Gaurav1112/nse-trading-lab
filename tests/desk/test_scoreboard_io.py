@@ -331,8 +331,8 @@ def test_market_filter_and_stats_never_combine(paths):
 
 # ---------------------------------------------------------------- CLI
 
-DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed exactly "
-              "— not your real P&L.")
+DISCLAIMER = ("Paper record of the desk's TAKEs, your overrides and the TAKEs it sat out because of the market "
+              "regime, as if each ticket were followed exactly — not your real P&L.")
 
 
 def _cli_env(tmp_path, monkeypatch, rows):

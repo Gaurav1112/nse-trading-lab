@@ -32,8 +32,8 @@ from .scoreboard import (
 
 Warn = Callable[[str], None] | None
 
-SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed "
-                         "exactly — not your real P&L.")
+SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs, your overrides and the TAKEs it sat out because of the "
+                         "market regime, as if each ticket were followed exactly — not your real P&L.")
 SCOREBOARD_COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
                        "your overrides are scored as a separate record, and so are the plan's TAKEs the desk sat out "
                        "only because of the market regime (what sitting out saved or cost).")

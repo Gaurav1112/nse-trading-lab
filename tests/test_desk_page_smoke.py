@@ -1075,4 +1075,4 @@ def test_h6_choose_tab_holding_up_shows_why_it_is_empty(monkeypatch, tmp_path):
 def test_h6_choose_tab_holding_up_empty_without_a_reason(monkeypatch, tmp_path):
     at = _holding_up_page(monkeypatch, tmp_path)
     assert any(e.value == HOLDING_UP_TITLE for e in at.tabs[0].subheader)
-    assert "No stock is holding up" in _texts(at.tabs[0].caption)
+    assert "No stock is beating the index while above its 50-EMA today" in _texts(at.tabs[0].caption)

@@ -645,3 +645,26 @@ def test_r1_load_daily_adjusted_passthrough(monkeypatch):
     monkeypatch.setattr(data, "fetch_nse", lambda *a, adjusted=True, **k: seen.append(adjusted) or _daily_to("2026-10-29"))
     loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz), adjusted=False)
     assert seen == [False, False]  # the after-close uncached refetch stays unadjusted
+
+
+def test_h6_cli_plan_json_labels_holding_up_as_not_a_trade(offline_desk, capsys, monkeypatch):
+    import json as _json
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 2, raising=False)
+    assert cli.main(["plan", "--market", "US", "--json"]) in (0, 1)
+    d = _json.loads(capsys.readouterr().out)
+    hu = d["holding_up"]
+    assert hu["note"] == "ready for when the regime turns — not a trade"
+    assert isinstance(hu["stocks"], list) and "unavailable" in hu
+    assert all(set(x) == {"symbol", "vs_index_pts"} for x in hu["stocks"])
+
+
+def test_h6_cli_holding_up_lines_show_the_reason_or_the_empty_text():
+    from nse_backtest.desk.daily import DailyPlan
+    why = "index and stock data end on different days (index 2026-10-29, stocks 2026-10-28) — holding-up list unavailable"
+    lines = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up_note=why), US)
+    assert lines[0].startswith("HOLDING UP — ready for when the regime turns (not a trade")
+    assert lines[1] == f"  {why}"
+    empty = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), ()), US)
+    assert empty[1] == "  No stock is beating the index while above its 50-EMA today"
+    held = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up=(("AAA", 3.25),)), US)
+    assert held[1].split() == ["AAA", "+3.2", "pts"]

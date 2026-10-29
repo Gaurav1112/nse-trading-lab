@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from components import desk_card, theme
-from nse_backtest.desk import loaders, session
+from nse_backtest.desk import loaders, session, strength
 from nse_backtest.desk.charts import projected_vs_real_chart
 from nse_backtest.desk.projections import projected_vs_real, resolved_without_r
 from nse_backtest.desk.scoreboard import RECORD_LABELS
@@ -744,14 +744,15 @@ def _render_holding_up(plan_now) -> None:
     """Stocks above their own 50-EMA with the best 60-day return vs the index: a watchlist, never a trade (no action,
     no money, nothing to choose)."""
     st.subheader(HOLDING_UP_TITLE)
-    st.caption(f"Above their own 50-EMA, ranked by 60-day return minus the {profile.regime_index}'s (up to 10). "
+    st.caption(f"Above their own 50-EMA and beating the {profile.regime_index} over 60 days, ranked by how much "
+               "(up to 10). "
                "Ready for when the regime turns — not a trade: nothing here is checked, sized or logged.")
     held = tuple(getattr(plan_now, "holding_up", ()) or ())
     note = getattr(plan_now, "holding_up_note", None)
     if note:
         st.warning(shown(note))
     elif not held:
-        st.caption("No stock is holding up above its 50-EMA today.")
+        st.caption(strength.EMPTY)
     if held:
         st.dataframe(pd.DataFrame([{"Symbol": s, "vs index (60d)": f"{rs:+.1f} pts"} for s, rs in held]),
                      hide_index=True, width="stretch")

@@ -265,15 +265,18 @@ def _sat_out_sessions(path: Path) -> set[tuple[str, str, date]] | None:
 def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> None:
     """One SAT_OUT row per symbol per session for every full-checked verdict the regime alone kept out (the rows the
     scoreboard's "Desk sat out (market regime)" record replays). Never stops the plan."""
-    todo = [v for v in verdicts if sat_out_refusal(v, profile) is None]
-    if not todo:
+    if not verdicts:
         return
     from .scoreboard_io import fill_session_of
-    seen = _sat_out_sessions(audit_path)
-    if seen is None:
-        return
-    for v in todo:
+    seen = None
+    for v in verdicts:
         try:
+            if sat_out_refusal(v, profile) is not None:
+                continue
+            if seen is None:  # the log is read once, and only when there is something to log
+                seen = _sat_out_sessions(audit_path)
+                if seen is None:
+                    return
             key = (v.plan.market, v.plan.symbol, fill_session_of(v.plan.market, datetime.fromisoformat(v.created_at)))
             if key in seen:
                 continue
@@ -285,8 +288,8 @@ def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> Non
 
 def _holding_up(frames, regime_df) -> tuple[tuple[tuple[str, float], ...], str | None]:
     try:
-        why = strength.index_problem(regime_df)
-        return (() if why else tuple(strength.holding_up(frames, regime_df))), why
+        held, why = strength.holding_up_report(frames, regime_df)
+        return tuple(held), why
     except Exception as e:  # noqa: BLE001 - a watchlist failure never stops the plan
         return (), f"Holding-up list unavailable: {_err(e)}"
 
