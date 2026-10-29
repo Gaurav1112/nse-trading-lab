@@ -53,15 +53,22 @@ def _check_qty(qty) -> int:
     return qty
 
 
+def _over(x: float, limit: float) -> str:
+    """x (already over ``limit``) to one decimal, or two when one decimal would print it equal to the limit."""
+    return f"{x:.1f}" if f"{x:.1f}" != f"{limit:.1f}" else f"{x:.2f}"
+
+
 def _breaches(limits: Limits, risk_pct: float, deployed_pct: float, max_loss_pct: float) -> tuple[str, ...]:
     out = []
     if risk_pct > limits.risk_per_trade_pct + _EPS:
-        out.append(f"risk per trade {risk_pct:.1f}% of capital (limit {limits.risk_per_trade_pct:.1f}%)")
+        out.append(f"risk per trade {_over(risk_pct, limits.risk_per_trade_pct)}% of capital "
+                   f"(limit {limits.risk_per_trade_pct:.1f}%)")
     if deployed_pct > limits.max_position_pct + _EPS:
-        out.append(f"position {deployed_pct:.1f}% of capital (limit {limits.max_position_pct:.1f}%)")
+        out.append(f"position {_over(deployed_pct, limits.max_position_pct)}% of capital "
+                   f"(limit {limits.max_position_pct:.1f}%)")
     if max_loss_pct > limits.daily_loss_limit_pct + _EPS:
-        out.append(f"max loss {max_loss_pct:.1f}% of capital exceeds the daily loss limit "
-                   f"({limits.daily_loss_limit_pct:.1f}%)")
+        out.append(f"max loss {_over(max_loss_pct, limits.daily_loss_limit_pct)}% of capital exceeds the daily "
+                   f"loss limit ({limits.daily_loss_limit_pct:.1f}%)")
     return tuple(out)
 
 

@@ -211,3 +211,14 @@ def test_cli_money_block_shows_trigger_line_and_daily_loss_note():
     assert "compares this trade alone with the daily loss limit" in text
     swing = "\n".join(format_money(build_card(verdict(), NSE, LIMITS), NSE))
     assert "filled at the trigger" not in swing and "daily loss limit" not in swing
+
+
+def test_a2_breach_text_never_reads_as_equal_to_the_limit():
+    """probe2 at qty+1: 1.035% of capital must not print as "1.0% ... (limit 1.0%)"."""
+    p = _probe_plan(Mode.INTRADAY, 1000.0, 950.0, 1100.0, 1150.0)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    over = build_card(decide(p, s, None, OK, NSE, p.entry, _NOW), NSE, lim, qty=s.qty + 1)
+    (risk,) = [b for b in over.breaches if b.startswith("risk per trade")]
+    assert risk == f"risk per trade {over.max_loss / 1000:.2f}% of capital (limit 1.0%)"
+    assert "1.0% of capital" not in risk
