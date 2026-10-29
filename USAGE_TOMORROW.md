@@ -37,6 +37,10 @@ cd /Users/racit/PersonalProject/nse-trading-lab
    places nothing.
 7. After the close, log every closed trade (with entry and exit dates) in the journal so the daily-loss,
    stop-out streak and PDT checks stay accurate.
+8. Once a week, open the **Scoreboard** tab (or run `python3.13 -m nse_backtest.desk scoreboard`) and
+   read the verdict. It replays the desk's own logged TAKEs, not your real trades. Until it says
+   "Matching the odds" on 30+ resolved trades, keep paper-trading. Do not delete
+   `~/.nse-trading-lab/desk_scoreboard.json`: intraday results older than about 60 days live only there.
 
 ## The order to read the screen
 

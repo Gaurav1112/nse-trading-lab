@@ -59,13 +59,15 @@ for **NSE** (₹, IST) and **US** (US$, ET) stocks. Each market keeps its own se
 money formatting; amounts are never mixed across markets.
 
 Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Today's Plan, Check a Trade,
-My Positions, Intraday), or from the terminal:
+My Positions, Intraday, Scoreboard), or from the terminal:
 
 ```bash
 python3.13 -m nse_backtest.desk check RELIANCE            # one stock, swing
 python3.13 -m nse_backtest.desk check AAPL --market US --mode intraday
 python3.13 -m nse_backtest.desk plan                      # today's TAKE / WATCH lists
 python3.13 -m nse_backtest.desk positions                 # HOLD / TIGHTEN_STOP / EXIT
+python3.13 -m nse_backtest.desk scoreboard                # paper record of logged TAKEs (all markets)
+python3.13 -m nse_backtest.desk scoreboard --market US --json
 ```
 
 - **TAKE**: no check blocks and the current price (live quote, else the last close with a WARN) is
@@ -87,9 +89,9 @@ Missing or failed data is never a PASS: it becomes a WARN or a BLOCK.
 | 5 | `daily_loss` | today's realised loss reached the daily limit, or no limit is set | the journal (or today's P&L) is unreadable |
 | 6 | `ban_list` | NSE: the stock is in the F&O ban list | the ban list could not be verified or is stale |
 | 7 | `monte_carlo` | no odds could be computed, or simulated expectancy is below 0R | expectancy is under +0.10R |
-| 8 | `freshness` | last daily bar older than 3 days, or last 15-min bar older than 30 min | the last bar is in the future |
+| 8 | `freshness` | the last daily bar misses one or more completed trading sessions (3 calendar days in a year with no holiday calendar), or the last 15-min bar is older than 30 min | the last bar is in the future, today's bar is unfinished, or the year has no holiday calendar |
 | 9 | `live_price` | the live price is at or below the stop | no live quote (last close used), or the quote is over 20 min old in session |
-| 10 | `entry_window` | intraday outside the entry window, or a weekend | — |
+| 10 | `entry_window` | intraday outside the entry window, on a weekend or exchange holiday, or on an early-close day | the year has no holiday calendar |
 | 11 | `liquidity` | 20-day median turnover below the market minimum | turnover unknown |
 | 12 | `earnings` | — | earnings inside the swing hold window, today (intraday), or unknown |
 | 13 | `setup_history` | intraday: under 20 past sessions, or under +0.2R, or no history | swing: under 20 samples, or negative expectancy |
@@ -110,6 +112,71 @@ P(target), P(stop) and expectancy in R after costs. A setup history replays ever
 fired on that stock. Robustness tests shuffle the trade order (drawdown, losing streaks) and jitter the
 candles to see whether the edge survives noise.
 
+### The Scoreboard
+
+The Scoreboard checks whether the desk's own TAKEs made money. It reads every TAKE in
+`desk_audit.jsonl` (written by Check a Trade, in the page or the CLI, and by Today's Plan) and replays
+each one against the prices that followed, as if the ticket had been typed in exactly. It is the
+desk's paper record, **not your real P&L**: it knows nothing about the orders you actually placed.
+It is read-only and places nothing.
+
+Open the **Scoreboard** tab and press "Load scoreboard", or run
+`python3.13 -m nse_backtest.desk scoreboard [--market NSE|US|ALL] [--json]` (default ALL).
+
+- One TAKE per stock, mode and session is counted (the first one logged).
+- Fills and exits are conservative. Swing: a one-session LIMIT at the entry, filled if the day's low
+  reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
+  default) and a time exit at the last close. Intraday: 15-minute bars after the verdict, filled when
+  the high reaches the entry, flat by the session's flat-by time. When a bar touches both stop and
+  target, the stop wins.
+- Realised R = (exit − fill − cost per share) ÷ (entry − stop). A win is realised R above 0.
+- Each trade gets a status: `won`, `lost`, `time` (time exit), `not_filled`, `open` (still running;
+  shown marked to the last close, not counted) or `data_unavailable` (bars could not be loaded, have
+  gaps, or are missing). Nothing is dropped silently; malformed audit lines are listed by line number.
+- Per market and mode it shows trades, win %, mean realised R against the mean predicted Monte Carlo
+  and history R, a 95% bootstrap interval of the mean realised R, max drawdown in R and a cumulative
+  R chart.
+
+The verdict, per market and mode, is the first of these that applies:
+
+| Verdict | When |
+|---|---|
+| Not enough trades yet (n/30) | fewer than 30 resolved trades (won, lost or time) |
+| Losing — do not trade this with real money | the whole 95% interval is below 0R |
+| Inconclusive (odds missing) | under 80% of the resolved trades carry a Monte Carlo prediction |
+| Worse than the desk's odds — do not size up | the whole interval is below the mean predicted R |
+| Matching the odds — real money at small size (≤0.5% risk) | the interval is above 0R and the mean realised R is within 0.15R of the prediction |
+| Inconclusive — keep paper-trading | anything else |
+
+Example (fictional): `NSE swing: Not enough trades yet (12/30) — keep paper-trading`.
+
+Final results (won, lost, time, not_filled) are cached in `desk_scoreboard.json` in the data directory
+(`~/.nse-trading-lab/`, or `NSE_LAB_DATA_DIR`), so they are not fetched again; open and unavailable
+trades are recomputed each time. yfinance only serves 15-minute bars for about the last 60 days, so an
+intraday TAKE older than that can only be shown from the cache. **Deleting `desk_scoreboard.json` loses
+those intraday results for good** (they come back as `data_unavailable`). A corrupt cache, or one from
+another scoreboard version, is renamed to a backup file, not overwritten.
+
+### Holiday calendars
+
+`nse_backtest/desk/calendars.py` holds exchange holidays and early closes:
+
+- NSE: 2026. NSE 2027 is not published yet.
+- US (NYSE): 2026 and 2027, including the 1:00 pm ET early closes.
+
+The desk uses them for daily-data freshness (counted in trading sessions, so a long weekend is not
+stale), regime staleness, the intraday entry window (BLOCK on a holiday: "Market closed today: ...";
+BLOCK on an early-close day: no new intraday entries), the live-quote "market closed today" note,
+partial-bar handling, and the Scoreboard's fill sessions. In a year without a calendar the desk assumes
+every weekday trades, falls back to a 3-calendar-day freshness rule, and WARNs "holiday calendar not
+available for {year}". NSE Muhurat trading is not supported: that Sunday is treated as a weekend and a
+Muhurat bar from yfinance is dropped.
+
+**Yearly maintenance:** when NSE publishes the next year's trading holiday circular, add the dates to `HOLIDAYS["NSE"]`, add the year to `COVERED_YEARS["NSE"]`, and record the
+circular's URL in the module docstring next to the existing sources. Do the same for NYSE from
+nyse.com/markets/hours-calendars (holidays and `EARLY_CLOSES`). Use the trading-holiday table, not the
+clearing-holiday table.
+
 ### What the desk never does
 
 - **Nothing is ever placed.** There is no order API anywhere in this repo; you type every order yourself.
@@ -123,6 +190,15 @@ can lose more)`: the loss at the stop includes costs, and a gap through the stop
 
 > **Disclaimer:** the Trade Desk is a paper-trading and education tool, not financial advice. Its odds
 > are a reality check, not a forecast. Paper-trade until your record matches the odds.
+
+### Tests
+
+The full suite is the gate, pipeline tests included (the Fyers SDK is imported only when a Fyers
+client is created, so it is not needed to run them):
+
+```bash
+python3.13 -m pytest -o addopts=""
+```
 
 ## Project Structure
 
