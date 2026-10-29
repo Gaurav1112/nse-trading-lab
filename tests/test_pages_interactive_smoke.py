@@ -13,9 +13,13 @@ from __future__ import annotations
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[1]  # AppTest paths: absolute, independent of cwd
+
 
 def _run_with_timeout(path: str, timeout: float = 60.0) -> AppTest:
-    at = AppTest.from_file(path, default_timeout=timeout)
+    at = AppTest.from_file(str(_REPO / path), default_timeout=timeout)
     at.run()
     return at
 

@@ -4,6 +4,16 @@ from streamlit.testing.v1 import AppTest
 
 from tests.desk.test_loaders_many import via_load_daily
 
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[1]  # AppTest paths: absolute, independent of cwd
+
+
+def _session_keys(at) -> list[str]:
+    """Session-state keys across Streamlit versions (1.66 AppTest has keys(); older ones only filtered_state)."""
+    ss = at.session_state
+    return list(ss.keys()) if hasattr(ss, "keys") else list(ss.filtered_state)
+
 
 @pytest.fixture(autouse=True)
 def _no_live_quote(monkeypatch):
@@ -27,7 +37,7 @@ def test_desk_page_renders_and_checks_a_trade(monkeypatch, tmp_path):
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
                         lambda d, t, fetcher=None: loaders.nse_lists.BanList(frozenset(), "ok", None, ""))
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert not at.exception
     assert [t.label for t in at.tabs] == ["Today's Plan", "Check a Trade", "My Positions", "Intraday", "Scoreboard"]
     at.text_input(key="desk_symbol").set_value("ABC")
@@ -48,7 +58,7 @@ def test_desk_page_survives_loader_failures(monkeypatch, tmp_path):
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, False))
     monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
                         lambda d, t, fetcher=None: loaders.nse_lists.BanList(frozenset(), "ok", None, ""))
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert not at.exception
     assert any("HOSTILE" in w.value for w in at.warning)
     at.text_input(key="desk_symbol").set_value("ABC")
@@ -77,7 +87,7 @@ def test_positions_error_persists_across_reruns(monkeypatch, tmp_path):
     def bad():
         raise loaders.UserDataError("positions.json is corrupt")
     monkeypatch.setattr(loaders, "load_positions", bad)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert any("positions.json is corrupt" in e.value for e in at.error)
     at.run()
     assert any("positions.json is corrupt" in e.value for e in at.error)
@@ -94,7 +104,7 @@ def test_regime_failure_is_retried_not_cached(monkeypatch, tmp_path):
             raise RuntimeError("blip")
         return series()
     monkeypatch.setattr(loaders, "load_regime", flaky)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert any("HOSTILE" in w.value for w in at.warning)
     at.run()
     assert not any("HOSTILE" in w.value for w in at.warning)
@@ -116,7 +126,7 @@ def _summary_md(monkeypatch, tmp_path, checks):
     from nse_backtest.desk import session
     v = _verdict_with(checks)
     monkeypatch.setattr(session, "run_check", lambda *a, **k: v)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert not at.exception
@@ -146,7 +156,7 @@ def test_watch_distance_guards_bad_price(monkeypatch, tmp_path):
     v = replace(_verdict_with([]), current_price=0.0, trigger=100.0)
     plan = DailyPlan("NSE", None, "", (), (), (v,), (), ())
     monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_build_plan").click().run()
     assert not at.exception
     assert any(df.value["Distance %"].isna().all() for df in at.dataframe
@@ -155,7 +165,7 @@ def test_watch_distance_guards_bad_price(monkeypatch, tmp_path):
 
 def test_check_result_not_shown_for_edited_inputs(monkeypatch, tmp_path):
     _patch_ok(monkeypatch, tmp_path)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert any("Plan" == m.value.strip("*") for m in at.markdown)
@@ -173,9 +183,9 @@ def test_intraday_scan_cache_key_has_date(monkeypatch, tmp_path):
     from nse_backtest.desk import session
     _patch_ok(monkeypatch, tmp_path)
     monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], []))
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_scan").click().run()
-    keys = [k for k in at.session_state.filtered_state if k.startswith("('intraday', 'NSE', '" + _market_today())]
+    keys = [k for k in _session_keys(at) if k.startswith("('intraday', 'NSE', '" + _market_today())]
     assert len(keys) == 1 and len(eval(keys[0])) == 4  # noqa  # market-tz date and the limits hash
 
 
@@ -206,7 +216,7 @@ def test_intraday_error_persists_across_rerun(monkeypatch, tmp_path):
     def bad(*a, **k):
         raise RuntimeError("feed down")
     monkeypatch.setattr(session, "run_intraday", bad)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_scan").click().run()
     assert "feed down" in _errors(at)
     at.run()
@@ -226,7 +236,7 @@ def test_intraday_failure_replaces_old_success(monkeypatch, tmp_path):
             return ([v], [])
         raise RuntimeError("second scan broke")
     monkeypatch.setattr(session, "run_intraday", scan)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_scan").click().run()
     assert any("Symbol" in df.value.columns and "MC R" in df.value.columns for df in at.dataframe)
     assert any("Built at" in c.value for c in at.caption)
@@ -250,7 +260,7 @@ def test_plan_error_persists_and_replaces_success(monkeypatch, tmp_path):
             return good
         raise RuntimeError("universe scan broke")
     monkeypatch.setattr(session, "run_daily_plan", build)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_build_plan").click().run()
     assert any("Nothing qualifies" in i.value for i in at.info)
     assert any("Built at" in c.value for c in at.caption)
@@ -273,7 +283,7 @@ def test_check_error_persists_and_replaces_success(monkeypatch, tmp_path):
             return real(*a, **k)
         raise ValueError("symbol XYZ not found")
     monkeypatch.setattr(session, "run_check", chk)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert any("Plan" == m.value.strip("*") for m in at.markdown)
@@ -299,7 +309,7 @@ def test_watch_distance_is_numeric(monkeypatch, tmp_path):
     _patch_ok(monkeypatch, tmp_path)
     v = replace(_verdict_with([]), current_price=100.0, trigger=105.0)
     monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: _plan_with([v]))
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_build_plan").click().run()
     frames = [df.value for df in at.dataframe if "Distance %" in df.value.columns]
     assert frames and pd.api.types.is_numeric_dtype(frames[0]["Distance %"])
@@ -316,7 +326,7 @@ def test_positions_refresh_recovers_from_error(monkeypatch, tmp_path):
             raise loaders.UserDataError("positions.json is corrupt")
         return []
     monkeypatch.setattr(loaders, "load_positions", flaky)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert "positions.json is corrupt" in _errors(at)
     at.button(key="desk_refresh_pos").click().run()
     assert "positions.json is corrupt" not in _errors(at)
@@ -335,7 +345,7 @@ def test_a6_stale_regime_warns_and_is_not_cached(monkeypatch, tmp_path):
         calls["n"] += 1
         return stale if calls["n"] == 1 else series()
     monkeypatch.setattr(loaders, "load_regime", regime)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     assert any("HOSTILE" in w.value and "stale" in w.value for w in at.warning)
     at.run()
     assert calls["n"] == 2 and not any("HOSTILE" in w.value for w in at.warning)
@@ -350,7 +360,7 @@ def test_a7_plan_uses_header_regime_and_tape(monkeypatch, tmp_path):
         seen.update(k)
         return _plan_with()
     monkeypatch.setattr(session, "run_daily_plan", build)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.button(key="desk_build_plan").click().run()
     assert seen.get("regime") == "TRENDING" and seen.get("tape") is not None
     assert seen["tape"].regime == "TRENDING"
@@ -361,11 +371,11 @@ def test_a7_plan_uses_header_regime_and_tape(monkeypatch, tmp_path):
 def test_a11_check_cache_key_has_market_date_and_limits(monkeypatch, tmp_path):
     loaders = _patch_ok(monkeypatch, tmp_path)
     from nse_backtest.desk.models import Limits
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     assert any("Plan" == m.value.strip("*") for m in at.markdown)
-    keys = [k for k in at.session_state.filtered_state if k.startswith("('check'")]
+    keys = [k for k in _session_keys(at) if k.startswith("('check'")]
     assert keys and all(_market_today() in k for k in keys)
     cap = next(c.value for c in at.caption if "Checked at" in c.value)
     assert _market_today() in cap
@@ -379,7 +389,7 @@ def test_a11_check_cache_key_has_market_date_and_limits(monkeypatch, tmp_path):
 
 def test_c1_page_noise_label(monkeypatch, tmp_path):
     _patch_ok(monkeypatch, tmp_path)
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     at.text_input(key="desk_symbol").set_value("ABC")
     at.button(key="desk_check").click().run()
     labels = [m.label for m in at.metric]
@@ -403,7 +413,7 @@ def test_c4_plan_tab_counts_positions_needing_action(monkeypatch, tmp_path):
     from nse_backtest import position_monitor  # its scorer would call yfinance for earnings
     monkeypatch.setattr(position_monitor, "daily_check", lambda p, df: SimpleNamespace(
         action="HOLD", current_price=float(df["Close"].iloc[-1]), suggested_sl=None, pnl_pct=1.0, reason="ok"))
-    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     first = " ".join(m.value for m in at.markdown) + " ".join(i.value for i in at.info)
     assert "Open My Positions to review" in first  # positions are loaded after the plan tab on the first run
     at.run()

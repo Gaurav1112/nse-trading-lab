@@ -9,9 +9,13 @@ import pytest
 pytest.importorskip("streamlit.testing.v1")
 from streamlit.testing.v1 import AppTest
 
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[1]  # AppTest paths: absolute, independent of cwd
+
 
 def test_ui_loads_without_exceptions():
-    at = AppTest.from_file("ui.py", default_timeout=60)
+    at = AppTest.from_file(str(_REPO / "ui.py"), default_timeout=60)
     at.run()
     # `at.exception` is a list-like of any uncaught exceptions during the run.
     excs = list(at.exception) if at.exception else []

@@ -13,6 +13,10 @@ from nse_backtest.desk import scoreboard_io, session
 from nse_backtest.desk.models import Mode
 from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION, Status
 
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[2]  # AppTest paths: absolute, independent of cwd
+
 IST = ZoneInfo("Asia/Kolkata")
 ET = ZoneInfo("America/New_York")
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=IST)
@@ -396,7 +400,7 @@ def _page(monkeypatch, tmp_path):
     from streamlit.testing.v1 import AppTest
     from tests.test_desk_page_smoke import _patch_ok
     _patch_ok(monkeypatch, tmp_path)
-    return AppTest.from_file("pages/0_Desk.py", default_timeout=120)
+    return AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120)
 
 
 def test_page_scoreboard_tab_renders_verdict(monkeypatch, tmp_path):

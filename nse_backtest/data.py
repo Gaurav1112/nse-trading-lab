@@ -234,6 +234,7 @@ def _clean_download(df: Optional[pd.DataFrame], ticker: str, start: str, end: st
     df = df.sort_index()
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+    df.index.freq = None  # pandas may infer a freq on one download path and not the other; frames must be equal
     if df.empty:
         raise ValueError(f"No usable bars for {ticker} after cleaning")
 
