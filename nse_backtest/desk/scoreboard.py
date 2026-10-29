@@ -160,7 +160,7 @@ def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime
             continue
         try:
             good.append(_parse_row(row))
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError, OverflowError) as e:
             rejects.append((row, str(e)))
     best: dict[tuple, Candidate] = {}
     for c in sorted(good, key=lambda c: c.created_at):

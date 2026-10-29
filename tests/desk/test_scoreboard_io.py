@@ -1,8 +1,9 @@
 """Scoreboard I/O: audit reading, swing fill session, cache, CLI and page tab. Fictional prices only; no network."""
 import json
 import os
+import re
 import stat
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -53,7 +54,9 @@ class Loader:
 
 
 def boom_loader():
-    return Loader(exc=AssertionError("loader must not be called"))
+    """A loader that must not be called. Production code turns loader errors into UNAVAILABLE, so tests check
+    `.calls` is empty instead of relying on the exception."""
+    return Loader(exc=RuntimeError("loader must not be called"))
 
 
 @pytest.fixture
@@ -64,8 +67,12 @@ def paths(tmp_path):
 def run(paths, loader=None, intraday=None, **kw):
     audit, cache = paths
     kw.setdefault("now", NOW)
-    return session.run_scoreboard(audit_path=audit, cache_path=cache, load_daily=loader or boom_loader(),
-                                  load_intraday=intraday or boom_loader(), **kw)
+    unused = [b for b in (None if loader else boom_loader(), None if intraday else boom_loader()) if b]
+    res = session.run_scoreboard(audit_path=audit, cache_path=cache, load_daily=loader or unused[0],
+                                 load_intraday=intraday or unused[-1], **kw)
+    for b in unused:
+        assert b.calls == [], f"unexpected load: {b.calls}"
+    return res
 
 
 # ---------------------------------------------------------------- swing + cache
@@ -134,9 +141,11 @@ def test_open_not_cached_and_unavailable_not_cached(paths):
 
 def test_intraday_older_than_60_days_unavailable_without_fetch(paths):
     write_audit(paths[0], [row(datetime(2026, 8, 20, 10, 0, tzinfo=IST), mode="intraday")])
-    res = run(paths, intraday=boom_loader())
+    li = boom_loader()
+    res = run(paths, intraday=li)
     o = res.outcomes[0]
     assert o.status is Status.UNAVAILABLE and "older than 60 days" in o.note
+    assert li.calls == []
 
 
 def test_intraday_resolves_from_fake_bars(paths):
@@ -203,7 +212,23 @@ def test_changed_candidate_fields_recomputed(paths):
     ld = Loader({"ABC": frame(WIN_BARS)})
     res = run(paths, ld)
     assert ld.calls == [("NSE", "ABC")]
-    assert res.outcomes[0].status is Status.OPEN  # 103.2 no longer reaches the target; still holding
+    # 103.2 no longer reaches the target (recompute is OPEN, not final): the old entry is kept, never served
+    o = res.outcomes[0]
+    assert o.status is Status.UNAVAILABLE
+    assert "cached result no longer matches the logged ticket (kept in cache)" in o.note
+    (entry,) = json.loads(paths[1].read_text())["outcomes"].values()
+    assert entry["candidate"]["target_1"] == 103.0 and entry["outcome"]["status"] == "won"
+
+
+def test_changed_candidate_fields_final_recompute_replaces_entry(paths):
+    created = datetime(2026, 10, 16, 10, 0, tzinfo=IST)
+    write_audit(paths[0], [row(created)])
+    run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    write_audit(paths[0], [row(created, target_1=103.1)])
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert res.outcomes[0].status is Status.WON and res.outcomes[0].note == ""
+    (entry,) = json.loads(paths[1].read_text())["outcomes"].values()
+    assert entry["candidate"]["target_1"] == 103.1
 
 
 def test_tampered_cache_entry_dropped_and_recomputed(paths):
@@ -286,7 +311,9 @@ def _cli_env(tmp_path, monkeypatch, rows):
     monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
     write_audit(tmp_path / "desk_audit.jsonl", rows)
     monkeypatch.setattr(loaders, "load_daily", Loader({"ABC": frame(WIN_BARS), "XYZ": frame(WIN_BARS)}))
-    monkeypatch.setattr(loaders, "load_intraday", boom_loader())
+    li = boom_loader()
+    monkeypatch.setattr(loaders, "load_intraday", li)
+    return li
 
 
 def test_cli_text(tmp_path, monkeypatch, capsys):
@@ -295,6 +322,8 @@ def test_cli_text(tmp_path, monkeypatch, capsys):
                                      row(datetime(2026, 10, 16, 10, 0, tzinfo=ET), market="US", symbol="XYZ",
                                          h="u"), "garbage{"])
     assert main(["scoreboard", "--market", "ALL"]) == 0
+    from nse_backtest.desk import loaders
+    assert loaders.load_intraday.calls == []
     out = capsys.readouterr().out.splitlines()
     assert out[0] == DISCLAIMER
     v = next(i for i, x in enumerate(out) if "Not enough trades yet" in x)
@@ -357,6 +386,9 @@ def test_page_scoreboard_tab_renders_verdict(monkeypatch, tmp_path):
     assert not at.exception and calls == ["NSE"]
     assert any("Not enough trades yet" in i.value for i in at.info)
     assert any(DISCLAIMER in c.value for c in at.caption)
+    order = [type(e).__name__ for e in at.tabs[4].children.values()]
+    assert order.index("Info") < order.index("Dataframe")  # verdict banner before the stats table
+    assert order[0] == "Caption" and DISCLAIMER in list(at.tabs[4].children.values())[0].value
 
 
 def test_page_scoreboard_error_is_shown(monkeypatch, tmp_path):
@@ -367,3 +399,192 @@ def test_page_scoreboard_error_is_shown(monkeypatch, tmp_path):
     at.button(key="desk_load_scoreboard").click().run()
     assert not at.exception
     assert any("audit unreadable" in e.value for e in at.error)
+
+
+# ---------------------------------------------------------------- fix round 1
+
+def _cached(paths) -> dict:
+    return json.loads(paths[1].read_text())["outcomes"] if paths[1].exists() else {}
+
+
+def test_nan_cache_entry_dropped_and_cache_repaired(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="AAA", h="a")])
+    run(paths, Loader({"AAA": frame(WIN_BARS)}))
+    data = json.loads(paths[1].read_text())
+    (entry,) = data["outcomes"].values()
+    entry["candidate"]["mc_expectancy_r"] = float("nan")  # a field the match does not compare
+    paths[1].write_text(json.dumps(data), encoding="utf-8")  # json writes a bare NaN
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="AAA", h="a"),
+                           row(datetime(2026, 10, 16, 10, 5, tzinfo=IST), symbol="BBB", h="b")])
+    ld = Loader({"AAA": frame(WIN_BARS), "BBB": frame(WIN_BARS)})
+    res = run(paths, ld)
+    assert [o.status for o in res.outcomes] == [Status.WON, Status.WON]
+    assert sorted(ld.calls) == [("NSE", "AAA"), ("NSE", "BBB")]  # the NaN entry was dropped and recomputed
+    text = paths[1].read_text()
+    assert "NaN" not in text and "Infinity" not in text and len(json.loads(text)["outcomes"]) == 2
+
+
+def test_save_reports_unserialisable_payload(tmp_path):
+    warns = []
+    cache = scoreboard_io.ScoreboardCache(tmp_path / "c.json", NOW, warns.append)
+    cache.entries["x"] = {"bad": float("inf")}
+    cache.dirty = True
+    cache.save()  # must not raise
+    assert cache.note and "could not be written" in cache.note and warns
+    assert not (tmp_path / "c.json").exists()
+
+
+def test_same_day_result_shown_but_not_cached(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST))])
+    today = frame({"2026-10-28": (101, 101, 97, 99)})  # fills at 100 and touches the stop on the same bar
+    res = run(paths, Loader({"ABC": today}), now=datetime(2026, 10, 28, 15, 31, tzinfo=IST))
+    assert res.outcomes[0].status is Status.LOST
+    assert _cached(paths) == {}
+    res = run(paths, Loader({"ABC": today}), now=datetime(2026, 10, 29, 12, 0, tzinfo=IST))
+    assert res.outcomes[0].status is Status.LOST
+    assert [e["outcome"]["status"] for e in _cached(paths).values()] == ["lost"]
+
+
+def test_same_day_not_filled_and_intraday_not_cached(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST)),
+                           row(datetime(2026, 10, 28, 9, 50, tzinfo=IST), symbol="XYZ", mode="intraday", h="i")])
+    idx = pd.date_range("2026-10-28 09:15", "2026-10-28 15:15", freq="15min")
+    flat = pd.DataFrame({"Open": 99.0, "High": 99.5, "Low": 98.5, "Close": 99.2}, index=idx)
+    res = run(paths, Loader({"ABC": frame({"2026-10-28": (101, 102, 100.5, 101)})}), Loader({"XYZ": flat}),
+              now=datetime(2026, 10, 28, 15, 40, tzinfo=IST))
+    assert [o.status for o in res.outcomes] == [Status.NOT_FILLED, Status.NOT_FILLED]
+    assert _cached(paths) == {}
+
+
+@pytest.mark.parametrize("bad", [
+    '"created_at": "9999-12-31T23:30:00-12:00"', '"created_at": "0001-01-01T00:00:00+14:00"',
+    '"qty": 1e999', '"max_hold_bars": 1e999'])
+@pytest.mark.parametrize("mode", ["swing", "intraday"])
+def test_overflow_audit_rows_are_rejects(paths, bad, mode):
+    good = row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))
+    base = json.dumps(row(datetime(2026, 10, 16, 11, 0, tzinfo=IST), symbol="XYZ", mode=mode, h="x"))
+    key = bad.split(":")[0]
+    broken = re.sub(key + r': [^,]+', bad, base, count=1)
+    assert broken != base
+    write_audit(paths[0], [good, broken])
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    assert [n for n, _ in res.rejects] == [2]
+    assert [o.candidate.symbol for o in res.outcomes] == ["ABC"]
+
+
+def test_audit_path_unreadable_is_a_clear_error(tmp_path):
+    with pytest.raises(scoreboard_io.AuditReadError, match="cannot read audit log"):
+        session.run_scoreboard(audit_path=tmp_path, cache_path=tmp_path / "c.json", now=NOW,
+                               load_daily=boom_loader(), load_intraday=boom_loader())
+
+
+def test_cli_audit_directory_exit_2(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [])
+    (tmp_path / "desk_audit.jsonl").unlink()
+    (tmp_path / "desk_audit.jsonl").mkdir()
+    assert main(["scoreboard"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("scoreboard: cannot read audit log") and "Traceback" not in err
+
+
+def test_cli_runtime_error_exit_2(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, [])
+
+    def lost(*a, **k):
+        raise RuntimeError("scoreboard lost a candidate")
+    monkeypatch.setattr(session, "run_scoreboard", lost)
+    assert main(["scoreboard"]) == 2
+    assert "scoreboard: scoreboard lost a candidate" in capsys.readouterr().err
+
+
+def test_intraday_mismatched_entry_beyond_60_days_kept(paths):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday")])
+    run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    assert len(_cached(paths)) == 1
+    write_audit(paths[0], [row(created, mode="intraday", target_1=104.0)])
+    li = boom_loader()
+    res = run(paths, intraday=li, now=datetime(2027, 1, 29, 12, 0, tzinfo=IST))
+    o = res.outcomes[0]
+    assert o.status is Status.UNAVAILABLE and li.calls == []
+    assert "cached result no longer matches the logged ticket (kept in cache)" in o.note
+    (entry,) = _cached(paths).values()
+    assert entry["candidate"]["target_1"] == 103.0 and entry["outcome"]["status"] == "won"
+
+
+def test_replay_error_note_and_warning_carry_type(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    no_close = frame(WIN_BARS).drop(columns=["Close"])
+    warns = []
+    res = run(paths, Loader({"ABC": no_close}), on_warning=warns.append)
+    o = res.outcomes[0]
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("could not replay (KeyError):")
+    assert any("KeyError" in w and "ABC" in w for w in warns)
+
+
+def _intraday_win_bars(day="2026-10-27"):
+    idx = pd.date_range(f"{day} 09:15", f"{day} 15:15", freq="15min")
+    bars = pd.DataFrame({"Open": 99.0, "High": 99.5, "Low": 98.5, "Close": 99.2}, index=idx)
+    bars.loc[pd.Timestamp(f"{day} 10:00"), ["Open", "High", "Low", "Close"]] = (99.5, 100.5, 99.2, 100.2)
+    bars.loc[pd.Timestamp(f"{day} 10:15"), ["Open", "High", "Low", "Close"]] = (100.2, 103.5, 100.1, 103.2)
+    return bars
+
+
+@pytest.mark.parametrize("age,fetched", [(58, True), (59, False)])
+def test_intraday_60_day_boundary(paths, age, fetched):
+    created = datetime(2026, 10, 29, 10, 0, tzinfo=IST) - timedelta(days=age)
+    write_audit(paths[0], [row(created, mode="intraday")])
+    li = Loader(exc=RuntimeError("feed down"))
+    res = run(paths, intraday=li)
+    assert bool(li.calls) is fetched
+    assert ("older than 60 days" in res.outcomes[0].note) is (not fetched)
+
+
+def test_cached_intraday_older_than_60_days_served_without_load(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), mode="intraday")])
+    run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    li = boom_loader()
+    res = run(paths, intraday=li, now=datetime(2027, 1, 29, 12, 0, tzinfo=IST))
+    assert res.outcomes[0].status is Status.WON and li.calls == []
+
+
+def test_us_early_close_flat_by_at_io_level(paths):
+    write_audit(paths[0], [row(datetime(2026, 11, 27, 10, 0, tzinfo=ET), market="US", mode="intraday")])
+    idx = pd.date_range("2026-11-27 09:30", "2026-11-27 12:45", freq="15min")
+    bars = pd.DataFrame({"Open": 100.5, "High": 101.0, "Low": 99.5, "Close": 100.8}, index=idx)
+    bars.loc[pd.Timestamp("2026-11-27 12:30"), "Close"] = 101.5
+    bars.loc[pd.Timestamp("2026-11-27 12:45"), ["High", "Close"]] = (110.0, 109.0)  # at/after flat-by: ignored
+    res = run(paths, intraday=Loader({"ABC": bars}), now=datetime(2026, 11, 30, 12, 0, tzinfo=ET))
+    o = res.outcomes[0]
+    assert o.status is Status.TIME and o.exit_price == 101.5 and o.exit_at.startswith("2026-11-27 12:30")
+
+
+def test_partial_daily_bar_ignored_before_close(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST))])
+    f = frame({"2026-10-28": (101, 101, 90, 95)})
+    res = run(paths, Loader({"ABC": f}), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
+    assert res.outcomes[0].status is Status.OPEN and _cached(paths) == {}
+
+
+def test_same_symbol_day_across_markets_and_modes_stay_separate(paths):
+    write_audit(paths[0], [
+        row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), h="ns"),
+        row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), mode="intraday", h="ni"),
+        row(datetime(2026, 10, 27, 9, 50, tzinfo=ET), market="US", h="us")])
+    daily = frame({"2026-10-27": (101, 101.5, 99.5, 100.5), "2026-10-28": (100.5, 103.2, 100.1, 103)})
+    res = run(paths, Loader({"ABC": daily}), Loader({"ABC": _intraday_win_bars()}))
+    assert sorted((o.candidate.market, o.candidate.mode.value) for o in res.outcomes) == [
+        ("NSE", "intraday"), ("NSE", "swing"), ("US", "swing")]
+    assert [(s.market, s.mode.value, s.n) for s in res.stats] == [
+        ("NSE", "intraday", 1), ("NSE", "swing", 1), ("US", "swing", 1)]
+
+
+def test_cli_rejects_only_message(tmp_path, monkeypatch, capsys):
+    from nse_backtest.desk.cli import main
+    _cli_env(tmp_path, monkeypatch, ["garbage{", "[1]"])
+    assert main(["scoreboard", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out
+    assert "No valid TAKE verdicts for NSE (2 unreadable — see below)" in out
+    assert "No TAKE verdicts logged yet" not in out

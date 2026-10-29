@@ -17,6 +17,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from . import calendars as cal
 from .markets import get_profile
 from .models import Mode
@@ -44,6 +46,13 @@ class ScoreboardResult:
     stats: list[ScoreStats]            # summarize(outcomes)
     rejects: list[tuple[int, str]]     # (audit line number, reason) for unreadable lines and malformed TAKE rows
     cache_note: str | None             # set when the cache was unreadable, of another version or not writable
+
+
+class AuditReadError(Exception):
+    """The audit log exists but cannot be read (permissions, a directory, an I/O error)."""
+
+
+MISMATCH_NOTE = "cached result no longer matches the logged ticket (kept in cache)"
 
 
 def _warn(on_warning: Warn, msg: str) -> None:
@@ -80,6 +89,8 @@ def read_audit(path: Path) -> tuple[list[tuple[int, dict]], list[tuple[int, str]
         raw = Path(path).read_bytes()
     except FileNotFoundError:
         return [], []
+    except OSError as e:
+        raise AuditReadError(f"cannot read audit log {path}: {e.strerror or _err(e)}") from e
     rows: list[tuple[int, dict]] = []
     rejects: list[tuple[int, str]] = []
     for n, line in enumerate(raw.splitlines(), start=1):
@@ -103,6 +114,28 @@ def _row_market(row: dict) -> str | None:
         return None
 
 
+def _screen(rows: list[dict], session_of) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """Rows whose TAKE parses and can be placed in a session; others come back with a reason. A single odd row
+    (a date at the edge of the calendar, a 1e999 quantity) must become a reject, never crash the scoreboard."""
+    keep: list[dict] = []
+    bad: list[tuple[dict, str]] = []
+    for r in rows:
+        if r.get("action") != "TAKE":
+            keep.append(r)
+            continue
+        good, why = load_candidates([r], session_of=lambda m, t: None)
+        if why:
+            bad.append((r, f"malformed TAKE: {why[0][1]}"))
+            continue
+        try:
+            session_of(good[0].market, good[0].created_at)
+        except (ValueError, ArithmeticError, RuntimeError) as e:
+            bad.append((r, f"malformed TAKE: cannot place created_at in a session ({_err(e)})"))
+            continue
+        keep.append(r)
+    return keep, bad
+
+
 def candidates_from(rows: list[tuple[int, dict]], market: str | None = None
                     ) -> tuple[list[Candidate], list[tuple[int, str]]]:
     """Candidates (created_at order) and (line, reason) rejects for malformed TAKE rows. Swing rows are deduped on
@@ -116,6 +149,8 @@ def candidates_from(rows: list[tuple[int, dict]], market: str | None = None
     out: list[Candidate] = []
     rejects: list[tuple[int, str]] = []
     for group, session_of in ((swing, fill_session_of), (intraday, _local_date)):
+        group, early = _screen(group, session_of)
+        rejects += [(line_of[id(r)], why) for r, why in early]
         good, bad = load_candidates(group, session_of=session_of)
         out += good
         rejects += [(line_of[id(r)], f"malformed TAKE: {why}") for r, why in bad]
@@ -146,20 +181,25 @@ def _entry(o: Outcome) -> dict:
 def _well_formed(entry) -> bool:
     if not isinstance(entry, dict):
         return False
+    try:  # NaN / Infinity (which json.loads accepts) can never be written back: drop the entry
+        json.dumps(entry, allow_nan=False)
+    except (ValueError, TypeError, RecursionError):
+        return False
     cand, out = entry.get("candidate"), entry.get("outcome")
     if not isinstance(cand, dict) or not isinstance(out, dict):
         return False
     return all(k in cand for k in _CANDIDATE_FIELDS) and out.get("status") in {s.value for s in FINAL}
 
 
+def _matches(c: Candidate, entry: dict) -> bool:
+    """True when the entry was resolved for exactly this ticket."""
+    cand, current = entry["candidate"], _candidate_record(c)
+    return all(type(cand.get(k)) is not bool and cand.get(k) == current[k] for k in _CANDIDATE_FIELDS)
+
+
 def _outcome_from(c: Candidate, entry: dict) -> Outcome | None:
-    """The cached Outcome for c, or None when the entry belongs to different inputs or is inconsistent."""
-    cand, o = entry["candidate"], entry["outcome"]
-    current = _candidate_record(c)
-    for k in _CANDIDATE_FIELDS:
-        a, b = cand.get(k), current[k]
-        if type(a) is bool or a != b:
-            return None
+    """The cached Outcome for c (whose ticket matches), or None when the entry is internally inconsistent."""
+    o = entry["outcome"]
     try:
         status = Status(o["status"])
     except (ValueError, KeyError):
@@ -195,6 +235,7 @@ class ScoreboardCache:
         self.notes: list[str] = []
         self.dirty = False
         self.writable = True
+        self.mismatched: set[str] = set()
         self._on_warning = on_warning
         self._load(now)
 
@@ -258,30 +299,38 @@ class ScoreboardCache:
                 self.dirty = True  # a single bad entry is dropped and recomputed
 
     def get(self, c: Candidate) -> Outcome | None:
+        """The cached outcome, or None. A ticket mismatch keeps the entry (it may be irreplaceable, e.g. intraday
+        bars past 60 days) and records the key in `mismatched`; an inconsistent entry is dropped."""
         entry = self.entries.get(c.key)
         if entry is None:
             return None
+        if not _matches(c, entry):
+            self.mismatched.add(c.key)
+            return None
         o = _outcome_from(c, entry)
-        if o is None:  # stale or inconsistent: forget it; a fresh final result replaces it
+        if o is None:  # inconsistent: forget it; a fresh final result replaces it
             del self.entries[c.key]
             self.dirty = True
         return o
 
-    def put(self, o: Outcome) -> None:
+    def put(self, o: Outcome) -> bool:
+        """Store a final outcome (replacing any entry under its key). Returns True when it is in the cache."""
         if o.status not in FINAL:
-            return
+            return False
         entry = _entry(o)
         if self.entries.get(o.candidate.key) != entry:
             self.entries[o.candidate.key] = entry
             self.dirty = True
+        self.mismatched.discard(o.candidate.key)
+        return True
 
     def save(self) -> None:
         if not self.dirty or not self.writable:
             return
-        payload = json.dumps({"version": SCOREBOARD_VERSION, "outcomes": self.entries}, indent=1, sort_keys=True,
-                             allow_nan=False)
         tmp = None
         try:
+            payload = json.dumps({"version": SCOREBOARD_VERSION, "outcomes": self.entries}, indent=1,
+                                 sort_keys=True, allow_nan=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -293,7 +342,7 @@ class ScoreboardCache:
             tmp = None
             os.chmod(self.path, 0o600)
             self.dirty = False
-        except OSError as e:
+        except (OSError, ValueError, TypeError) as e:
             self._note(f"scoreboard cache could not be written ({_err(e)}); results are still correct")
         finally:
             if tmp is not None:
@@ -305,14 +354,38 @@ class ScoreboardCache:
 
 # ---------------------------------------------------------------- replay
 
-def _replay(c: Candidate, fn, *args, **kw) -> Outcome:
+def _replay(c: Candidate, on_warning: Warn, fn, *args, **kw) -> Outcome:
     try:
         return fn(c, *args, **kw)
-    except Exception as e:  # noqa: BLE001 - odd bars must mark the trade unavailable, never drop or crash
-        return unavailable(c, f"could not replay: {_err(e)}")
+    except Exception as e:  # noqa: BLE001 - keep the trade visible, but say what broke (it may be a bug)
+        note = f"could not replay ({type(e).__name__}): {_err(e)}"
+        _warn(on_warning, f"scoreboard: {c.market} {c.symbol} {c.mode.value} {c.created_at.isoformat()}: {note}")
+        return unavailable(c, note)
 
 
-def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, load_intraday) -> list[Outcome]:
+def _decided_on(o: Outcome) -> date | None:
+    """The market-local date whose bars decided a final outcome (None when it cannot be told)."""
+    c = o.candidate
+    try:
+        if c.mode is Mode.INTRADAY:
+            return _local_date(c.market, c.created_at)
+        if o.status is Status.NOT_FILLED:
+            return fill_session_of(c.market, c.created_at)
+        return pd.Timestamp(o.exit_at).date()
+    except (ValueError, TypeError, ArithmeticError, RuntimeError):
+        return None
+
+
+def _cacheable(o: Outcome, now: datetime) -> bool:
+    """Final and decided before market-today: bars just after the close can still be provisional."""
+    if o.status not in FINAL:
+        return False
+    decided = _decided_on(o)
+    return decided is not None and decided < now.astimezone(ZoneInfo(get_profile(o.candidate.market).tz)).date()
+
+
+def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, load_intraday,
+                   on_warning: Warn = None) -> list[Outcome]:
     """Outcomes for uncached candidates of one (market, symbol, mode); the bars are loaded at most once."""
     profile = get_profile(cs[0].market)
     symbol = cs[0].symbol
@@ -334,7 +407,7 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
                 for i in todo:
                     c = cs[i]
                     flat_by = cal.flat_by_for(profile, _local_date(c.market, c.created_at))
-                    out[i] = _replay(c, resolve_intraday, bars, flat_by=flat_by, now=now)
+                    out[i] = _replay(c, on_warning, resolve_intraday, bars, flat_by=flat_by, now=now)
     else:
         closed = cal.is_trading_day(profile, today) and now_l.time() >= cal.session_close_for(profile, today)
         try:
@@ -343,13 +416,9 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
             for i, c in enumerate(cs):
                 out[i] = unavailable(c, f"daily bars unavailable: {_err(e)}")
         else:
-            for i, c in enumerate(cs):
-                try:
-                    fs = fill_session_of(c.market, c.created_at)
-                except Exception as e:  # noqa: BLE001 - broken calendar data: unavailable, loudly
-                    out[i] = unavailable(c, f"fill session unknown: {_err(e)}")
-                    continue
-                out[i] = _replay(c, resolve_swing, daily, fill_session=fs, now=now, session_closed_today=closed)
+            for i, c in enumerate(cs):  # fill_session_of cannot fail here: candidates_from screened it
+                out[i] = _replay(c, on_warning, resolve_swing, daily, fill_session=fill_session_of(c.market, c.created_at),
+                                 now=now, session_closed_today=closed)
     return [out[i] for i in range(len(cs))]
 
 
@@ -368,9 +437,14 @@ def build_scoreboard(market: str | None, *, now: datetime, audit_path: Path, cac
         if outcomes[i] is None:
             groups.setdefault((c.market, c.symbol, c.mode), []).append(i)
     for (_, _, mode), idx in groups.items():
-        for i, o in zip(idx, _resolve_group([cands[i] for i in idx], mode, now, load_daily, load_intraday)):
+        for i, o in zip(idx, _resolve_group([cands[i] for i in idx], mode, now, load_daily, load_intraday,
+                                            on_warning)):
+            stored = _cacheable(o, now) and cache.put(o)
+            if not stored and o.status not in FINAL and cands[i].key in cache.mismatched:
+                # the old entry belongs to another ticket: kept in the file, never served as this outcome
+                o = unavailable(cands[i], f"{MISMATCH_NOTE}; recomputed: {o.status.value}"
+                                          + (f" ({o.note})" if o.note else ""))
             outcomes[i] = o
-            cache.put(o)
     cache.save()
     final = [o for o in outcomes if o is not None]
     if len(final) != len(cands):  # every candidate is reported, never silently dropped

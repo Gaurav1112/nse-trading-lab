@@ -15,7 +15,7 @@ from . import loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode
 from .positions import review_positions
-from .scoreboard_io import SCOREBOARD_DISCLAIMER
+from .scoreboard_io import SCOREBOARD_DISCLAIMER, AuditReadError
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -227,7 +227,9 @@ def format_scoreboard(res, market_label: str) -> list[str]:
     """Text scoreboard: disclaimer first; per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
     lines = [SCOREBOARD_DISCLAIMER]
-    if not res.outcomes:
+    if not res.outcomes and res.rejects:
+        lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
+    elif not res.outcomes:
         lines.append(f"No TAKE verdicts logged yet for {market_label} — run `plan` or `check` to build a record.")
     for s in res.stats:
         win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
@@ -268,7 +270,11 @@ def format_scoreboard(res, market_label: str) -> list[str]:
 def cmd_scoreboard(a, profile) -> int:
     market = str(a.market).strip().upper()
     label = "all markets" if market == "ALL" else get_profile(market).code  # ValueError -> exit 2
-    res = session.run_scoreboard(None if market == "ALL" else label, on_warning=_stderr_warn)
+    try:
+        res = session.run_scoreboard(None if market == "ALL" else label, on_warning=_stderr_warn)
+    except (AuditReadError, RuntimeError) as e:
+        print(f"scoreboard: {e}", file=sys.stderr)
+        return 2
     if a.json:
         _emit_json(res)
         return 0
