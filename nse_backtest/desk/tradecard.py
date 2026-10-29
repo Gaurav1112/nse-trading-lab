@@ -5,10 +5,14 @@ from dataclasses import dataclass, replace
 
 from .costs import round_trip_cost
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Limits, Sizing, Status
+from .models import Action, DeskVerdict, Limits, Mode, Sizing, Status
+from .sizing import loss_at_stop, worst_entry
 from .verdict import ticket_lines
 
 GAP_NOTE = "A gap through the stop can lose more than this."
+DAILY_LOSS_NOTE = ("The daily-loss line compares this trade alone with the daily loss limit; losses already taken "
+                   "today are checked by the daily-loss check in Checks.")
+LIMIT_FILL_NOTE = "An intraday fill can be up to {limit} (the order's limit), which is already in the max loss."
 _EPS = 1e-9
 
 
@@ -22,23 +26,24 @@ class TradeCard:
     stop: float
     target_1: float
     target_2: float
-    entry_limit: float | None
+    entry_limit: float | None  # intraday: the stop-limit's limit (the ticket's; computed when the plan has none)
     risk_per_share: float
     cost: float | None  # round trip at T1, for qty; None when qty is 0
-    max_loss: float | None  # qty*(entry-stop) + cost; positive = money lost
+    max_loss: float | None  # sizing.loss_at_stop: qty*(worst entry - stop) + cost with the exit at the stop
+    max_loss_at_trigger: float | None  # the same with the fill at the trigger (entry); None when qty is 0
     profit_t1: float | None
     profit_t2: float | None  # cost computed with the exit at T2
     rr_t1: float
     expected_value: float | None  # mc_expectancy_r * qty * risk_per_share; None without odds
     notional: float | None
-    pct_capital_at_risk: float | None  # qty*risk_per_share (before costs) as % of capital
+    pct_capital_at_risk: float | None  # max_loss (worst fill, incl. costs) as % of capital: the sizer's rule
     pct_capital_deployed: float | None
     breaches: tuple[str, ...]
     gap_note: str
     ticket: tuple[str, ...]
     ticket_header: str
     reasons: tuple[str, ...]
-    per_share: tuple[float, float, float]  # (loss incl. cost, profit at T1, profit at T2) at qty 1
+    per_share: tuple[float, float, float]  # (max loss at qty 1, profit at T1, profit at T2) at qty 1
     unavailable_reason: str = ""
 
 
@@ -72,33 +77,39 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
         raise ValueError("entry must be above stop")
     c1 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, 1)
     c2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, 1)
-    per_share = (rps + c1, plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
+    per_share = (loss_at_stop(plan, profile, 1), plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
+    gap_note = GAP_NOTE
+    if plan.mode is Mode.INTRADAY:
+        gap_note += " " + LIMIT_FILL_NOTE.format(limit=profile.money(worst_entry(plan, profile)))
     taken = v.action is Action.TAKE
     reasons = () if taken else tuple(f"{c.status.value} {c.name} — {c.reason}"
                                      for c in v.checks if c.status in (Status.BLOCK, Status.WARN))
     common = dict(verdict=v, qty=n, qty_is_override=is_override, entry=plan.entry, stop=plan.stop,
-                  target_1=plan.target_1, target_2=plan.target_2, entry_limit=plan.entry_limit,
-                  risk_per_share=rps, rr_t1=(plan.target_1 - plan.entry) / rps, gap_note=GAP_NOTE,
+                  target_1=plan.target_1, target_2=plan.target_2,
+                  entry_limit=worst_entry(plan, profile) if plan.mode is Mode.INTRADAY else None,
+                  risk_per_share=rps, rr_t1=(plan.target_1 - plan.entry) / rps, gap_note=gap_note,
                   reasons=reasons, per_share=per_share)
     if n == 0:
         why = base.note or base.binding_limit
-        return TradeCard(**common, sizing=base, cost=None, max_loss=None, profit_t1=None, profit_t2=None,
+        return TradeCard(**common, sizing=base, cost=None, max_loss=None, max_loss_at_trigger=None,
+                         profit_t1=None, profit_t2=None,
                          expected_value=None, notional=None, pct_capital_at_risk=None,
                          pct_capital_deployed=None, breaches=(), ticket=(), ticket_header="",
                          unavailable_reason=f"The desk sized 0 shares ({why}) — enter a quantity to see the money")
     cost = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, n)
     cost_t2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, n)
     notional = n * plan.entry
-    risk_pct = n * rps / limits.capital * 100
+    max_loss = loss_at_stop(plan, profile, n)  # the same figure as the sizer and the verdict headline
+    max_loss_at_trigger = loss_at_stop(plan, profile, n, entry=plan.entry)
+    risk_pct = max_loss / limits.capital * 100  # incl. costs and the worst fill: the sizer's own rule
     deployed_pct = notional / limits.capital * 100
-    max_loss = n * rps + cost
     ev = None if v.odds is None else v.odds.mc_expectancy_r * n * rps
-    breaches = _breaches(limits, risk_pct, deployed_pct, max_loss / limits.capital * 100) if is_override else ()
-    sizing = base if n == base.qty else replace(base, qty=n, risk_amount=n * rps, notional=notional,
+    breaches = _breaches(limits, risk_pct, deployed_pct, risk_pct) if is_override else ()
+    sizing = base if n == base.qty else replace(base, qty=n, risk_amount=max_loss, notional=notional,
                                                 costs=cost, note=f"{n} shares (your quantity)")
     shown = taken or override_confirmed
     return TradeCard(
-        **common, sizing=sizing, cost=cost, max_loss=max_loss,
+        **common, sizing=sizing, cost=cost, max_loss=max_loss, max_loss_at_trigger=max_loss_at_trigger,
         profit_t1=n * (plan.target_1 - plan.entry) - cost,
         profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
         expected_value=ev, notional=notional,

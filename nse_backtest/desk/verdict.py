@@ -14,6 +14,7 @@ from enum import Enum
 from . import fills
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan, summary_fields
+from .sizing import loss_at_stop
 
 
 def stop_limit(plan: TradePlan, profile: MarketProfile) -> float:
@@ -96,7 +97,8 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
         headline = f"WAIT {sym} — price ran past entry; buy only on a pullback to {m(plan.entry)}"
     else:
         action, ticket = Action.TAKE, lines
+        loss = loss_at_stop(plan, profile, sizing.qty)  # worst fill + stop-exit cost: the card's max loss too
         headline = (f"TAKE {sym} — BUY {sizing.qty} @ {m(plan.entry)}, "
-                    f"loss at stop ≈ {m(sizing.risk_amount)} (a gap can lose more)")
+                    f"loss at stop ≈ {m(loss)} (a gap can lose more)")
     return DeskVerdict(action, headline, plan, sizing, odds, checks, ticket, trigger, current_price,
                        input_hash(plan, sizing, odds, checks, current_price), now.isoformat())

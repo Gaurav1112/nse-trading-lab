@@ -2,6 +2,11 @@
 
 Adapted from github.com/Jakeschincariol/day-trader-skill (MIT).
 
+R is the worst-fill risk per share: entry - stop for swing (a LIMIT buy never fills above entry), and
+entry_limit - stop for intraday (a buy stop-limit can fill anywhere up to its limit). The cost is the round trip
+from that worst entry to an exit at the stop. ``loss_at_stop`` is the one figure the headline, the audit row and the
+trade card all show.
+
 The risk quantity is found by binary search over [0, floor(budget / R)] for the largest q with
 q*R + round_trip_cost(q) <= budget. This equals the brief's linear decrement loop because
 q*R + cost(q) is non-decreasing in q (cost is non-decreasing), so the predicate is monotone.
@@ -10,11 +15,27 @@ from __future__ import annotations
 
 import math
 
+from . import fills
 from .costs import DEFAULT_SPREAD, round_trip_cost
 from .markets import MarketProfile
-from .models import Limits, Sizing, TradePlan
+from .models import Limits, Mode, Sizing, TradePlan
 
 _ORDER = ("max loss per trade", "position cap", "cash after buffer")
+
+
+def worst_entry(plan: TradePlan, profile: MarketProfile) -> float:
+    """The worst price the entry order can fill at: the stop-limit's limit for intraday, the entry for swing."""
+    if plan.mode is Mode.INTRADAY:
+        return fills.limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
+    return plan.entry
+
+
+def loss_at_stop(plan: TradePlan, profile: MarketProfile, qty: int, *, entry: float | None = None,
+                 spread_per_side: float = DEFAULT_SPREAD) -> float:
+    """Money lost by qty shares filled at ``entry`` (default: the worst fill) and stopped out, incl. the round-trip
+    cost with the exit at the stop. A gap through the stop can lose more."""
+    e = worst_entry(plan, profile) if entry is None else entry
+    return qty * (e - plan.stop) + round_trip_cost(profile, plan.mode, e, plan.stop, qty, spread_per_side)
 
 
 def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
@@ -31,8 +52,11 @@ def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
     if plan.entry <= 0:
         raise ValueError("entry must be positive")
 
+    worst = worst_entry(plan, profile)
+    R = worst - plan.stop  # worst-fill risk per share (intraday: up to the stop-limit's limit)
+
     def cost(q: int) -> float:
-        return round_trip_cost(profile, plan.mode, plan.entry, plan.stop, q, spread_per_side)
+        return round_trip_cost(profile, plan.mode, worst, plan.stop, q, spread_per_side)
 
     budget = limits.capital * limits.risk_per_trade_pct / 100
     if halve:
@@ -72,4 +96,4 @@ def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
     note = f"{qty} shares, limited by {binding_limit}"
     if halve:
         note += " (size halved after 3 stop-outs in a row)"
-    return Sizing(qty, binding_limit, qty * R + costs, qty * plan.entry, costs, halve, note)
+    return Sizing(qty, binding_limit, qty * R + costs, qty * plan.entry, costs, halve, note)  # loss_at_stop

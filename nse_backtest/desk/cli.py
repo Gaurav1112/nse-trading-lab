@@ -15,7 +15,7 @@ from . import audit, loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
-from .tradecard import build_card
+from .tradecard import DAILY_LOSS_NOTE, build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
@@ -101,8 +101,13 @@ def format_money(card, profile) -> list[str]:
              f"  reward:risk {card.rr_t1:.2f}  expected value {ev}",
              f"  notional {m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital), "
              f"at risk {card.pct_capital_at_risk:.1f}% of capital, costs {m(card.cost)}"]
+    if card.entry_limit is not None and card.max_loss_at_trigger is not None:
+        lines.append(f"  max loss if filled at the trigger {m(card.max_loss_at_trigger)} (the max loss above "
+                     f"assumes the worst fill, at the limit {m(card.entry_limit)})")
     if card.breaches:
         lines += ["  Breaks your limits:"] + [f"    - {b}" for b in card.breaches]
+        if any("daily loss limit" in b for b in card.breaches):
+            lines.append(f"  {DAILY_LOSS_NOTE}")
     return lines
 
 

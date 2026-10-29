@@ -26,13 +26,14 @@ def test_money_math_take():
     cost2 = round_trip_cost(NSE, Mode.SWING, 100, 115, 10)
     assert (c.qty, c.qty_is_override, c.risk_per_share) == (10, False, 5)
     assert c.cost == pytest.approx(cost1)
-    assert c.max_loss == pytest.approx(50 + cost1)
+    # F1 A1: max loss uses the sizer's cost basis (exit at the stop), so headline == card == sizing
+    assert c.max_loss == pytest.approx(50 + round_trip_cost(NSE, Mode.SWING, 100, 95, 10))
     assert c.profit_t1 == pytest.approx(100 - cost1)
     assert c.profit_t2 == pytest.approx(150 - cost2)
     assert c.rr_t1 == 2.0
     assert c.expected_value == pytest.approx(0.3 * 50)
     assert c.notional == 1_000 and c.pct_capital_deployed == pytest.approx(10.0)
-    assert c.pct_capital_at_risk == pytest.approx(0.5)
+    assert c.pct_capital_at_risk == pytest.approx(c.max_loss / 10_000 * 100)  # F1 A2: incl. costs
     assert c.breaches == () and c.reasons == ()
     assert c.ticket == ticket_lines(PLAN, SIZING, NSE) and c.ticket_header == ""
     assert "gap" in c.gap_note and c.entry_limit is None
@@ -45,7 +46,7 @@ def test_no_odds_means_no_expected_value():
 def test_override_qty_breaches():
     c = build_card(verdict(), NSE, LIMITS, qty=40)
     assert c.qty == 40 and c.qty_is_override
-    assert "risk per trade 2.0% of capital (limit 1.0%)" in c.breaches
+    assert "risk per trade 2.3% of capital (limit 1.0%)" in c.breaches  # F1 A2: max loss incl. costs
     assert "position 40.0% of capital (limit 25.0%)" in c.breaches
     assert any("exceeds the daily loss limit (2.0%)" in b for b in c.breaches)
     assert c.sizing.qty == 40 and c.ticket[0] == "BUY 40 ABC CNC LIMIT 100.00"
@@ -92,7 +93,7 @@ def test_zero_qty_card_has_no_money_and_no_ticket():
         assert c.unavailable_reason == ("The desk sized 0 shares (0 shares: stop too wide) — "
                                         "enter a quantity to see the money")
     loss, p1, p2 = c.per_share
-    assert loss == pytest.approx(5 + round_trip_cost(NSE, Mode.SWING, 100, 110, 1))
+    assert loss == pytest.approx(5 + round_trip_cost(NSE, Mode.SWING, 100, 95, 1))  # F1 A1: the max loss basis
     assert p1 == pytest.approx(10 - round_trip_cost(NSE, Mode.SWING, 100, 110, 1))
     assert p2 == pytest.approx(15 - round_trip_cost(NSE, Mode.SWING, 100, 115, 1))
 
@@ -100,7 +101,7 @@ def test_zero_qty_card_has_no_money_and_no_ticket():
 def test_zero_sized_skip_with_qty_gets_full_money_and_override_ticket():
     v = verdict(Action.SKIP, sizing=ZERO)
     c = build_card(v, NSE, LIMITS, qty=5, override_confirmed=True)
-    assert c.max_loss == pytest.approx(25 + round_trip_cost(NSE, Mode.SWING, 100, 110, 5))
+    assert c.max_loss == pytest.approx(25 + round_trip_cost(NSE, Mode.SWING, 100, 95, 5))
     assert c.unavailable_reason == "" and c.qty_is_override
     assert c.ticket[0] == "BUY 5 ABC CNC LIMIT 100.00"
     assert c.ticket_header == "YOUR OVERRIDE — the desk said SKIP"
@@ -109,7 +110,8 @@ def test_zero_sized_skip_with_qty_gets_full_money_and_override_ticket():
 def test_override_sizing_is_rebuilt_honestly():
     c = build_card(verdict(), NSE, LIMITS, qty=40)
     z = c.sizing
-    assert z.qty == 40 and z.risk_amount == 40 * 5 and z.notional == 40 * 100
+    assert z.qty == 40 and z.notional == 40 * 100
+    assert z.risk_amount == pytest.approx(c.max_loss)  # F1 A1: the max loss incl. costs, as the sizer reports it
     assert z.costs == pytest.approx(round_trip_cost(NSE, Mode.SWING, 100, 110, 40))
     assert z.note == "40 shares (your quantity)"
     assert build_card(verdict(), NSE, LIMITS).sizing == SIZING  # not overridden: the desk's own
@@ -128,3 +130,84 @@ def test_entry_must_be_above_stop():
         build_card(verdict(plan=replace(PLAN, stop=100)), NSE, LIMITS)
     with pytest.raises(ValueError, match="entry must be above stop"):
         build_card(verdict(plan=replace(PLAN, stop=105)), NSE, LIMITS)
+
+
+# ---------------------------------------------------------------- F1 A: worst-fill money honesty
+
+from datetime import datetime as _dt  # noqa: E402
+
+from nse_backtest.desk import fills as _fills  # noqa: E402
+from nse_backtest.desk.markets import US  # noqa: E402
+from nse_backtest.desk.sizing import size_position  # noqa: E402
+from nse_backtest.desk.verdict import decide  # noqa: E402
+
+_NOW = _dt(2026, 10, 29, 10, 0)
+
+
+def _probe_plan(mode, entry=1000.0, stop=990.0, t1=1020.0, t2=1030.0, market="NSE", tick=0.05):
+    lim = _fills.entry_limit(entry, stop, tick) if mode is Mode.INTRADAY else None
+    return TradePlan("ABC", market, mode, entry, stop, t1, t2, 5, 15, 1000, "2026-10-28T00:00:00", "user", lim)
+
+
+@pytest.mark.parametrize("profile", [NSE, US])
+@pytest.mark.parametrize("geom", [(1000.0, 990.0, 1020.0, 1030.0), (1000.0, 950.0, 1100.0, 1150.0)])
+def test_intraday_headline_equals_card_max_loss_at_the_limit_fill(profile, geom):
+    """probe1/probe2: the headline, the card and n*(limit-stop)+cost (exit at the stop) are one number."""
+    p = _probe_plan(Mode.INTRADAY, *geom, market=profile.code, tick=profile.tick)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, profile)
+    v = decide(p, s, None, OK, profile, p.entry, _NOW)
+    assert v.action is Action.TAKE
+    c = build_card(v, profile, lim)
+    expect = s.qty * (p.entry_limit - p.stop) + round_trip_cost(profile, Mode.INTRADAY, p.entry_limit, p.stop, s.qty)
+    assert c.max_loss == pytest.approx(expect)
+    assert profile.money(expect) in v.headline
+    assert s.risk_amount == pytest.approx(expect)
+    assert c.max_loss <= 100_000 * 0.01 + 1e-9  # the desk's own TAKE stays inside the risk budget at the limit
+    trig = s.qty * (p.entry - p.stop) + round_trip_cost(profile, Mode.INTRADAY, p.entry, p.stop, s.qty)
+    assert c.max_loss_at_trigger == pytest.approx(trig) and c.max_loss_at_trigger < c.max_loss
+    assert "(the order's limit), which is already in the max loss" in c.gap_note
+    assert profile.money(p.entry_limit) in c.gap_note
+
+
+def test_swing_card_max_loss_uses_the_stop_exit_cost_like_sizing():
+    p = _probe_plan(Mode.SWING)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    v = decide(p, s, None, OK, NSE, p.entry, _NOW)
+    c = build_card(v, NSE, lim)
+    assert c.max_loss == pytest.approx(s.risk_amount)
+    assert NSE.money(s.risk_amount) in v.headline
+    assert c.max_loss_at_trigger == pytest.approx(c.max_loss)
+    assert "order's limit" not in c.gap_note
+
+
+def test_max_loss_at_trigger_none_without_shares():
+    assert build_card(verdict(Action.SKIP, sizing=ZERO), NSE, LIMITS).max_loss_at_trigger is None
+
+
+@pytest.mark.parametrize("mode", [Mode.SWING, Mode.INTRADAY])
+def test_risk_breach_includes_cost_one_share_over_the_sizer(mode):
+    """A2: at the sized qty + 1 the risk-per-trade breach is listed (probe2: max loss over budget, no breach)."""
+    p = _probe_plan(mode, 1000.0, 950.0, 1100.0, 1150.0)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    assert s.binding_limit == "max loss per trade"
+    v = decide(p, s, None, OK, NSE, p.entry, _NOW)
+    over = build_card(v, NSE, lim, qty=s.qty + 1)
+    assert over.max_loss > 1000
+    assert any(b.startswith("risk per trade") for b in over.breaches), over.breaches
+    assert not any(b.startswith("risk per trade") for b in build_card(v, NSE, lim, qty=s.qty).breaches)
+
+
+def test_cli_money_block_shows_trigger_line_and_daily_loss_note():
+    from nse_backtest.desk.cli import format_money
+    p = _probe_plan(Mode.INTRADAY)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    v = decide(p, s, None, OK, NSE, p.entry, _NOW)
+    text = "\n".join(format_money(build_card(v, NSE, lim, qty=s.qty * 10), NSE))
+    assert "max loss if filled at the trigger" in text and "already in the max loss" in text
+    assert "compares this trade alone with the daily loss limit" in text
+    swing = "\n".join(format_money(build_card(verdict(), NSE, LIMITS), NSE))
+    assert "filled at the trigger" not in swing and "daily loss limit" not in swing

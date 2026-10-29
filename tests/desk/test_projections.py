@@ -215,3 +215,12 @@ def test_price_band_is_the_returns_band_from_the_last_close():
     lr = np.diff(np.log(s.to_numpy()))
     assert price_band(s, 15, paths=300) == _rp(price_band_from_returns(float(s.iloc[-1]), lr, 15, paths=300),
                                                start=s.index[-1])
+
+
+def test_outcome_money_states_the_limit_fill_slippage_for_intraday():
+    """F1 A1: the outcomes assume a fill at the trigger; intraday reports how much a limit fill can worsen them."""
+    pi = replace(PLAN, mode=Mode.INTRADAY, entry_limit=PLAN.entry + 0.5)
+    v = DeskVerdict(Action.TAKE, "h", pi, SIZING, ODDS, OK, (), None, 100.0, "x" * 64, "2026-10-29T10:00:00")
+    m = outcome_money(build_card(v, NSE, Limits(capital=10_000)))
+    assert m.limit_slippage == pytest.approx(10 * 0.5)
+    assert outcome_money(card()).limit_slippage is None

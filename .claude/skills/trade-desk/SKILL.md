@@ -35,8 +35,8 @@ realised R vs predicted MC R and the 95% interval, then the count of `data_unava
 Never tell the user to delete `desk_scoreboard.json`: intraday results older than about 60 days exist
 only there.
 
-`check` prints a Money block: max loss, profit at T1 and T2, reward:risk and expected value for the
-quantity (the desk's, or `--qty N`; limit breaches are listed). If the desk sized 0 shares it shows the
+`check` prints a Money block: max loss (intraday: at a fill up to the stop-limit's limit, with a second line
+for a fill at the trigger), profit at T1 and T2, reward:risk and expected value for the quantity (the desk's, or `--qty N`; limit breaches are listed). If the desk sized 0 shares it shows the
 per-share figures and asks for `--qty`. `--choose` only on the user's explicit say-so: it prints the
 override ticket for a WAIT or SKIP and logs it as the user's override (scored apart from the desk's
 picks). It does nothing for a TAKE. Intraday tickets are stop-limit orders with a "cancel the entry if not

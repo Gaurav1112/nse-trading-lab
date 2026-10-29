@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import numpy as np, pandas as pd, pytest
 from nse_backtest.desk.verdict import decide, ticket_lines
+from nse_backtest.desk.costs import round_trip_cost
 from nse_backtest.desk.service import check_trade
 from nse_backtest.desk.checks import CheckContext
 from nse_backtest.desk.models import Action, Check, Limits, Mode, Sizing, Status, TradePlan
@@ -20,7 +21,9 @@ PI = replace(P, mode=Mode.INTRADAY, entry_limit=100.5)
 def test_take_ticket_nse_swing():
     v = decide(P, S, None, OK, NSE, 100.0, NOW)
     assert v.action is Action.TAKE and v.ticket == ("BUY 250 ABC CNC LIMIT 100.00", "GTT OCO ABC: stop-loss 98.00 / target 103.00")
-    assert v.headline == "TAKE ABC — BUY 250 @ ₹100.00, loss at stop ≈ ₹640.00 (a gap can lose more)"  # C2
+    # F1 A1: the headline's loss is sizing.loss_at_stop (the card's max loss), never a hand-set risk_amount
+    loss = 250 * 2 + round_trip_cost(NSE, Mode.SWING, 100, 98, 250)
+    assert v.headline == f"TAKE ABC — BUY 250 @ ₹100.00, loss at stop ≈ {NSE.money(loss)} (a gap can lose more)"
     assert len(v.input_hash) == 64
 
 

@@ -5,6 +5,7 @@ from nse_backtest.desk.sizing import size_position
 from nse_backtest.desk.models import Limits, Mode, TradePlan
 from nse_backtest.desk.markets import NSE, US
 from nse_backtest.desk.costs import round_trip_cost
+from nse_backtest.desk import fills
 
 
 def plan(entry=100.0, stop=98.0, mode=Mode.SWING, market="NSE"):
@@ -82,7 +83,9 @@ def test_nonpositive_stop_raises(entry, stop):
 
 
 def _linear_risk_qty(profile, mode, entry, stop, budget, spread=0.00075):
-    # The brief's linear rule, transcribed literally.
+    # The brief's linear rule, transcribed literally; F1 A1: intraday risks up to the stop-limit's limit.
+    if mode is Mode.INTRADAY:
+        entry = fills.entry_limit(entry, stop, profile.tick)
     R = entry - stop
     q = math.floor(budget / R)
     while q > 0 and q * R + round_trip_cost(profile, mode, entry, stop, q, spread) > budget:

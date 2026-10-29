@@ -19,7 +19,7 @@ import streamlit as st
 
 from nse_backtest.desk import audit, charts, loaders, projections, research
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
-from nse_backtest.desk.tradecard import build_card
+from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -173,8 +173,13 @@ def _money(card, profile) -> None:
     st.caption(f"{card.qty} shares{' (your quantity)' if card.qty_is_override else ''} · notional "
                f"{m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital) · at risk "
                f"{card.pct_capital_at_risk:.1f}% of capital · costs {m(card.cost)}. {card.gap_note}")
+    if card.entry_limit is not None and card.max_loss_at_trigger is not None:
+        st.caption(f"Max loss if filled at the trigger: {m(card.max_loss_at_trigger)} (the max loss above assumes "
+                   f"the worst fill, at the limit {m(card.entry_limit)})")
     if card.breaches:
         st.error("Breaks your limits:\n\n" + "\n".join(f"- {b}" for b in card.breaches))
+        if any("daily loss limit" in b for b in card.breaches):
+            st.caption(DAILY_LOSS_NOTE)
 
 
 def _log_once(v: DeskVerdict, card) -> None:
@@ -235,6 +240,9 @@ def _outcome(card, profile, wkey: str) -> None:
     st.plotly_chart(charts.outcome_chart(om, card, profile), width="stretch", key=f"{wkey}_outcome")
     st.caption(f"P(target) {_pct(om.p_target)} · P(stop) {_pct(om.p_stop)} · P(time exit) {_pct(om.p_time)} "
                f"from the desk's replays — {NOT_A_FORECAST}.")
+    if om.limit_slippage is not None:
+        st.caption(f"This chart assumes a fill at the trigger; a fill at the limit worsens each outcome by up to "
+                   f"{m(om.limit_slippage)}.")
 
 
 def _price(card, profile, today: str, wkey: str) -> None:

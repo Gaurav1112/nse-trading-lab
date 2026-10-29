@@ -89,14 +89,19 @@ to open its trade card:
 
 - **Money** (at the desk's size, or at a quantity you type in): max loss, profit at T1, profit at T2,
   reward:risk, expected value, and the share of capital deployed and at risk.
-  - Max loss = quantity × (entry − stop) + round-trip costs. A gap through the stop can lose more, and the
-    card says so.
+  - Max loss = quantity × (worst entry − stop) + round-trip costs with the exit at the stop. The worst entry is
+    the entry for swing and the stop-limit's limit for intraday (an intraday entry can fill anywhere up to its
+    limit), and the desk sizes on that same figure. Intraday cards also show the max loss if filled at the
+    trigger. The verdict headline's "loss at stop" is the same number. A gap through the stop can lose more,
+    and the card says so.
   - Profit at T1 (T2) = quantity × (target − entry) − round-trip costs with the exit at that target.
   - Expected value = Monte Carlo expectancy in R × quantity × (entry − stop). It is blank when there are no odds.
   - If the desk sized 0 shares (for example the stop is too wide for your risk limit) there is no total to
     show, so the card gives the per-share loss and profit at T1 and T2 and asks for a quantity.
 - **Breaches**: a quantity you type in that goes past your risk-per-trade, position-size or daily-loss limit is
-  listed in red. The desk still shows the numbers; the decision is yours.
+  listed in red. Risk per trade compares the max loss (costs included) with your limit, the sizer's own rule.
+  The daily-loss line compares this trade alone with the limit; losses already taken today are checked by the
+  daily-loss check. The desk still shows the numbers; the decision is yours.
 - **The override gate**: for a WAIT or SKIP the ticket stays hidden until you tick "I choose this anyway". The
   ticket is then headed "YOUR OVERRIDE — the desk said SKIP" and the choice is logged once per verdict (one
   row, with the quantity at the first tick; changing the quantity afterwards adds no rows). The CLI does the
@@ -268,7 +273,8 @@ clearing-holiday table.
   `.claude/skills/VENDORED.md`). They are never inputs to a desk verdict.
 
 Example (fictional): a TAKE might read `TAKE ABC — BUY 40 @ ₹1,000.00, loss at stop ≈ ₹980.00 (a gap
-can lose more)`: the loss at the stop includes costs, and a gap through the stop can lose more.
+can lose more)`: the loss at the stop includes costs (intraday: at a fill up to the order's limit), and a gap
+through the stop can lose more.
 
 > **Disclaimer:** the Trade Desk is a paper-trading and education tool, not financial advice. Its odds
 > are a reality check, not a forecast. Paper-trade until your record matches the odds.

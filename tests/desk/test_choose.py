@@ -170,7 +170,7 @@ def test_cli_check_qty_override_shows_breaches(desk, monkeypatch, capsys):
     assert cli.main(["check", "ABC", "--qty", "40"]) == 0
     out = capsys.readouterr().out
     assert "Money (40 shares, your quantity):" in out
-    assert "Breaks your limits:" in out and "risk per trade 2.0% of capital (limit 1.0%)" in out
+    assert "Breaks your limits:" in out and "risk per trade 2.3% of capital (limit 1.0%)" in out  # F1 A2: incl. costs
     assert "BUY 40 ABC CNC LIMIT 100.00" in out
 
 

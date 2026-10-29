@@ -30,17 +30,21 @@ class OutcomeMoney:
     p_target: float
     p_stop: float
     p_time: float
+    # The replays assume a fill at the trigger. Intraday: a fill at the stop-limit's limit worsens each outcome by
+    # up to qty x (limit - entry); None for swing (a LIMIT buy never fills above entry).
+    limit_slippage: float | None = None
 
 
 def outcome_money(card: TradeCard) -> OutcomeMoney | None:
-    """Money P&L per replay = R x qty x risk_per_share (costs are already inside R). None without shares,
-    odds or replay R values."""
+    """Money P&L per replay = R x qty x risk_per_share (costs are already inside R), assuming a fill at the trigger
+    (``limit_slippage`` says how much worse a limit fill can be). None without shares, odds or replay R values."""
     odds = card.verdict.odds
     if card.qty == 0 or odds is None or not odds.mc_rs:
         return None
     pnl = np.asarray(odds.mc_rs, dtype=float) * card.qty * card.risk_per_share
     p5, p25, p50, p75, p95 = (float(x) for x in np.percentile(pnl, [5, 25, 50, 75, 95]))
-    return OutcomeMoney(tuple(pnl.tolist()), p5, p25, p50, p75, p95, odds.p_target, odds.p_stop, odds.p_time)
+    slip = None if card.entry_limit is None else card.qty * max(0.0, card.entry_limit - card.entry)
+    return OutcomeMoney(tuple(pnl.tolist()), p5, p25, p50, p75, p95, odds.p_target, odds.p_stop, odds.p_time, slip)
 
 
 @dataclass(frozen=True)
