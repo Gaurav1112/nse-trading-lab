@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 
 from .costs import round_trip_cost
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Limits, Status
+from .models import Action, DeskVerdict, Limits, Sizing, Status
 from .verdict import ticket_lines
 
 GAP_NOTE = "A gap through the stop can lose more than this."
@@ -17,6 +17,7 @@ class TradeCard:
     verdict: DeskVerdict
     qty: int
     qty_is_override: bool
+    sizing: Sizing  # effective sizing: the desk's, or rebuilt for an override qty
     entry: float
     stop: float
     target_1: float
@@ -81,7 +82,7 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
                   reasons=reasons, per_share=per_share)
     if n == 0:
         why = base.note or base.binding_limit
-        return TradeCard(**common, cost=None, max_loss=None, profit_t1=None, profit_t2=None,
+        return TradeCard(**common, sizing=base, cost=None, max_loss=None, profit_t1=None, profit_t2=None,
                          expected_value=None, notional=None, pct_capital_at_risk=None,
                          pct_capital_deployed=None, breaches=(), ticket=(), ticket_header="",
                          unavailable_reason=f"The desk sized 0 shares ({why}) — enter a quantity to see the money")
@@ -97,7 +98,7 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
                                                 costs=cost, note=f"{n} shares (your quantity)")
     shown = taken or override_confirmed
     return TradeCard(
-        **common, cost=cost, max_loss=max_loss,
+        **common, sizing=sizing, cost=cost, max_loss=max_loss,
         profit_t1=n * (plan.target_1 - plan.entry) - cost,
         profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
         expected_value=ev, notional=notional,

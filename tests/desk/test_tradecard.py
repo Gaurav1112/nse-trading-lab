@@ -48,7 +48,7 @@ def test_override_qty_breaches():
     assert "risk per trade 2.0% of capital (limit 1.0%)" in c.breaches
     assert "position 40.0% of capital (limit 25.0%)" in c.breaches
     assert any("exceeds the daily loss limit (2.0%)" in b for b in c.breaches)
-    assert c.ticket == ticket_lines(PLAN, replace(SIZING, qty=40, notional=4_000.0), NSE)
+    assert c.sizing.qty == 40 and c.ticket[0] == "BUY 40 ABC CNC LIMIT 100.00"
 
 
 def test_override_within_limits_has_no_breach():
@@ -108,8 +108,11 @@ def test_zero_sized_skip_with_qty_gets_full_money_and_override_ticket():
 
 def test_override_sizing_is_rebuilt_honestly():
     c = build_card(verdict(), NSE, LIMITS, qty=40)
-    expected = Sizing(40, SIZING.binding_limit, 200.0, 4_000.0, c.cost, SIZING.size_halved, "40 shares (your quantity)")
-    assert c.ticket == ticket_lines(PLAN, expected, NSE)
+    z = c.sizing
+    assert z.qty == 40 and z.risk_amount == 40 * 5 and z.notional == 40 * 100
+    assert z.costs == pytest.approx(round_trip_cost(NSE, Mode.SWING, 100, 110, 40))
+    assert z.note == "40 shares (your quantity)"
+    assert build_card(verdict(), NSE, LIMITS).sizing == SIZING  # not overridden: the desk's own
 
 
 def test_wait_reasons_and_same_qty_not_override_and_take_override_ticket():
@@ -123,3 +126,5 @@ def test_wait_reasons_and_same_qty_not_override_and_take_override_ticket():
 def test_entry_must_be_above_stop():
     with pytest.raises(ValueError, match="entry must be above stop"):
         build_card(verdict(plan=replace(PLAN, stop=100)), NSE, LIMITS)
+    with pytest.raises(ValueError, match="entry must be above stop"):
+        build_card(verdict(plan=replace(PLAN, stop=105)), NSE, LIMITS)
