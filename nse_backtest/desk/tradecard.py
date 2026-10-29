@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from .costs import round_trip_cost
+from .costs import side_cost
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Limits, Mode, Sizing, Status
+from .models import Action, DeskVerdict, Limits, Mode, Side, Sizing, Status
 from .sizing import loss_at_stop, worst_entry
 from .verdict import market_day, regime_override_note, ticket_lines
 
@@ -13,6 +13,8 @@ GAP_NOTE = "A gap through the stop can lose more than this."
 DAILY_LOSS_NOTE = ("The daily-loss line compares this trade alone with the daily loss limit; losses already taken "
                    "today are checked by the daily-loss check in Checks.")
 LIMIT_FILL_NOTE = "An intraday fill can be up to {limit} (the order's limit), which is already in the max loss."
+SHORT_LIMIT_FILL_NOTE = ("An intraday short can fill as low as {limit} (the sell order's limit), which is already in "
+                         "the max loss.")
 _EPS = 1e-9
 
 
@@ -80,10 +82,11 @@ def _fill_note(v: DeskVerdict, profile: MarketProfile, n: int) -> str:
     if plan.mode is not Mode.INTRADAY or n < 1:
         return ""
     lim, cp, m = worst_entry(plan, profile), v.current_price, profile.money
-    if isinstance(cp, (int, float)) and plan.entry <= cp <= lim:  # the ticket is a plain LIMIT, filled at ~cp
+    lo, hi = (lim, plan.entry) if plan.side is Side.SHORT else (plan.entry, lim)
+    if isinstance(cp, (int, float)) and lo <= cp <= hi:  # the ticket is a plain LIMIT, filled at ~cp
         return (f"assumes a fill at the trigger; the ticket is a limit at the current price {m(cp)}, so about "
-                f"{m(n * (cp - plan.entry))} less")
-    return f"assumes a fill at the trigger; up to {m(n * (lim - plan.entry))} less at the limit"
+                f"{m(n * abs(cp - plan.entry))} less")
+    return f"assumes a fill at the trigger; up to {m(n * abs(lim - plan.entry))} less at the limit"
 
 
 def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: int | None = None,
@@ -93,23 +96,32 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
         _check_qty(qty)
     n = base.qty if qty is None else qty
     is_override = qty is not None and qty != base.qty
-    rps = plan.entry - plan.stop
+    short = plan.side is Side.SHORT
+    rps = plan.risk_per_share  # stop - entry for a short
     if rps <= 0:
-        raise ValueError("entry must be above stop")
+        raise ValueError("stop must be above entry" if short else "entry must be above stop")
     sp = base.spread_per_side  # the spread the sizer costed: one cost basis for sizing, headline and card
-    c1 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, 1, sp)
-    c2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, 1, sp)
-    per_share = (loss_at_stop(plan, profile, 1, spread_per_side=sp), plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
+
+    def cost_to(exit_price: float, q: int) -> float:  # a short sells at the entry and buys back at the exit
+        return side_cost(profile, plan.mode, plan.entry, exit_price, q, sp, side=plan.side)
+
+    def gain(target: float) -> float:  # per share, before costs
+        return plan.entry - target if short else target - plan.entry
+
+    c1, c2 = cost_to(plan.target_1, 1), cost_to(plan.target_2, 1)
+    per_share = (loss_at_stop(plan, profile, 1, spread_per_side=sp), gain(plan.target_1) - c1,
+                 gain(plan.target_2) - c2)
     gap_note = GAP_NOTE
     if plan.mode is Mode.INTRADAY:
-        gap_note += " " + LIMIT_FILL_NOTE.format(limit=profile.money(worst_entry(plan, profile)))
+        note = SHORT_LIMIT_FILL_NOTE if short else LIMIT_FILL_NOTE
+        gap_note += " " + note.format(limit=profile.money(worst_entry(plan, profile)))
     taken = v.action is Action.TAKE
     reasons = () if taken else tuple(f"{c.status.value} {c.name} — {c.reason}"
                                      for c in v.checks if c.status in (Status.BLOCK, Status.WARN))
     common = dict(verdict=v, qty=n, qty_is_override=is_override, entry=plan.entry, stop=plan.stop,
                   target_1=plan.target_1, target_2=plan.target_2,
                   entry_limit=worst_entry(plan, profile) if plan.mode is Mode.INTRADAY else None,
-                  risk_per_share=rps, rr_t1=(plan.target_1 - plan.entry) / rps, gap_note=gap_note,
+                  risk_per_share=rps, rr_t1=gain(plan.target_1) / rps, gap_note=gap_note,
                   reasons=reasons, per_share=per_share)
     if n == 0:
         why = base.note or base.binding_limit
@@ -118,8 +130,7 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
                          expected_value=None, notional=None, pct_capital_at_risk=None,
                          pct_capital_deployed=None, breaches=(), ticket=(), ticket_header="",
                          unavailable_reason=f"The desk sized 0 shares ({why}) — enter a quantity to see the money")
-    cost = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, n, sp)
-    cost_t2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, n, sp)
+    cost, cost_t2 = cost_to(plan.target_1, n), cost_to(plan.target_2, n)
     notional = n * plan.entry
     max_loss = loss_at_stop(plan, profile, n, spread_per_side=sp)  # the sizer's and the headline's figure
     max_loss_at_trigger = loss_at_stop(plan, profile, n, entry=plan.entry, spread_per_side=sp)
@@ -133,8 +144,8 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     return TradeCard(
         **common, sizing=sizing, cost=cost, max_loss=max_loss, max_loss_at_trigger=max_loss_at_trigger,
         fill_note=_fill_note(v, profile, n),
-        profit_t1=n * (plan.target_1 - plan.entry) - cost,
-        profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
+        profit_t1=n * gain(plan.target_1) - cost,
+        profit_t2=n * gain(plan.target_2) - cost_t2,
         expected_value=ev, notional=notional,
         pct_capital_at_risk=risk_pct, pct_capital_deployed=deployed_pct, breaches=breaches,
         ticket=(ticket_lines(plan, sizing, profile, current_price=v.current_price,

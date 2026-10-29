@@ -409,3 +409,50 @@ def test_h5a_hash_includes_side_only_for_shorts():
                       99.5, Side.SHORT)
     long = replace(short, side=Side.LONG)
     assert input_hash(short, S, None, OK, 100.0) != input_hash(long, S, None, OK, 100.0)
+
+
+# ---- H5a: short tickets ----
+def _short_plan(**kw):
+    from nse_backtest.desk.models import Side
+    base = TradePlan("ABC", "NSE", Mode.INTRADAY, 100.0, 102.0, 97.0, 94.0, 1.0, 18, 100.0,
+                     "2026-10-29T09:30:00", "opening-range mid", 99.5, Side.SHORT)
+    return replace(base, **kw)
+
+
+@pytest.mark.parametrize("cp, first", [
+    (100.3, "SELL 250 ABC MIS SL trigger 100.00 limit 99.50"),   # above the trigger: the sell stop-limit
+    (None, "SELL 250 ABC MIS SL trigger 100.00 limit 99.50"),    # no price: the stop-limit
+    (100.0, "SELL 250 ABC MIS LIMIT 99.50"),                     # at the trigger: a plain sell limit at the limit
+    (99.7, "SELL 250 ABC MIS LIMIT 99.50"),                      # below it
+])
+def test_h5a_short_ticket_both_price_branches(cp, first):
+    lines = ticket_lines(_short_plan(), S, NSE, current_price=cp, day=date(2026, 10, 29))
+    assert lines == (first,
+                     "Cancel the entry if not filled by 14:45 IST",
+                     "SL-M BUY 250 ABC trigger 102.00",
+                     "BUY 250 ABC LIMIT 97.00",
+                     "Square off yourself by 15:10 IST (broker auto square-off charges ₹59+)")
+
+
+def test_h5a_short_ticket_on_an_early_close_squares_off_earlier(monkeypatch):
+    from datetime import time
+    from nse_backtest.desk import calendars as cal
+    d = date(2026, 10, 29)
+    monkeypatch.setitem(cal.EARLY_CLOSES, "NSE", {d: time(14, 0)})  # fictional early close: flat-by 13:45
+    lines = ticket_lines(_short_plan(), S, NSE, current_price=100.3, day=d)
+    assert lines[1] == "Cancel the entry if not filled by 13:45 IST"
+    assert lines[-1] == "Square off yourself by 13:45 IST (broker auto square-off charges ₹59+)"
+
+
+def test_h5a_short_ticket_refuses_us_and_swing():
+    with pytest.raises(ValueError, match="NSE intraday only"):
+        ticket_lines(_short_plan(market="US"), S, US)
+    with pytest.raises(ValueError, match="NSE intraday only"):
+        ticket_lines(_short_plan(mode=Mode.SWING), S, NSE)
+
+
+def test_h5a_long_tickets_unchanged():
+    pi = replace(P, mode=Mode.INTRADAY, entry_limit=100.5)
+    assert ticket_lines(pi, S, NSE, current_price=99.0, day=date(2026, 10, 29)) == (
+        "BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "Cancel the entry if not filled by 14:45 IST",
+        "SL-M SELL 250 ABC trigger 98.00", "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")

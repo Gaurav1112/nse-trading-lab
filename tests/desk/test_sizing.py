@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import pytest
 from nse_backtest.desk.sizing import size_position
@@ -113,3 +114,52 @@ def test_binary_search_equals_linear_rule(profile, mode, entry, d, capital):
     s = size_position(plan(entry=entry, stop=stop, mode=mode, market=profile.code),
                       Limits(capital=capital, max_position_pct=100, cash_buffer_pct=0), profile)
     assert s.qty == expected
+
+
+# ---- H5a: shorts size by the worst fill (the sell limit below the trigger) ----
+from nse_backtest.desk.costs import side_cost  # noqa: E402
+from nse_backtest.desk.models import Side  # noqa: E402
+from nse_backtest.desk.sizing import loss_at_stop, worst_entry, worst_risk  # noqa: E402
+
+# Fictional short: sell trigger 100, sell limit 99.50, stop 102, T1 97, T2 94.
+SHORT = TradePlan("X", "NSE", Mode.INTRADAY, 100.0, 102.0, 97.0, 94.0, 1.0, 18, 100.0, "2026-10-29T09:30:00",
+                  "opening-range mid", 99.5, Side.SHORT)
+WIDE = Limits(capital=100_000, max_position_pct=100.0)  # so the risk budget binds
+
+
+def test_short_side_cost_buys_at_the_exit_and_sells_at_the_entry():
+    # a short sells first (STT on the sell = the entry) and buys back at the exit (stamp on the buy)
+    assert side_cost(NSE, Mode.INTRADAY, 100.0, 102.0, 10, side=Side.SHORT) == \
+        pytest.approx(round_trip_cost(NSE, Mode.INTRADAY, 102.0, 100.0, 10))
+    assert side_cost(NSE, Mode.INTRADAY, 100.0, 102.0, 10) == \
+        pytest.approx(round_trip_cost(NSE, Mode.INTRADAY, 100.0, 102.0, 10))
+
+
+def test_short_worst_fill_and_worst_risk():
+    assert worst_entry(SHORT, NSE) == 99.5
+    assert worst_risk(SHORT, NSE) == pytest.approx(2.5)  # stop - entry_limit
+    assert worst_risk(replace(SHORT, entry_limit=None), NSE) == pytest.approx(2.5)  # computed 99.50
+
+
+def test_short_sizing_hand_computed():
+    # Per share at the worst fill (sell 99.50, buy back 102): risk 2.50 + cost 0.25771432
+    #   brokerage 0.0003*(102+99.5) = 0.06045, STT 0.00025*99.5 = 0.024875, stamp 0.00003*102 = 0.00306,
+    #   txn 201.5*0.0000308 = 0.0062062, GST 0.18*(0.06045+0.0062062) = 0.01199812, spread 201.5*0.00075 = 0.151125
+    # budget 1% of 1,00,000 = 1,000 -> floor(1000 / 2.75771432) = 362 shares, loss 362 * 2.75771432 = 998.29
+    s = size_position(SHORT, WIDE, NSE)
+    assert s.qty == 362 and s.binding_limit == "max loss per trade"
+    assert s.risk_amount == pytest.approx(998.2926, abs=0.01)
+    assert s.costs == pytest.approx(93.2926, abs=0.01)
+    assert s.notional == pytest.approx(36_200.0)
+    assert loss_at_stop(SHORT, NSE, 362) == pytest.approx(998.2926, abs=0.01)
+    assert loss_at_stop(SHORT, NSE, 362, entry=100.0) == pytest.approx(817.5442, abs=0.01)  # at the trigger
+
+
+def test_short_sizing_rejects_a_stop_below_entry():
+    with pytest.raises(ValueError, match="stop above entry"):
+        size_position(replace(SHORT, stop=99.0), WIDE, NSE)
+
+
+def test_long_sizing_unchanged_by_side():
+    p = plan(mode=Mode.INTRADAY)
+    assert worst_risk(p, NSE) == pytest.approx(fills.entry_limit(100.0, 98.0, NSE.tick) - 98.0)

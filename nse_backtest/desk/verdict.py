@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from . import calendars as cal
 from . import fills
 from . import models
+from . import plan as plan_mod
 from .checks import REGIME_HELD_OUT_PCT, signed_pct
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Mode, Odds, Side, Sizing, Status, TradePlan, summary_fields
@@ -22,8 +23,32 @@ from .sizing import loss_at_stop
 
 
 def stop_limit(plan: TradePlan, profile: MarketProfile) -> float:
-    """The intraday buy stop-limit's limit price (computed for a plan built without one)."""
+    """The intraday entry stop-limit's limit price (computed for a plan built without one): above the trigger for a
+    long's buy, below it for a short's sell."""
+    if plan.side is Side.SHORT:
+        return fills.short_limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
     return fills.limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
+
+
+SQUARE_OFF_CHARGE_NOTE = "broker auto square-off charges ₹59+"
+
+
+def _short_ticket(plan: TradePlan, sizing: Sizing, profile: MarketProfile, current_price, d: date
+                  ) -> tuple[str, ...]:
+    """NSE MIS short. With the price at or below the trigger the entry is a plain sell LIMIT at the stop-limit's
+    limit (a stop sell whose trigger is already above the last price is rejected); above it, the sell stop-limit."""
+    sym, qty = plan.symbol, sizing.qty
+    lim, cancel = stop_limit(plan, profile), cal.entry_cancel_by(profile, d)
+    square = plan_mod.short_flat_by(profile, d)
+    triggered = (isinstance(current_price, (int, float)) and not isinstance(current_price, bool)
+                 and math.isfinite(current_price) and current_price <= plan.entry)
+    entry = (f"SELL {qty} {sym} MIS LIMIT {lim:.2f}" if triggered else
+             f"SELL {qty} {sym} MIS SL trigger {plan.entry:.2f} limit {lim:.2f}")
+    return (entry,
+            f"Cancel the entry if not filled by {cancel:%H:%M} IST",
+            f"SL-M BUY {qty} {sym} trigger {plan.stop:.2f}",
+            f"BUY {qty} {sym} LIMIT {plan.target_1:.2f}",
+            f"Square off yourself by {square:%H:%M} IST ({SQUARE_OFF_CHARGE_NOTE})")
 
 
 def market_day(ts, profile: MarketProfile) -> date | None:
@@ -43,6 +68,11 @@ def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile, *, cur
     and flat-by times, pulled in on an early close."""
     sym, qty = plan.symbol, sizing.qty
     intraday = plan.mode is Mode.INTRADAY
+    if plan.side is Side.SHORT:
+        if profile.code != "NSE" or not intraday:
+            raise ValueError("shorts are NSE intraday only")
+        return _short_ticket(plan, sizing, profile, current_price,
+                             day or market_day(plan.last_bar, profile) or date.today())
     if intraday:
         d = day or market_day(plan.last_bar, profile) or date.today()
         lim, flat, cancel = stop_limit(plan, profile), cal.flat_by_for(profile, d), cal.entry_cancel_by(profile, d)

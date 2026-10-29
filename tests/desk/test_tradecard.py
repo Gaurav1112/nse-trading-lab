@@ -279,3 +279,66 @@ def test_me_cli_profit_line_carries_the_trigger_fill_note():
     lines = format_money(build_card(decide(p, s, None, OK, NSE, 999.5, _NOW), NSE, lim), NSE)
     (profit,) = [x for x in lines if "profit at T1" in x]
     assert "(assumes a fill at the trigger; up to" in profit
+
+
+# ---- H5a: short money, mirrored and hand-computed (fictional numbers) ----
+from nse_backtest.desk.models import Side  # noqa: E402
+from nse_backtest.desk.sizing import size_position  # noqa: E402
+
+SHORT = TradePlan("X", "NSE", Mode.INTRADAY, 100.0, 102.0, 97.0, 94.0, 1.0, 18, 100.0, "2026-10-29T09:30:00",
+                  "opening-range mid", 99.5, Side.SHORT)
+SHORT_LIMITS = Limits(capital=100_000, max_position_pct=100.0)
+
+
+def _short_verdict(action=Action.WAIT, cp=100.1, sizing=None):
+    sz = sizing or size_position(SHORT, SHORT_LIMITS, NSE)
+    return DeskVerdict(action, "h", SHORT, sz, None, (Check("short_edge", Status.WARN, "edge not proven"),), (),
+                       None, cp, "s" * 64, "2026-10-29T09:45:00+05:30")
+
+
+def test_short_card_money_hand_computed():
+    c = build_card(_short_verdict(), NSE, SHORT_LIMITS)
+    assert c.qty == 362 and c.risk_per_share == pytest.approx(2.0) and c.rr_t1 == pytest.approx(1.5)
+    assert c.entry_limit == 99.5
+    # worst fill: sell at 99.50, stopped at 102 -> 362 * 2.5 + 93.29 cost
+    assert c.max_loss == pytest.approx(998.2926, abs=0.01)
+    # fill at the trigger 100: 362 * 2 + 362 * 0.25840949
+    assert c.max_loss_at_trigger == pytest.approx(817.5442, abs=0.01)
+    # T1: 362 * (100 - 97) - 362 * 0.25255777 (sell 100, buy 97)
+    assert c.profit_t1 == pytest.approx(994.5741, abs=0.01)
+    # T2: 362 * (100 - 94) - 362 * 0.24904674 (sell 100, buy 94)
+    assert c.profit_t2 == pytest.approx(2081.8451, abs=0.01)
+    assert c.cost == pytest.approx(91.4259, abs=0.01)
+    loss1, p1, p2 = c.per_share
+    assert loss1 == pytest.approx(2.75771432, abs=1e-4)
+    assert p1 == pytest.approx(3 - 0.25255777, abs=1e-4) and p2 == pytest.approx(6 - 0.24904674, abs=1e-4)
+    assert c.notional == pytest.approx(36_200.0) and c.pct_capital_deployed == pytest.approx(36.2)
+    assert c.pct_capital_at_risk == pytest.approx(0.9983, abs=1e-3)
+    assert c.expected_value is None and c.breaches == ()
+    assert c.max_loss > 0 and c.profit_t1 > 0 and c.profit_t2 > c.profit_t1
+
+
+def test_short_card_override_breaches_hand_computed():
+    # 1,000 shares: brokerage caps at 20 a side; cost 40 + 24.875 + 3.06 + 6.2062 + 8.317116 + 151.125 = 233.5833
+    c = build_card(_short_verdict(), NSE, Limits(capital=100_000), qty=1000)
+    assert c.max_loss == pytest.approx(2733.5833, abs=0.01)
+    assert c.breaches == ("risk per trade 2.7% of capital (limit 1.0%)",
+                          "position 100.0% of capital (limit 25.0%)",
+                          "max loss 2.7% of capital exceeds the daily loss limit (2.0%)")
+
+
+def test_short_card_fill_note_and_gap_note():
+    above = build_card(_short_verdict(cp=100.1), NSE, SHORT_LIMITS)  # sell stop-limit: down to the limit
+    assert above.fill_note == f"assumes a fill at the trigger; up to {NSE.money(362 * 0.5)} less at the limit"
+    inside = build_card(_short_verdict(cp=99.8), NSE, SHORT_LIMITS)  # plain sell LIMIT at ~ the current price
+    assert inside.fill_note == ("assumes a fill at the trigger; the ticket is a limit at the current price "
+                                f"{NSE.money(99.8)}, so about {NSE.money(362 * 0.2)} less")
+    assert "as low as ₹99.50" in above.gap_note
+
+
+def test_short_card_ticket_only_on_confirmed_override():
+    v = _short_verdict()
+    assert build_card(v, NSE, SHORT_LIMITS).ticket == ()
+    c = build_card(v, NSE, SHORT_LIMITS, override_confirmed=True)
+    assert c.ticket[0] == "SELL 362 X MIS SL trigger 100.00 limit 99.50"
+    assert c.ticket_header == "YOUR OVERRIDE — the desk said WAIT"
