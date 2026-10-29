@@ -103,6 +103,11 @@ def _check_summary(v: DeskVerdict) -> str:
     return f"<span style='color:{color};font-weight:700'>{parts[0]} &nbsp;({' · '.join(names)})</span>"
 
 
+def _mode_label(p) -> str:
+    """The plan's mode, with the SHORT badge for an intraday short."""
+    return f"{p.mode.value} SHORT" if p.is_short else p.mode.value
+
+
 def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, show_ticket: bool = True) -> None:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     color = ACTION_COLOR.get(v.action.value, "#888888")
@@ -116,7 +121,7 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, 
     st.markdown("**Plan**")
     st.dataframe(pd.DataFrame([{
         "Entry": m(p.entry), "Stop": m(p.stop), "T1": m(p.target_1), "T2": m(p.target_2),
-        "R / share": m(p.risk_per_share), "Basis": p.stop_basis, "Mode": p.mode.value}]),
+        "R / share": m(p.risk_per_share), "Basis": p.stop_basis, "Mode": _mode_label(p)}]),
         hide_index=True, width="stretch")
     st.caption(f"Size: {s.qty} shares · binding limit {s.binding_limit} · risk {m(s.risk_amount)} · "
                f"notional {m(s.notional)} · costs {m(s.costs)}. {s.note}")
@@ -392,6 +397,10 @@ with tab_pos:
 # ---------------------------------------------------------------- Intraday
 
 with tab_intra:
+    if session.shorts_today(profile, regime_name):
+        st.caption("HOSTILE NSE day: the scan also checks each symbol as an opening-range breakdown SHORT (MIS, F&O "
+                   "stocks only, squared off by 15:10 IST). Shorts stay at most WAIT until the desk has proven the "
+                   "edge on its own history.")
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni, key=f"desk_intra_syms_{market}")
     scan_key = SCAN_KEY
@@ -427,12 +436,14 @@ with tab_intra:
                            if stale is not None else cur)
                 rows.append((cur, shown_v, stale))
             st.dataframe(pd.DataFrame([{
-                "Symbol": sv.plan.symbol, "Action": sv.action.value, "Headline": sv.headline,
+                "Symbol": sv.plan.symbol, "Side": "SHORT" if sv.plan.is_short else "long",
+                "Action": sv.action.value, "Headline": sv.headline,
                 "MC R": _r(sv.odds.mc_expectancy_r if sv.odds is not None else None)} for _, sv, _ in rows]),
                 hide_index=True, width="stretch")
             for i, (cur, shown_v, stale) in enumerate(rows):
                 ok = f"desk_intra_open_{cur.input_hash[:12]}"
-                with st.expander(f"{cur.action.value} — {cur.plan.symbol}", expanded=cur.action is Action.TAKE):
+                with st.expander(f"{cur.action.value} — {cur.plan.symbol}" + (" SHORT" if cur.plan.is_short else ""),
+                                 expanded=cur.action is Action.TAKE):
                     if st.button("Close card" if st.session_state.get(ok) else "Open card", key=f"{ok}_btn"):
                         st.session_state[ok] = not st.session_state.get(ok)
                         st.rerun()
@@ -594,7 +605,7 @@ def _candidate_row(v: DeskVerdict) -> dict:
     quick = is_quick(v)
     why = (blocks or v.headline) if v.action is not Action.TAKE else (
         "not in today's top picks — run a Full check before choosing" if quick else "")
-    return {"Symbol": p.symbol, "Mode": p.mode.value, "Desk says": v.action.value,
+    return {"Symbol": p.symbol, "Mode": _mode_label(p), "Desk says": v.action.value,
             "Checked": "quick (last close)" if quick else "full",
             "Built": "—" if built is None else f"{built:%H:%M}",
             "Entry": profile.money(p.entry), "To entry %": _to_entry_pct(v), "Stop": profile.money(p.stop),
@@ -691,7 +702,7 @@ with tab_choose:
             have = {v.plan.symbol for v in verdicts if v.plan.mode is Mode.SWING}
             skipped = tuple((s, w) for s, w in (plan_now.skipped if plan_now is not None else ()) if s not in have)
             rows = [_candidate_row(v) for v in verdicts] + [_skipped_row(s, w) for s, w in skipped]
-            labels = ([f"{v.action.value} {v.plan.symbol} · {v.plan.mode.value}"
+            labels = ([f"{v.action.value} {v.plan.symbol} · {_mode_label(v.plan)}"
                        + (" (quick check)" if is_quick(v) else "") for v in verdicts]
                       + [f"SKIP {s} · swing (not checked)" for s, _ in skipped])
         except Exception as e:  # noqa: BLE001 - never a blank tab

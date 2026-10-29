@@ -471,13 +471,13 @@ EDGE_PASS = (Check("short_edge", Status.PASS, "proven (H5b)"),)  # what the H5b 
 def test_h5a_every_short_verdict_is_capped_at_wait(cp):
     v = decide(_short_plan(), S, None, EDGE_WARN, NSE, cp, NOW)
     assert v.action is Action.WAIT and v.ticket == () and v.trigger is None
-    assert v.headline == f"WAIT ABC — SHORT: {SHORT_EDGE_UNPROVEN}"
+    assert v.headline == f"WAIT ABC SHORT — {SHORT_EDGE_UNPROVEN}"
     assert _verdict.short_edge_cap(v.plan, v.checks) == SHORT_EDGE_UNPROVEN
 
 
 def test_h5a_short_cap_never_lifts_a_block_or_a_missing_price():
     blocked = decide(_short_plan(), S, None, EDGE_WARN + (Check("ban_list", Status.BLOCK, "b"),), NSE, 99.8, NOW)
-    assert blocked.action is Action.SKIP and blocked.headline == "SKIP ABC — blocked by: ban_list"
+    assert blocked.action is Action.SKIP and blocked.headline == "SKIP ABC SHORT — blocked by: ban_list"
     assert decide(_short_plan(), S, None, EDGE_WARN, NSE, float("nan"), NOW).action is Action.SKIP
 
 
@@ -496,14 +496,71 @@ def test_h5a_short_price_branches_once_the_edge_is_proven():
     from nse_backtest.desk.sizing import loss_at_stop
     above = decide(_short_plan(), S, None, EDGE_PASS, NSE, 100.2, NOW)
     assert above.action is Action.WAIT and above.trigger == 100.0
-    assert above.headline == "WAIT ABC — sell short only below ₹100.00 (now ₹100.20)"
+    assert above.headline == "WAIT ABC SHORT — sell short only below ₹100.00 (now ₹100.20)"
     assert above.ticket[:2] == ("IF TRIGGERED:", "SELL 250 ABC MIS SL trigger 100.00 limit 99.50")
     below = decide(_short_plan(), S, None, EDGE_PASS, NSE, 99.4, NOW)
     assert below.action is Action.WAIT and below.headline == (
-        "WAIT ABC — Price ₹99.40 is below the stop-limit's limit ₹99.50 — the order would not fill")
+        "WAIT ABC SHORT — Price ₹99.40 is below the stop-limit's limit ₹99.50 — the order would not fill")
     take = decide(_short_plan(), S, None, EDGE_PASS, NSE, 99.8, NOW)
     loss = loss_at_stop(_short_plan(), NSE, 250)
     assert loss == pytest.approx(250 * 2.5 + 250 * 0.25771432, abs=0.01)  # sell 99.50, buy back 102
     assert take.action is Action.TAKE and take.ticket[0] == "SELL 250 ABC MIS LIMIT 99.50"
-    assert take.headline == f"TAKE ABC — SELL SHORT 250 @ ₹100.00, loss at stop ≈ {NSE.money(loss)} (a gap can lose more)"
+    assert take.headline == f"TAKE ABC SHORT — SELL 250 @ ₹100.00, loss at stop ≈ {NSE.money(loss)} (a gap can lose more)"
     assert decide(_short_plan(), S, None, EDGE_PASS, NSE, 100.1, NOW).action is Action.TAKE  # inside the 0.1% band
+
+
+# ---- H5a: check_trade end to end for a short, and the audit row ----
+def _breakdown_frame():
+    from tests.desk.test_plan import sessions15
+    df = sessions15(n_days=25, last_day_bars=3)
+    today = df.index[df.index.normalize() == df.index[-1].normalize()]
+    o = float(df.loc[today[0], "Open"])
+    # today's OR: 100.0..102.0 (scaled to the last open), then a breakdown bar under the OR low
+    k = o / 101.0
+    df.loc[today[0], ["Open", "High", "Low", "Close"]] = [101 * k, 102 * k, 100 * k, 100.5 * k]
+    df.loc[today[1], ["Open", "High", "Low", "Close"]] = [100.5 * k, 100.8 * k, 99.9 * k, 100.1 * k]
+    df.loc[today[2], ["Open", "High", "Low", "Close"]] = [100.1 * k, 100.2 * k, 99.6 * k, 99.8 * k]
+    return df, k
+
+
+def test_h5a_check_trade_short_end_to_end(tmp_path):
+    from nse_backtest.desk.models import Side
+    df, k = _breakdown_frame()
+    now = datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
+    c = _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"}))
+    path = tmp_path / "a.jsonl"
+    v = check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit_path=path,
+                    replays=500, robustness=False)
+    assert v.plan.side is Side.SHORT and v.plan.entry == pytest.approx(100 * k)
+    assert v.plan.stop == pytest.approx(101 * k) and v.odds is None
+    assert v.action is Action.WAIT and v.headline == f"WAIT ABC SHORT — {SHORT_EDGE_UNPROVEN}"
+    names = {ck.name: ck for ck in v.checks}
+    assert names["short_eligibility"].status is Status.PASS
+    assert names["relative_volume"].status is Status.WARN  # every opening bar trades the same volume here
+    assert "1.00×" in names["relative_volume"].reason
+    assert v.cost_per_share == pytest.approx(
+        round_trip_cost(NSE, Mode.INTRADAY, v.plan.target_1, v.plan.entry, v.sizing.qty) / v.sizing.qty)
+    row = json.loads(path.read_text().splitlines()[-1])
+    assert row["side"] == "short" and row["input_hash"] == v.input_hash
+
+
+def test_h5a_long_audit_rows_carry_no_side(tmp_path):
+    path = tmp_path / "a.jsonl"
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), _pin_ctx(), replays=500,
+                    robustness=False, audit_path=path)
+    assert "side" not in json.loads(path.read_text().splitlines()[-1]) and v.plan.side.value == "long"
+
+
+def test_h5a_scoreboard_does_not_score_short_rows_yet(tmp_path):
+    from nse_backtest.desk import scoreboard
+    from nse_backtest.desk.audit import append_override
+    df, _ = _breakdown_frame()
+    from nse_backtest.desk.models import Side
+    now = datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
+    v = check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000),
+                    _pin_ctx(now=now, regime="HOSTILE", fno=frozenset({"ABC"})), side=Side.SHORT, audit=False)
+    path = tmp_path / "a.jsonl"
+    append_override(v, path, now=now)
+    row = json.loads(path.read_text().splitlines()[-1])
+    good, bad = scoreboard.load_candidates([row])
+    assert good == [] and len(bad) == 1 and "short" in bad[0][1]

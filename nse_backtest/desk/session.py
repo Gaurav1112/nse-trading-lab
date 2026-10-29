@@ -21,7 +21,7 @@ from . import scoreboard_io
 from .audit import data_dir
 from .daily import DailyPlan, daily_plan, plan_entry, today_gap_pct, turnover_20d
 from .intraday import orb_scan
-from .models import Action, DeskVerdict, Limits, Mode
+from .models import Action, DeskVerdict, Limits, Mode, Side
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 from .verdict import ADVICE_GROUPS, group_of
@@ -147,8 +147,21 @@ def load_frames(profile, symbols: Iterable[str], on_warning: Warn = None) -> dic
     return out
 
 
+def shorts_today(profile, regime) -> bool:
+    """ORB breakdown shorts are offered only on HOSTILE NSE days."""
+    return profile.code == "NSE" and isinstance(regime, str) and regime.strip().upper() == "HOSTILE"
+
+
+def _with_fno(ctx, profile, on_warning: Warn):
+    fno = loaders.fno_underlyings(profile, ctx.now)
+    if fno is None:
+        _warn(on_warning, "NSE F&O list unavailable: could not verify F&O eligibility, so every short is blocked")
+    return replace(ctx, fno=fno)
+
+
 def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, stop=None, target=None,
-              regime=_RESOLVE, on_warning: Warn = None, desk_entry: bool = False) -> DeskVerdict:
+              regime=_RESOLVE, on_warning: Warn = None, desk_entry: bool = False,
+              side: Side = Side.LONG) -> DeskVerdict:
     """Full single-symbol check. Raises ValueError for bad input / unusable data. With ``desk_entry`` and no
     ``entry``, a swing check uses the daily plan's own entry (the breakout above the 20-day high; the close when
     already at it) instead of the last close."""
@@ -168,6 +181,9 @@ def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, s
     nxt, checked = loaders.next_earnings(profile, sym)
     quote = quote_for(profile, sym, on_warning)
     ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now, profile))
+    if Side(side) is Side.SHORT:
+        return check_trade(df, sym, profile, mode, limits, _with_fno(ctx, profile, on_warning), entry=entry,
+                           stop=stop, target=target, quote=quote, side=Side.SHORT)
     return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target, quote=quote)
 
 
@@ -197,10 +213,14 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
                  ) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
     """Opening-range scan over 15m frames; (verdicts, failures) with load failures included. Every TAKE is
     logged to the audit log, so the scoreboard scores it. ``on_progress(done, total, symbol)`` is called after
-    each symbol is loaded (a failing callback never stops the scan)."""
+    each symbol is loaded (a failing callback never stops the scan). On a HOSTILE NSE day every symbol is also
+    checked as an ORB breakdown short (shorts_today)."""
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, regime=regime)
+    sides = (Side.LONG,)
+    if shorts_today(profile, regime):
+        ctx, sides = _with_fno(ctx, profile, on_warning), (Side.LONG, Side.SHORT)
     frames15, load_failures, per_symbol, quotes = {}, [], {}, {}
     symbols = list(symbols)
     for n, s in enumerate(symbols, 1):
@@ -221,8 +241,9 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
                                     today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now, profile))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
+    kw = {"sides": sides} if len(sides) > 1 else {}
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes,
-                                  audit_path=data_dir() / scoreboard_io.AUDIT_FILE)  # scan TAKEs are scored
+                                  audit_path=data_dir() / scoreboard_io.AUDIT_FILE, **kw)  # scan TAKEs are scored
     return verdicts, load_failures + list(failures)
 
 
@@ -251,7 +272,7 @@ def candidate_rank(v: DeskVerdict) -> tuple:
 def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = (), *,
                      include_others: bool = True) -> list[DeskVerdict]:
     """Every verdict from the daily plan (TAKE, WATCH and, with ``include_others``, every other verdict it
-    computed) and the intraday scan, one per (symbol, mode) (the plan's lists win, then the scan, then
+    computed) and the intraday scan, one per (symbol, mode, side) (the plan's lists win, then the scan, then
     ``others``), ranked by candidate_rank. The plan's skipped symbols have no verdict and are left to the
     caller."""
     lists = (plan.take + plan.watch) if plan is not None else ()
@@ -259,7 +280,7 @@ def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict
     seen: set = set()
     out: list[DeskVerdict] = []
     for v in [*lists, *scan_verdicts, *extra]:
-        k = (v.plan.symbol, v.plan.mode)
+        k = (v.plan.symbol, v.plan.mode, v.plan.side)
         if k not in seen:
             seen.add(k)
             out.append(v)

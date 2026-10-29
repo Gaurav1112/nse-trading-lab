@@ -454,6 +454,15 @@ def day_trades_5d(journal: list[dict], today: date, profile: MarketProfile | Non
     return n
 
 
+def fno_underlyings(profile: MarketProfile, now: datetime | None = None) -> frozenset[str] | None:
+    """NSE's F&O underlyings (who may be shorted intraday); None for a market without one or when the list
+    cannot be verified (the short_eligibility check then BLOCKs)."""
+    if profile.code != "NSE":
+        return None
+    now = now or datetime.now(ZoneInfo(profile.tz))
+    return nse_lists.fetch_fno_underlyings(data_dir() / "cache", now.date())
+
+
 def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | None = None,
                   symbol_df: pd.DataFrame | None = None, regime: str | None = None) -> CheckContext:
     """CheckContext. `regime` is the tape regime; None/unknown is assessed as HOSTILE (most

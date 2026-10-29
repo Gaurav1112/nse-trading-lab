@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .markets import get_profile
-from .models import Action, DeskVerdict
+from .models import Action, DeskVerdict, Side
 
 
 def data_dir() -> Path:
@@ -27,7 +27,8 @@ def data_dir() -> Path:
 
 def _row(v: DeskVerdict) -> dict:
     p, o, s = v.plan, v.odds, v.sizing
-    return {
+    side = {"side": p.side.value} if p.side is Side.SHORT else {}  # long rows are unchanged
+    return {**side,
         "created_at": v.created_at, "action": v.action.value, "symbol": p.symbol, "market": p.market,
         "mode": p.mode.value, "entry": p.entry, "stop": p.stop, "target_1": p.target_1,
         "qty": s.qty, "risk_amount": s.risk_amount,

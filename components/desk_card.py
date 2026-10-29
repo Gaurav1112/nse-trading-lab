@@ -173,9 +173,22 @@ def _header(v: DeskVerdict) -> None:
     color = ACTION_COLOR.get(v.action.value, "#888888")
     st.markdown(f"<div style='font-size:2.2rem;font-weight:800;color:{color};line-height:1.1'>"
                 f"{v.action.value} <span style='font-size:1.2rem'>{html.escape(v.plan.symbol)} · "
-                f"{v.plan.mode.value}</span></div>", unsafe_allow_html=True)
+                f"{v.plan.mode.value}</span>{short_badge(v)}</div>", unsafe_allow_html=True)
     st.markdown(f"**{html.escape(v.headline)}**")
     st.caption("The desk's verdict is advice. You make the call and type any ticket in yourself.")
+
+
+def short_badge(v: DeskVerdict) -> str:
+    """The SHORT badge (HTML) for a short verdict; "" for a long."""
+    if not v.plan.is_short:
+        return ""
+    return (" <span style='font-size:1rem;font-weight:800;color:#fff;background:#b02a37;border-radius:4px;"
+            "padding:2px 8px;vertical-align:middle'>SHORT</span>")
+
+
+def side_levels(p) -> dict:
+    """The check levels a Re-check / Full check passes for this plan's side (a long passes nothing extra)."""
+    return {"side": p.side} if p.is_short else {}
 
 
 def _bullets(checks) -> str:
@@ -286,6 +299,7 @@ def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str, 
     if st.button("Re-check", key=f"{wkey}_recheck"):
         p = v.plan
         levels = (dict(entry=p.entry, stop=p.stop, target=p.target_1) if p.stop_basis == "user" else {})
+        levels.update(side_levels(p))
         with st.spinner(f"Re-checking {p.symbol}..."):
             try:
                 st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
@@ -308,6 +322,7 @@ def _full_check(v: DeskVerdict, profile, limits, key: str, wkey: str) -> None:
         levels = dict(entry=p.entry)
         if p.stop_basis == "user":
             levels.update(stop=p.stop, target=p.target_1)
+        levels.update(side_levels(p))
         with st.spinner(f"Running the full check for {p.symbol}..."):
             try:
                 st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}

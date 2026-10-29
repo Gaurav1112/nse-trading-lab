@@ -143,6 +143,8 @@ def _parse_row(row: dict) -> Candidate:
         raise ValueError(f"not a scored action {row.get('action')!r}")
     if record == "override" and row.get("desk_action") not in ("WAIT", "SKIP"):
         raise ValueError(f"override of a TAKE verdict (desk_action {row.get('desk_action')!r})")
+    if row.get("side", "long") != "long":  # never replayed as a long; the mirrored short replay is not built yet
+        raise ValueError(f"{row.get('side')} trade: shorts are not scored yet (the short scoreboard comes later)")
     for k in ("created_at", "market", "symbol", "mode", "input_hash"):
         if not row.get(k):
             raise ValueError(f"missing {k}")

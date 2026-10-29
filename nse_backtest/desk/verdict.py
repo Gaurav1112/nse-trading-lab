@@ -205,10 +205,10 @@ def _decide_short(plan: TradePlan, sizing: Sizing, checks: tuple, profile: Marke
                   lines: tuple[str, ...]) -> tuple[Action, str, tuple[str, ...], float | None]:
     """(action, headline, ticket, trigger) for a short with a valid price and no BLOCK: the mirror of the long
     rules (sell only at or below the trigger, never below the sell limit), capped at WAIT by short_edge_cap."""
-    m, sym = profile.money, plan.symbol
+    m, sym = profile.money, f"{plan.symbol} SHORT"
     cap = short_edge_cap(plan, checks)
     if cap is not None:
-        return Action.WAIT, f"WAIT {sym} — SHORT: {cap}", (), None
+        return Action.WAIT, f"WAIT {sym} — {cap}", (), None
     if current_price > plan.entry * (1 + 0.001):
         return (Action.WAIT, f"WAIT {sym} — sell short only below {m(plan.entry)} (now {m(current_price)})",
                 ("IF TRIGGERED:",) + lines, plan.entry)
@@ -216,14 +216,14 @@ def _decide_short(plan: TradePlan, sizing: Sizing, checks: tuple, profile: Marke
         return (Action.WAIT, f"WAIT {sym} — Price {m(current_price)} is below the stop-limit's limit {m(limit)} — "
                 "the order would not fill", ("IF TRIGGERED:",) + lines, plan.entry)
     loss = loss_at_stop(plan, profile, sizing.qty, spread_per_side=sizing.spread_per_side)  # == card max loss
-    return (Action.TAKE, f"TAKE {sym} — SELL SHORT {sizing.qty} @ {m(plan.entry)}, loss at stop ≈ {m(loss)} "
+    return (Action.TAKE, f"TAKE {sym} — SELL {sizing.qty} @ {m(plan.entry)}, loss at stop ≈ {m(loss)} "
             "(a gap can lose more)", lines, None)
 
 
 def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: MarketProfile,
            current_price: float, now: datetime) -> DeskVerdict:
     checks = tuple(checks)
-    m, sym = profile.money, plan.symbol
+    m, sym = profile.money, plan.symbol + (" SHORT" if plan.side is Side.SHORT else "")  # the badge in every headline
     lines = ticket_lines(plan, sizing, profile, current_price=current_price, day=market_day(now, profile))
     blocks = [c.name for c in checks if c.status is Status.BLOCK]
     ticket: tuple[str, ...] = ()

@@ -302,3 +302,12 @@ def test_h3_candidate_rank_treats_exactly_the_market_and_odds_groups_as_advice()
         rank = session.candidate_rank(v("X", Action.SKIP, checks=(Check(name, Status.BLOCK, ""),)))
         assert rank[0] == (2 if group in ("market", "odds") else 3), name
     assert session.candidate_rank(v("X", Action.SKIP, checks=(Check("mystery", Status.BLOCK, ""),)))[0] == 3
+
+
+def test_h5a_merge_keeps_a_long_and_a_short_of_the_same_symbol():
+    from nse_backtest.desk.models import Side
+    long_ = v("I1", Action.WAIT, Mode.INTRADAY, e=0.4)
+    short = replace(v("I1", Action.WAIT, Mode.INTRADAY, e=None, h="short".ljust(64, "x")),
+                    plan=replace(long_.plan, side=Side.SHORT))
+    out = session.merge_candidates(None, [long_, short, short])
+    assert [(c.plan.symbol, c.plan.side) for c in out] == [("I1", Side.LONG), ("I1", Side.SHORT)]
