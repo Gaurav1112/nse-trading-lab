@@ -1,0 +1,241 @@
+"""Desk I/O: market data, user state files, per-market settings and CheckContext assembly.
+
+This and nse_lists are the only desk modules that touch the network or the user's files.
+positions.json and trade_journal.json are read here and never written by the desk.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import tempfile
+from dataclasses import fields, replace
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+
+from . import nse_lists
+from .audit import data_dir
+from .checks import CheckContext
+from .markets import MarketProfile
+from .models import Limits
+
+log = logging.getLogger(__name__)
+
+DEFAULT_CAPITAL = {"NSE": 100_000.0, "US": 10_000.0}
+_PCT_FIELDS = ("risk_per_trade_pct", "max_position_pct", "cash_buffer_pct", "daily_loss_limit_pct")
+_SETTINGS_FILE = "desk_settings.json"
+
+
+# ---------------------------------------------------------------- market data
+
+def load_daily(profile: MarketProfile, symbol: str, years: int = 4) -> pd.DataFrame:
+    from nse_backtest.data import fetch_nse
+    start = (date.today() - timedelta(days=int(365.25 * years))).isoformat()
+    return fetch_nse(symbol, start, exchange=profile.exchange)
+
+
+def load_intraday(profile: MarketProfile, symbol: str) -> pd.DataFrame:
+    import yfinance
+    df = yfinance.download(profile.yf_symbol(symbol), period="60d", interval="15m",
+                           progress=False, auto_adjust=False)
+    if df is None or len(df) == 0:
+        raise ValueError(f"no intraday data for {symbol}")
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    df = df.copy()
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    df.index = idx.tz_convert(profile.tz).tz_localize(None)
+    return df
+
+
+def load_regime(profile: MarketProfile) -> pd.DataFrame | None:
+    try:
+        from nse_backtest.data import fetch_nse
+        start = (date.today() - timedelta(days=800)).isoformat()
+        df = fetch_nse(profile.regime_index, start, exchange=profile.exchange)
+        return df if df is not None and len(df) else None
+    except Exception as e:  # noqa: BLE001 - regime unknown is handled fail-closed downstream
+        log.warning("regime data unavailable for %s: %s", profile.regime_index, e)
+        return None
+
+
+def _to_date(x) -> date | None:
+    if isinstance(x, (list, tuple)):
+        for item in x:
+            d = _to_date(item)
+            if d is not None:
+                return d
+        return None
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(x, (pd.Timestamp, datetime)):
+        return x.date()
+    if isinstance(x, date):
+        return x
+    try:
+        ts = pd.Timestamp(x)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(ts) else ts.date()
+
+
+def next_earnings(profile: MarketProfile, symbol: str) -> tuple[date | None, bool]:
+    """(next earnings date, checked). (None, False) means unknown, which the desk WARNs on."""
+    try:
+        import yfinance
+        cal = yfinance.Ticker(profile.yf_symbol(symbol)).calendar
+        raw = cal.get("Earnings Date") if isinstance(cal, dict) else None
+        d = _to_date(raw)
+        return (d, True) if d is not None else (None, False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("earnings lookup failed for %s: %s", symbol, e)
+        return None, False
+
+
+# ---------------------------------------------------------------- user state (read-only)
+
+def _read_list(name: str) -> list[dict]:
+    path = data_dir() / name
+    try:
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.warning("cannot read %s: %s", path, e)
+        return []
+    if not isinstance(data, list):
+        log.warning("%s is not a JSON list; ignoring", path)
+        return []
+    return [r for r in data if isinstance(r, dict)]
+
+
+def load_positions() -> list[dict]:
+    return _read_list("positions.json")
+
+
+def load_journal() -> list[dict]:
+    return _read_list("trade_journal.json")
+
+
+def _for_market(rows: list[dict], profile: MarketProfile) -> list[dict]:
+    return [r for r in rows if str(r.get("market") or "NSE").upper() == profile.code]
+
+
+def market_positions(profile: MarketProfile) -> list[dict]:
+    """Open-position records for this market, with `market` normalised to upper case."""
+    return [dict(p, market=profile.code) for p in _for_market(load_positions(), profile)]
+
+
+# ---------------------------------------------------------------- settings
+
+def default_limits(profile: MarketProfile) -> Limits:
+    return Limits(capital=DEFAULT_CAPITAL[profile.code])
+
+
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def validate_limits(limits: Limits) -> None:
+    if not _finite(limits.capital) or limits.capital <= 0:
+        raise ValueError("capital must be a finite number greater than 0")
+    for name in _PCT_FIELDS:
+        v = getattr(limits, name)
+        if not _finite(v) or not (0 < v <= 100):
+            raise ValueError(f"{name} must be a finite number above 0 and at most 100")
+    if not _finite(limits.min_rr) or limits.min_rr <= 0:
+        raise ValueError("min_rr must be a finite number greater than 0")
+    if not isinstance(limits.pdt_guard, bool):
+        raise ValueError("pdt_guard must be true or false")
+
+
+def _settings_path() -> Path:
+    return data_dir() / _SETTINGS_FILE
+
+
+def _read_settings() -> dict:
+    path = _settings_path()
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("top level is not an object")
+        return data
+    except (OSError, ValueError) as e:
+        log.warning("cannot read %s (%s); using defaults", path, e)
+        return {}
+
+
+def load_limits(profile: MarketProfile) -> Limits:
+    entry = _read_settings().get(profile.code)
+    base = default_limits(profile)
+    if not isinstance(entry, dict):
+        return base
+    names = {f.name for f in fields(Limits)}
+    try:
+        limits = replace(base, **{k: v for k, v in entry.items() if k in names})
+        validate_limits(limits)
+        return limits
+    except (TypeError, ValueError) as e:
+        log.warning("invalid %s settings (%s); using defaults", profile.code, e)
+        return base
+
+
+def save_limits(profile: MarketProfile, limits: Limits) -> None:
+    validate_limits(limits)
+    settings = _read_settings()
+    settings[profile.code] = {f.name: getattr(limits, f.name) for f in fields(Limits)}
+    path = _settings_path()
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- context
+
+def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | None = None,
+                  symbol_df: pd.DataFrame | None = None) -> CheckContext:
+    """CheckContext without regime (the caller fills it from assess_tape(load_regime(profile)))."""
+    now = now or datetime.now(ZoneInfo(profile.tz))
+    positions = _for_market(load_positions(), profile)
+    journal = _for_market(load_journal(), profile)
+    can_trade: bool | None
+    reasons: tuple[str, ...] = ()
+    try:
+        from components import risk_governor
+        verdict = risk_governor.assess(positions, journal, limits.capital, None)
+        can_trade, reasons = bool(verdict.can_trade), tuple(verdict.reasons)
+    except Exception as e:  # noqa: BLE001 - desk WARNs on None
+        log.warning("risk governor failed: %s", e)
+        can_trade = None
+    ban = None
+    if profile.has_ban_list:
+        ban = nse_lists.fetch_fno_ban(data_dir() / "cache", now.date())
+    turnover = gap = None
+    if symbol_df is not None:
+        from .daily import market_stats
+        turnover, gap = market_stats(symbol_df)
+    return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
+                        governor_can_trade=can_trade, governor_reasons=reasons, ban=ban,
+                        turnover_20d=turnover, today_gap_pct=gap)
