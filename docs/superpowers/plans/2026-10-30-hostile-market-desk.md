@@ -8,12 +8,12 @@
 
 **Tech Stack:** Python 3.13, pandas, numpy, plotly, Streamlit, pytest.
 
-Spec (binding): `docs/superpowers/specs/2026-10-30-hostile-market-desk-design.md`. Inputs: `audit_ux.md`, `research_bear.md` in the session scratchpad.
+Spec (binding): `docs/superpowers/specs/2026-10-30-hostile-market-desk-design.md`. Inputs: `audit_ux.md`, `research_bear.md` (working notes, not committed).
 
 ## Global Constraints
 
-- Gate: `python3.13 -m pytest -o addopts="" -p no:cacheprovider` AND the pinned venv
-  `/private/tmp/claude-501/-Users-racit/18851019-3251-400f-bbb7-f378252ca44e/scratchpad/pinvenv/bin/python -m pytest -o addopts="" -p no:cacheprovider` green after every task (baseline 1431).
+- Gate: `python3.13 -m pytest -o addopts=""` AND the same command in a venv built from requirements.txt, green after
+  every task (baseline 1431).
 - No order placement; no LLM; no new runtime dependencies; no network in tests.
 - Deterministic: `np.random.default_rng(seed)`, seed 19.
 - Fail closed: missing data → WARN/BLOCK or "unavailable: {reason}", never a silent PASS or a zero-filled number.

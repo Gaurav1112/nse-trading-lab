@@ -421,3 +421,52 @@ def test_m7_cli_prints_the_sat_out_note(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
     cli.cmd_plan(Namespace(json=False, all=False), NSE)
     assert "Sat-out record not written for 1 symbol(s): A: OSError: x" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- M11: the suite blocks every network path
+
+def test_m11_conftest_blocks_dns_connect_ex_and_async_curl():
+    import socket
+    with pytest.raises(RuntimeError, match="network disabled"):
+        socket.getaddrinfo("example.com", 443)
+    s = socket.socket()
+    try:
+        with pytest.raises(RuntimeError, match="network disabled"):
+            s.connect_ex(("192.0.2.1", 9))
+    finally:
+        s.close()
+    curl = pytest.importorskip("curl_cffi.requests")
+    import asyncio
+
+    async def go():
+        async with curl.AsyncSession() as a:
+            await a.request("GET", "http://192.0.2.1:9", timeout=1)
+    with pytest.raises(RuntimeError, match="network disabled"):
+        asyncio.run(go())
+
+
+# ---------------------------------------------------------------- M12: shared helpers
+
+def test_m12_regime_name_and_mode_label_are_one_helper_each():
+    from nse_backtest.desk import cli, models, verdict
+    assert models.regime_name(" hostile ") == "HOSTILE" and models.regime_name("FOO") is None
+    assert models.regime_name(None) is None and verdict.regime_name is models.regime_name
+    assert models.mode_label(Mode.INTRADAY, Side.SHORT) == "intraday SHORT"
+    assert models.mode_label(Mode.SWING, "long") == "swing" and models.mode_label(Mode.INTRADAY, "short") == \
+        "intraday SHORT"
+    assert cli._mode_label is models.mode_label
+
+
+def test_m12_orb_scan_sort_is_nan_safe(monkeypatch):
+    from dataclasses import replace
+    from nse_backtest.desk import intraday
+    from tests.desk.test_choose import v
+    by_sym = {"NAN": replace(v("NAN", Action.WAIT, Mode.INTRADAY, e=0.5), odds=None),
+              "LOW": v("LOW", Action.WAIT, Mode.INTRADAY, e=0.1),
+              "HI": v("HI", Action.WAIT, Mode.INTRADAY, e=0.4)}
+    nan = replace(by_sym["NAN"], odds=v("X", e=0.5).odds)
+    by_sym["NAN"] = replace(nan, odds=replace(nan.odds, mc_expectancy_r=float("nan")))
+    monkeypatch.setattr(intraday, "check_trade", lambda df, sym, *a, **k: by_sym[sym])
+    out, _ = intraday.orb_scan(NSE, {s: None for s in ("NAN", "LOW", "HI")}, LIM,
+                               CheckContext(NSE, LIM, NOW))
+    assert [x.plan.symbol for x in out] == ["HI", "LOW", "NAN"]  # NaN ranks with no odds: last

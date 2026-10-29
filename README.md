@@ -202,8 +202,9 @@ market the evidence favours cash, and the one intraday idea worth testing is a s
 - **Square off yourself by 15:10.** A retail cash-segment short has to be bought back the same day: SEBI's
   short-selling framework (circular of 5 Jan 2024) bars naked short selling, requires delivery at settlement and
   lets retail traders square off intraday. A position you cannot cover (for example a stock locked at its upper
-  circuit) becomes a short delivery, settled by an exchange auction on T+1 at a price you do not control, with
-  close-out rules that can reach 20% above the auction-day price. F&O stocks have dynamic price bands, which
+  circuit) becomes a short delivery, settled by an exchange auction on T+1 at a price you do not control. If the
+  auction finds no seller, the close-out price is the higher of 20% above the auction-day settlement price and the
+  highest price since the trade (Zerodha, "Short delivery without fresh sellers", below). F&O stocks have dynamic price bands, which
   cuts that risk, so the desk allows F&O stocks only. If the broker squares you off, Zerodha charges about ₹50
   plus GST per order. Sources:
   - SEBI short-selling framework: https://www.sebi.gov.in/legal/circulars/jan-2024/framework-for-short-selling_80448.html

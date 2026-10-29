@@ -16,7 +16,7 @@ from .audit import append_verdict, data_dir
 from .checks import CheckContext, run_checks, stoploss_streak
 from .costs import DEFAULT_SPREAD, side_cost
 from .markets import MarketProfile
-from .models import DeskVerdict, LiveQuote, Limits, Mode, Side
+from .models import DeskVerdict, LiveQuote, Limits, Mode, Side, regime_name
 from .plan import build_plan, opening_range_low, or_volume
 from .sizing import size_position
 from .verdict import decide
@@ -76,9 +76,8 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
         log.warning("odds could not be computed for %s: %s", symbol, e)
         odds = None
     checks = run_checks(plan, sizing, odds, ctx, current_price=current_price)
-    regime = (ctx.regime.strip().upper() or None) if isinstance(ctx.regime, str) else None
     v = replace(decide(plan, sizing, odds, checks, profile, current_price, ctx.now), cost_per_share=cps,
-                regime=regime, **_quote_fields(quote, ctx.now, used_at, profile))
+                regime=regime_name(ctx.regime), **_quote_fields(quote, ctx.now, used_at, profile))
     if audit:
         append_verdict(v, audit_path if audit_path is not None else data_dir() / "desk_audit.jsonl")
     return v

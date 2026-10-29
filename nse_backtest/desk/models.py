@@ -29,6 +29,21 @@ class Side(str, Enum):
     SHORT = "short"  # intraday ORB breakdown shorts (MIS), NSE F&O stocks only
 
 
+KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")
+
+
+def regime_name(x) -> str | None:
+    """A regime value as the desk compares it: TRENDING / MIXED / HOSTILE (upper-cased, trimmed), else None."""
+    r = x.strip().upper() if isinstance(x, str) else ""
+    return r if r in KNOWN_REGIMES else None
+
+
+def mode_label(mode, side) -> str:
+    """"swing", "intraday", or "intraday SHORT" for a short (the CLI and the page say it the same way). ``side`` may
+    be a Side or its value."""
+    return f"{Mode(mode).value} SHORT" if getattr(side, "value", side) == "short" else Mode(mode).value
+
+
 @dataclass(frozen=True)
 class Limits:
     capital: float
@@ -202,3 +217,11 @@ class DeskVerdict:
 
     def warns(self) -> list[Check]:
         return [c for c in self.checks if c.status is Status.WARN]
+
+
+def expectancy(v: DeskVerdict) -> float | None:
+    """The verdict's Monte Carlo expectancy (R), or None without odds or when it is not a finite number."""
+    e = v.odds.mc_expectancy_r if v.odds is not None else None
+    if isinstance(e, bool) or not isinstance(e, (int, float)):
+        return None
+    return float(e) if math.isfinite(e) else None

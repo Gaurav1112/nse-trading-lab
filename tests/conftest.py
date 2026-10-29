@@ -67,7 +67,9 @@ def _no_network_anywhere(monkeypatch, tmp_path_factory):
     import socket
     import urllib.request
     monkeypatch.setattr(socket.socket, "connect", _network_disabled)
+    monkeypatch.setattr(socket.socket, "connect_ex", _network_disabled)
     monkeypatch.setattr(socket, "create_connection", _network_disabled)
+    monkeypatch.setattr(socket, "getaddrinfo", _network_disabled)  # no DNS lookups either
     monkeypatch.setattr(urllib.request, "urlopen", _network_disabled)
     try:
         import yfinance
@@ -78,6 +80,14 @@ def _no_network_anywhere(monkeypatch, tmp_path_factory):
     try:
         import curl_cffi.requests
         monkeypatch.setattr(curl_cffi.requests.Session, "request", _network_disabled)
+    except (ImportError, AttributeError):
+        pass
+    try:
+        import curl_cffi.requests
+
+        async def _async_network_disabled(*args, **kwargs):
+            _network_disabled()
+        monkeypatch.setattr(curl_cffi.requests.AsyncSession, "request", _async_network_disabled)
     except (ImportError, AttributeError):
         pass
     try:

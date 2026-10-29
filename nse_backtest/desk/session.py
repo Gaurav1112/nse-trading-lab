@@ -23,7 +23,7 @@ from .audit import data_dir
 from .daily import DailyPlan, daily_plan, plan_entry, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .markets import universe
-from .models import Action, DeskVerdict, Limits, Mode, ShortEdge, Side, Status
+from .models import Action, DeskVerdict, Limits, Mode, ShortEdge, Side, Status, expectancy, regime_name
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 from .verdict import ADVICE_GROUPS, block_groups, short_edge_cap
@@ -152,7 +152,7 @@ def load_frames(profile, symbols: Iterable[str], on_warning: Warn = None) -> dic
 
 def shorts_today(profile, regime) -> bool:
     """ORB breakdown shorts are offered only on HOSTILE NSE days."""
-    return profile.code == "NSE" and isinstance(regime, str) and regime.strip().upper() == "HOSTILE"
+    return profile.code == "NSE" and regime_name(regime) == "HOSTILE"
 
 
 _REGIME_DAYS_BACK = 100  # calendar days of past regimes the short odds need (15-minute bars reach back ~60 days)
@@ -347,11 +347,6 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes,
                                   audit_path=data_dir() / scoreboard_io.AUDIT_FILE, **kw)  # scan TAKEs are scored
     return verdicts, load_failures + list(failures)
-
-
-def expectancy(v: DeskVerdict) -> float | None:
-    e = v.odds.mc_expectancy_r if v.odds is not None else None
-    return e if isinstance(e, (int, float)) and e == e and abs(e) != float("inf") else None
 
 
 def candidate_rank(v: DeskVerdict) -> tuple:

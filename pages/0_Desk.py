@@ -24,7 +24,7 @@ from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions, plan_errors_line
 from nse_backtest.desk.markets import get_profile, universe
-from nse_backtest.desk.models import Action, DeskVerdict, Mode, Side
+from nse_backtest.desk.models import Action, DeskVerdict, Mode, Side, mode_label
 from nse_backtest.desk.shortcheck import edge_line
 from nse_backtest.desk.positions import review_positions
 from nse_backtest.desk.textsafe import shown
@@ -105,8 +105,8 @@ def _check_summary(v: DeskVerdict) -> str:
 
 
 def _mode_label(p) -> str:
-    """The plan's mode, with the SHORT badge for an intraday short."""
-    return f"{p.mode.value} SHORT" if p.is_short else p.mode.value
+    """The plan's mode, with the SHORT badge for an intraday short (models.mode_label, as the CLI)."""
+    return mode_label(p.mode, p.side)
 
 
 def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, show_ticket: bool = True) -> None:

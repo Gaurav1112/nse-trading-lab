@@ -48,8 +48,7 @@ import pandas as pd
 
 from . import calendars as cal
 from . import fills
-from .costs import round_trip_cost
-from .costs import side_cost
+from .costs import round_trip_cost, side_cost
 from .markets import get_profile
 from .models import Mode, Side
 from .plan import short_flat_by

@@ -17,7 +17,7 @@ from . import calendars as cal
 from .checks import short_edge_check
 from .daily import plan_errors_line
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Mode, Side, summary_fields
+from .models import Action, DeskVerdict, Mode, Side, mode_label, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 from .shortcheck import edge_line, skipped_line
@@ -453,9 +453,7 @@ def _projected_line(outcomes, s) -> str:
     return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
 
 
-def _mode_label(mode, side) -> str:
-    """"intraday", "swing", or "intraday short" for a short (longs read as before)."""
-    return f"{mode.value} short" if getattr(side, "value", side) == "short" else mode.value
+_mode_label = mode_label  # one label for the CLI and the page (models.mode_label)
 
 
 _NONE_YET = {"desk": "  No desk picks logged yet.", "override": "  No overrides logged yet.",

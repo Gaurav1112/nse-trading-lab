@@ -515,8 +515,9 @@ def test_h5c_cli_labels_short_stats_and_trades(tmp_path):
     from nse_backtest.desk.cli import format_scoreboard
     res = _build(tmp_path, _io_rows(), _Loader(_io_bars()))
     text = "\n".join(format_scoreboard(res, "NSE"))
-    assert "NSE intraday: " in text and "NSE intraday short: " in text
-    assert any(" intraday short " in ln and "won" in ln for ln in text.splitlines())
+    # F2/M12: one mode label for the CLI and the page (models.mode_label): "intraday SHORT"
+    assert "NSE intraday: " in text and "NSE intraday SHORT: " in text
+    assert any(" intraday SHORT " in ln and "won" in ln for ln in text.splitlines())
     assert "Projected +0.20R vs realised +1.50R over 1 trade" in text  # the short group's own projections
 
 

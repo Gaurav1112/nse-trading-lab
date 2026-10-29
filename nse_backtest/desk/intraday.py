@@ -7,7 +7,7 @@ import pandas as pd
 
 from .audit import append_verdict
 from .checks import CheckContext
-from .models import Action, DeskVerdict, LiveQuote, Limits, Mode, Side
+from .models import Action, DeskVerdict, LiveQuote, Limits, Mode, Side, expectancy
 from .service import check_trade
 from .textsafe import scrub
 
@@ -35,7 +35,7 @@ def orb_scan(profile, frames15: dict[str, pd.DataFrame], limits: Limits, ctx_bas
                 verdicts.append(v)
 
     def key(v: DeskVerdict):
-        e = v.odds.mc_expectancy_r if v.odds is not None else None
+        e = expectancy(v)  # NaN-safe: a non-finite expectancy ranks with no odds
         return (_RANK[v.action], e is None, -(e or 0.0))
 
     return sorted(verdicts, key=key), failures

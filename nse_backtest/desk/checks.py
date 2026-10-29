@@ -3,6 +3,7 @@ data is never a PASS."""
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ import numpy as np
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import (SHORT_EDGE_MIN_COVERAGE, Check, Limits, Mode, Odds, ShortEdge, Side, Sizing,
-                                     Status, TradePlan, coverage_ok)
+                                     Status, TradePlan, coverage_ok, regime_name)
 from nse_backtest.desk.nse_lists import BanList
 from nse_backtest.desk.plan import SHORT_RR_T1
 
@@ -45,7 +46,7 @@ class CheckContext:
     # is unavailable, and the market regime of each past day (the short odds replay HOSTILE days only).
     short_edge: ShortEdge | None = None
     short_edge_why: str = ""
-    regime_by_day: dict | None = field(default=None, compare=False)
+    regime_by_day: Mapping[date, str] | None = field(default=None, compare=False)
     # Shorts only: the last session's opening-bar low, the entry the pooled history replays (None = unknown -> the
     # short is off the pooled rule). Set by service.check_trade from the bars; never hashed.
     or_low: float | None = None
@@ -314,7 +315,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     P, W, B = Status.PASS, Status.WARN, Status.BLOCK
 
     # 1 regime
-    r = (ctx.regime or "").strip().upper() if isinstance(ctx.regime, (str, type(None))) else ""
+    r = regime_name(ctx.regime) or ""
     unknown = "Regime unknown: could not classify the market, "
     if swing:
         if r == "HOSTILE":

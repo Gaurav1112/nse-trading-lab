@@ -18,7 +18,8 @@ from . import models
 from . import plan as plan_mod
 from .checks import REGIME_HELD_OUT_PCT, SHORT_EDGE_UNPROVEN, signed_pct
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Mode, Odds, Side, Sizing, Status, TradePlan, summary_fields
+from .models import (Action, DeskVerdict, Mode, Odds, Side, Sizing, Status, TradePlan, regime_name,
+                     summary_fields)
 from .sizing import loss_at_stop
 
 
@@ -133,15 +134,8 @@ def group_of(name: str, side: Side = Side.LONG) -> str:
     return CHECK_GROUPS.get(name, "data")
 
 
-_KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")
 REGIME_CHECKS = frozenset({"regime", "short_regime"})
 REGIME_UNKNOWN = "Market regime unknown (index data unavailable)"
-
-
-def regime_name(x) -> str | None:
-    """A regime value as the desk compares it: TRENDING / MIXED / HOSTILE (upper-cased, trimmed), else None."""
-    r = x.strip().upper() if isinstance(x, str) else ""
-    return r if r in _KNOWN_REGIMES else None
 
 
 def _group(v: DeskVerdict, c: models.Check) -> str:
