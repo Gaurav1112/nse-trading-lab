@@ -116,7 +116,8 @@ CHECK_GROUPS: dict[str, str] = {
     "stoploss_streak": "limits", "liquidity": "limits", "entry_window": "limits", "reward_risk": "limits",
     # shorts: a non-HOSTILE day is market advice; the edge gate and the volume behind the breakdown are odds; F&O
     # membership is "safety" (circuit-lock and auction risk): never overridable, like broken data
-    "short_regime": "market", "short_edge": "odds", "relative_volume": "odds", "short_fno": "safety",
+    "short_regime": "market", "short_edge": "odds", "short_monte_carlo": "odds", "relative_volume": "odds",
+    "short_fno": "safety",
 }
 GROUPS = ("market", "odds", "data", "safety", "limits")
 # Checks that are "safety" only on a short (a long's F&O ban is a WARN about derivatives, a limit).

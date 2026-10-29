@@ -326,15 +326,16 @@ with tab_plan:
 with tab_check:
     c1, c2 = st.columns([2, 1])
     symbol = c1.text_input("Symbol", key="desk_symbol", placeholder="e.g. RELIANCE" if market == "NSE" else "e.g. AAPL")
-    mode = c2.radio("Mode", ["swing", "intraday"], key="desk_mode", horizontal=True)
     side = "long"
     if market == "NSE":  # shorts are NSE only (F&O stocks, MIS)
         side = c2.radio("Side", ["long", "short"], key="desk_side", horizontal=True)
-        if side == "short":
-            mode = "intraday"
-            st.caption("Shorts are intraday (MIS) only: an opening-range breakdown short on an F&O stock, squared off "
-                       "by 15:10 IST. Same checks as the scan; at most WAIT until the pooled short history proves "
-                       "the edge.")
+    if side == "long":
+        mode = c2.radio("Mode", ["swing", "intraday"], key="desk_mode", horizontal=True)
+    else:  # no Mode choice: a short is intraday
+        mode = "intraday"
+        st.caption("Shorts are intraday (MIS) only: an opening-range breakdown short on an F&O stock, squared off "
+                   "by 15:10 IST. Same checks as the scan; at most WAIT until the pooled short history proves "
+                   "the edge, and a TAKE also needs the stock's own simulated short expectancy above zero.")
     e1, e2, e3 = st.columns(3)
     entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry",
                             help="0 = the desk's own entry (breakout above the 20-day high for swing), the same entry "

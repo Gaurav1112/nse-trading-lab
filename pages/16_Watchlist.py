@@ -71,6 +71,8 @@ def _scan_universe() -> pd.DataFrame:
                 })
             except Exception:
                 continue
+        if not rows:  # every symbol failed (e.g. no network): the caller shows "no rows", never a KeyError
+            return pd.DataFrame()
         df_out = pd.DataFrame(rows).sort_values("Raw Score", ascending=False).reset_index(drop=True)
         return df_out
     finally:

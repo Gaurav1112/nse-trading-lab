@@ -123,6 +123,9 @@ class ShortEdge:
     n: int
     expectancy_r: float | None  # None only when n == 0
     proven: bool  # n >= SHORT_EDGE_MIN_TRADES and expectancy_r > 0
+    # frames that could not be replayed (missing or broken bars): they add no trades; shown, never hidden
+    skipped: int = field(default=0, compare=False)
+    skip_reason: str = field(default="", compare=False)  # the first one, "SYMBOL: why"
 
     @classmethod
     def from_trades(cls, n: int, expectancy_r: float | None) -> "ShortEdge":

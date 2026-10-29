@@ -19,7 +19,7 @@ from .models import Action, DeskVerdict, Mode, Side, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 from .checks import short_edge_check
-from .shortcheck import edge_line
+from .shortcheck import edge_line, skipped_line
 from .tradecard import DAILY_LOSS_NOTE, build_card
 from .verdict import data_broken, is_quick, safety_blocked
 
@@ -496,7 +496,8 @@ def cmd_shortcheck(a, profile) -> int:
     e = res.edge
     if a.json:
         _emit_json({"market": profile.code, "day": res.day, "n": e.n, "expectancy_r": e.expectancy_r,
-                    "proven": e.proven, "symbols": res.symbols, "cached": res.cached, "failures": res.failures})
+                    "proven": e.proven, "symbols": res.symbols, "cached": res.cached, "failures": res.failures,
+                    "skipped": e.skipped, "skip_reason": e.skip_reason})
         return 0
     from .checks import CheckContext
     gate = short_edge_check(CheckContext(profile, loaders.default_limits(profile), market_now(profile),
@@ -512,6 +513,8 @@ def cmd_shortcheck(a, profile) -> int:
         lines.append("Shorts can be a desk TAKE today when every other check passes.")
     else:
         lines.append(f"Every short stays at most WAIT: {gate.reason}")
+    if skipped_line(e):
+        lines.append(f"  {skipped_line(e)}")
     if res.failures:
         lines += ["", "Not pooled:"] + [f"  {s}: {why}" for s, why in res.failures]
     return _finish(lines)

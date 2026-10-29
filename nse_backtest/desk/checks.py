@@ -1,5 +1,5 @@
-"""The 17 PASS/WARN/BLOCK safety checks (a short swaps the long-only odds checks for its own). Missing data is never
-a PASS."""
+"""The 17 PASS/WARN/BLOCK safety checks (a short swaps the long-only odds checks for its own: 19 checks). Missing
+data is never a PASS."""
 from __future__ import annotations
 
 import math
@@ -13,6 +13,7 @@ from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import Check, Limits, Mode, Odds, ShortEdge, Side, Sizing, Status, TradePlan
 from nse_backtest.desk.nse_lists import BanList
+from nse_backtest.desk.plan import SHORT_RR_T1
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ SHORT_EDGE_UNPROVEN = SHORT_EDGE_UNAVAILABLE  # the cap's reason when no pooled 
 SHORT_REL_VOLUME_MIN = 1.5
 
 
-def short_edge_check(ctx: CheckContext) -> Check:
+def short_edge_check(ctx: CheckContext, plan: TradePlan | None = None) -> Check:
     """The ORB-short edge gate: PASS only when today's pooled ORB-short history (shortcheck.pooled_short_edge: the
     eligible universe, HOSTILE days only, 2x slippage) has at least 200 trades and a positive expectancy. Otherwise a
     WARN, and verdict.short_edge_cap holds the short at WAIT. ``proven`` is re-derived from the numbers, never
@@ -190,8 +191,44 @@ def short_edge_check(ctx: CheckContext) -> Check:
     if not sure.proven:
         return _ck("short_edge", Status.WARN,
                    f"edge not proven on the desk's own history yet ({n:.0f} trades, {shown})")
-    return _ck("short_edge", Status.PASS,
-               f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)")
+    proven = f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)"
+    off_rule = _off_pooled_rule(plan)
+    if off_rule:  # the pooled replay proves the desk's own geometry only, not a user's stop or target
+        return _ck("short_edge", Status.WARN, f"{proven}; {off_rule}")
+    return _ck("short_edge", Status.PASS, proven)
+
+
+def _off_pooled_rule(plan: TradePlan | None) -> str:
+    """Why ``plan`` is not the geometry the pooled replay proves (OR-mid stop, T1 at 1.5R), or ""."""
+    if plan is None:
+        return ""
+    if plan.stop_basis == "user":
+        return "pooled figure uses the opening-range-mid stop"
+    try:
+        rr = plan.rr_t1
+    except ZeroDivisionError:
+        rr = float("nan")
+    if not abs(rr - SHORT_RR_T1) < 1e-6:
+        return f"pooled figure uses the {SHORT_RR_T1:g}R rule"
+    return ""
+
+
+def _short_monte_carlo(odds: Odds | None) -> Check:
+    """The mirror of a long's monte_carlo check: this stock's own simulated short expectancy (the mirrored Monte
+    Carlo) must be positive as well as the pooled edge proven. "odds" group: advice, overridable."""
+    B = Status.BLOCK
+    if odds is None:
+        return _ck("short_monte_carlo", B, "Short odds could not be computed — no trade without odds")
+    mc = _num(odds.mc_expectancy_r)
+    if mc is None:
+        return _ck("short_monte_carlo", B, "Simulated short expectancy is not a number — no trade without odds")
+    if mc < 0:
+        return _ck("short_monte_carlo", B, f"Simulated short expectancy {mc:+.2f}R is negative")
+    if mc == 0:
+        return _ck("short_monte_carlo", B, f"Simulated short expectancy {mc:+.2f}R is not positive")
+    if mc < 0.1:
+        return _ck("short_monte_carlo", Status.WARN, f"Simulated short expectancy {mc:+.2f}R is thin (under +0.10R)")
+    return _ck("short_monte_carlo", Status.PASS, f"Simulated short expectancy {mc:+.2f}R is positive (above +0.10R)")
 
 
 def _short_regime(prof: MarketProfile, regime: str) -> Check:
@@ -354,9 +391,12 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("ban_list", P, f"{sym} is not in the F&O ban list"))
 
-    # 7 monte_carlo (a short: the short-edge gate instead; the long Monte Carlo does not model a short)
+    # 7 monte_carlo (a short: the pooled short-edge gate AND its own mirrored Monte Carlo). A short's per-stock
+    # setup_history and robustness are deliberately NOT gated: ~60 days of 15-minute bars give a handful of HOSTILE
+    # days per stock, too few to judge; the pooled gate stands in for them (they are still shown on the card).
     if short:
-        out.append(short_edge_check(ctx))
+        out.append(short_edge_check(ctx, p))
+        out.append(_short_monte_carlo(odds))
     elif odds is None:
         out.append(_ck("monte_carlo", B, "Odds could not be computed — no trade without odds"))
     elif (mc := _num(odds.mc_expectancy_r)) is None:

@@ -105,11 +105,13 @@ def test_the_gate_is_deterministic_and_order_free():
     assert x == y and repr(x.expectancy_r) == repr(y.expectancy_r)
 
 
-def test_missing_or_broken_frames_are_skipped_not_fatal():
+def test_missing_or_broken_frames_are_skipped_not_fatal_and_reported():
     a = frame(20)
     bad = a.drop(columns=["Close"])
     edge = pooled_short_edge(NSE, {"AAA": a, "BAD": bad, "NONE": None}, all_hostile(a))
-    assert edge.n == 20
+    assert edge.n == 20 and edge.skipped == 2
+    assert edge.skip_reason.startswith("BAD: KeyError")  # the first one, in symbol order
+    assert pooled_short_edge(NSE, {"AAA": a}, all_hostile(a)).skipped == 0
 
 
 def test_the_gate_is_nse_only():
@@ -177,12 +179,14 @@ DAY = date(2026, 10, 30)
 
 
 def test_cache_round_trip_for_the_same_day(tmp_path):
+    from dataclasses import replace as _r
     p = tmp_path / "desk_shortcheck.json"
-    e = ShortEdge.from_trades(212, 0.0712)
+    e = _r(ShortEdge.from_trades(212, 0.0712), skipped=3, skip_reason="ZZZ: no bars")
     save_edge(p, NSE, DAY, e, symbols=31)
     got, why = load_edge(p, NSE, DAY)
-    assert got == e and why == ""
-    assert json.loads(p.read_text())["day"] == "2026-10-30"
+    assert got == e and why == "" and (got.skipped, got.skip_reason) == (3, "ZZZ: no bars")
+    d = json.loads(p.read_text())
+    assert d["day"] == "2026-10-30" and d["computed_at"].endswith("+05:30")  # market time, not the laptop's
 
 
 def test_cache_from_another_day_is_not_used(tmp_path):
@@ -233,9 +237,11 @@ def test_cache_write_is_atomic_and_leaves_no_temp_files(tmp_path):
 
 def test_edge_text():
     assert shortcheck.edge_line(ShortEdge.from_trades(143, 0.0512)) == \
-        "143 trades, +0.05R at 2× slippage, HOSTILE days: not proven (needs at least 200 trades and a positive R)"
+        ("143 trades, +0.05R at 2× slippage, HOSTILE days: not proven (needs at least 200 trades and a positive R)"
+         "; universe = today's F&O list, past bans not replayed")
     assert shortcheck.edge_line(ShortEdge.from_trades(0, None)).startswith("0 trades, no expectancy yet")
-    assert shortcheck.edge_line(ShortEdge.from_trades(240, 0.11)).endswith(": proven")
+    assert shortcheck.edge_line(ShortEdge.from_trades(240, 0.11)).endswith(
+        ": proven; universe = today's F&O list, past bans not replayed")
 
 
 # ---------------------------------------------------------------- session: run_shortcheck and the context it feeds
@@ -358,6 +364,7 @@ def test_cli_shortcheck_not_proven_says_why(offline_short, cli_now, capsys, monk
     assert cli.main(["shortcheck"]) == 0
     out = capsys.readouterr().out
     assert "trades 100" in out and "proven no" in out
+    assert "universe = today's F&O list, past bans not replayed" in out
     assert "Every short stays at most WAIT: edge not proven on the desk's own history yet (100 trades, +" in out
 
 
@@ -410,3 +417,13 @@ def test_cli_short_without_odds_says_unavailable_plainly(capsys):
     text = "\n".join(cli.format_verdict(v, NSE))
     assert "Odds: unavailable (not enough history for a reliable estimate)" in text
     assert "next update" not in text
+
+
+def test_cli_shortcheck_reports_skipped_frames(offline_short, cli_now, capsys, monkeypatch):
+    def intraday(p, s):
+        f = frame(100, start="2026-06-01")
+        return f.drop(columns=["Close"]) if s == "BBB" else f
+    monkeypatch.setattr(loaders, "load_intraday", intraday)
+    assert cli.main(["shortcheck"]) == 0
+    out = capsys.readouterr().out
+    assert "Skipped 1 frame (first: BBB: KeyError" in out

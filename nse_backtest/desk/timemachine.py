@@ -364,7 +364,9 @@ def short_trades(df, profile: MarketProfile, regime_by_day: Mapping[date, str] |
             continue
         k, entry = got
         risk = stop - entry
-        # Same degenerate-risk guard as the long replay.
+        # Same degenerate-risk guard as the long replay, with the same small look-ahead it inherits: atrs[k] is the
+        # rolling ATR INCLUDING the fill bar k, whose full range is not known at the fill. It only drops trades
+        # (never moves an R) and mirrors the long exactly, so it is kept.
         if not risk > 0 or risk < 0.1 * atrs[k]:
             continue
         target = entry - rr * risk

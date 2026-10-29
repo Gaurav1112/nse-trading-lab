@@ -309,13 +309,13 @@ def _emitted_names() -> set[str]:
 
 def test_h3_every_check_name_is_mapped_to_exactly_one_group():
     names = _emitted_names()
-    assert len(names) == 21  # the 17 long checks + short_edge, short_regime, short_fno, relative_volume
+    assert len(names) == 22  # the 17 long checks + short_edge, short_monte_carlo, short_regime, short_fno, rel. volume
     assert set(_verdict.CHECK_GROUPS) == names  # mapped explicitly, nothing left to the "limits" default
     assert set(_verdict.CHECK_GROUPS.values()) == {"market", "odds", "data", "safety", "limits"}
     assert _verdict.CHECK_GROUPS["short_regime"] == "market" and _verdict.CHECK_GROUPS["short_fno"] == "safety"
     assert _verdict.CHECK_GROUPS["regime"] == "market"
     assert {n for n, g in _verdict.CHECK_GROUPS.items() if g == "data"} == {"freshness", "live_price", "gap"}
-    for n in ("monte_carlo", "setup_history", "robustness", "short_edge", "relative_volume"):
+    for n in ("monte_carlo", "setup_history", "robustness", "short_edge", "short_monte_carlo", "relative_volume"):
         assert _verdict.CHECK_GROUPS[n] == "odds"
     for n in ("size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
               "entry_window", "reward_risk"):
@@ -534,8 +534,12 @@ def test_h5a_check_trade_short_end_to_end(tmp_path):
                     replays=500, robustness=False)
     assert v.plan.side is Side.SHORT and v.plan.entry == pytest.approx(100 * k)
     assert v.plan.stop == pytest.approx(101 * k) and v.odds is not None  # H5b: short odds
-    assert v.action is Action.WAIT and v.headline == f"WAIT ABC SHORT — {SHORT_EDGE_UNPROVEN}"
     names = {ck.name: ck for ck in v.checks}
+    # H5b fix round 1: this fixture's own simulated short expectancy is negative, which BLOCKs it (and the pooled
+    # edge is unavailable, a WARN)
+    assert v.odds.mc_expectancy_r < 0 and names["short_monte_carlo"].status is Status.BLOCK
+    assert names["short_edge"].reason == SHORT_EDGE_UNPROVEN
+    assert v.action is Action.SKIP and v.headline == "SKIP ABC SHORT — blocked by: short_monte_carlo"
     assert names["short_fno"].status is Status.PASS and names["short_regime"].status is Status.PASS
     assert names["relative_volume"].status is Status.WARN  # every opening bar trades the same volume here
     assert "1.00×" in names["relative_volume"].reason
@@ -609,17 +613,24 @@ def _short_now():
     return datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata"))
 
 
-def _short_check(df, **ctxkw):
+def _short_check(df, mc=0.2, **ctxkw):
+    """A short check on ``df``. ``mc`` (default +0.20R) replaces the stock's own simulated short expectancy so the
+    pooled gate is what these tests exercise (the fixture's real MC is negative); None keeps the real odds."""
+    from unittest import mock
+    from nse_backtest.desk import timemachine
     from nse_backtest.desk.models import Side
     c = _pin_ctx(now=_short_now(), regime="HOSTILE", fno=frozenset({"ABC"}), **ctxkw)
-    return check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit=False,
-                       replays=2000, robustness=False)
+    real = timemachine.odds
+    fake = real if mc is None else (lambda *a, **k: replace(real(*a, **k), mc_expectancy_r=mc))
+    with mock.patch.object(timemachine, "odds", fake):
+        return check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT,
+                           audit=False, replays=2000, robustness=False)
 
 
 def test_h5b_short_odds_are_the_mirrored_monte_carlo():
     from nse_backtest.desk import timemachine
     df, _ = _breakdown_frame()
-    v = _short_check(df)
+    v = _short_check(df, mc=None)
     o = v.odds
     ratios = timemachine.bar_ratios(df.tail(timemachine._INTRADAY_LOOKBACK_BARS), Mode.INTRADAY, profile=NSE)
     p = v.plan
@@ -666,3 +677,36 @@ def test_h5b_unavailable_edge_caps_with_the_reason():
     assert v.action is Action.WAIT
     assert v.headline == ("WAIT ABC SHORT — edge check unavailable (cache unreadable (JSONDecodeError): "
                           "run shortcheck again)")
+
+
+# ---- H5b fix round 1 (R1): a short needs its own positive simulated expectancy too ----
+def test_h5b_fix_proven_pool_but_negative_stock_mc_is_a_skip(monkeypatch):
+    from nse_backtest.desk import timemachine
+    from nse_backtest.desk.models import ShortEdge
+    df, _ = _breakdown_frame()
+    real = timemachine.odds
+    monkeypatch.setattr(timemachine, "odds", lambda *a, **k: replace(real(*a, **k), mc_expectancy_r=-0.21))
+    v = _short_check(df, mc=None, short_edge=ShortEdge.from_trades(260, 0.11))
+    mc = {c.name: c for c in v.checks}["short_monte_carlo"]
+    assert (mc.status, mc.reason) == (Status.BLOCK, "Simulated short expectancy -0.21R is negative")
+    assert v.action is Action.SKIP and v.headline == "SKIP ABC SHORT — blocked by: short_monte_carlo"
+    assert _verdict.group_of("short_monte_carlo", v.plan.side) == "odds"  # advice: overridable as your call
+
+
+def test_h5b_fix_proven_pool_and_positive_stock_mc_is_take_eligible(monkeypatch):
+    from nse_backtest.desk import timemachine
+    from nse_backtest.desk.models import ShortEdge
+    df, _ = _breakdown_frame()
+    real = timemachine.odds
+    monkeypatch.setattr(timemachine, "odds", lambda *a, **k: replace(real(*a, **k), mc_expectancy_r=0.18))
+    v = _short_check(df, mc=None, short_edge=ShortEdge.from_trades(260, 0.11))
+    mc = {c.name: c for c in v.checks}["short_monte_carlo"]
+    assert mc.status is Status.PASS and mc.reason == "Simulated short expectancy +0.18R is positive (above +0.10R)"
+    assert v.action is Action.TAKE
+
+
+def test_h5b_fix_short_without_odds_is_blocked_like_a_long():
+    df, _ = _breakdown_frame()
+    v = _short_check(df.tail(3), mc=None)  # too few bars for the Monte Carlo
+    mc = {c.name: c for c in v.checks}["short_monte_carlo"]
+    assert mc.status is Status.BLOCK and v.action is Action.SKIP

@@ -253,11 +253,13 @@ def test_h5b_check_a_trade_offers_long_or_short_on_nse(monkeypatch, tmp_path):
     at.button(key="desk_check").click().run()
     assert not at.exception
     mode, kw = asked[-1]
-    assert mode is Mode.INTRADAY and kw["side"] is Side.SHORT  # a short is intraday whatever the Mode radio says
+    assert mode is Mode.INTRADAY and kw["side"] is Side.SHORT
+    assert not [r for r in at.radio if r.key == "desk_mode"]  # no Mode choice for a short: it is intraday
     assert "WAIT ABC SHORT" in _texts(at.tabs[2].markdown)
     assert list(at.tabs[2].dataframe[0].value["Mode"]) == ["intraday SHORT"]
     assert "Shorts are intraday (MIS)" in _texts(at.tabs[2].caption)
-    at.radio(key="desk_side").set_value("long")
+    at.radio(key="desk_side").set_value("long").run()
+    assert at.radio(key="desk_mode").options == ["swing", "intraday"]
     at.button(key="desk_check").click().run()
     assert asked[-1][0] is Mode.SWING and asked[-1][1]["side"] is Side.LONG
 

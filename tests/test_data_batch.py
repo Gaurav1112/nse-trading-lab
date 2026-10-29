@@ -211,6 +211,7 @@ def _hist(n, end, base):
 
 
 HIST = {"AAA.NS": _hist(40, "2026-02-27", 100), "BBB.NS": _hist(30, "2026-02-20", 200)}
+_REAL_DOWNLOAD = yf.download  # captured at import, before tests/conftest.py blocks it for every test
 
 
 @pytest.fixture
@@ -232,6 +233,7 @@ def real_yf(monkeypatch):
         return HIST[self.ticker].copy()
 
     monkeypatch.setattr(yf.Ticker, "history", history)
+    monkeypatch.setattr(yf, "download", _REAL_DOWNLOAD)  # the real one, driven by the fake history above
     return state
 
 

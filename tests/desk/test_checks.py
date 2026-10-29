@@ -703,9 +703,9 @@ def sby(cs):
 
 
 def test_short_checks_baseline():
-    cs = run_checks(splan(), SIZE, None, sctx(), current_price=100.0)
+    cs = run_checks(splan(), SIZE, ODDS, sctx(), current_price=100.0)
     names = [c.name for c in cs]
-    assert len(cs) == 18
+    assert len(cs) == 19
     for gone in ("monte_carlo", "setup_history", "robustness", "short_eligibility"):
         assert gone not in names  # long-only odds replaced by short_edge; eligibility split in two
     assert names[-3:] == ["short_regime", "short_fno", "relative_volume"] and "short_edge" in names
@@ -755,8 +755,40 @@ def test_short_edge_never_trusts_a_proven_flag_the_numbers_do_not_support():
 
 
 def test_proven_short_runs_clean_through_all_checks():
-    cs = run_checks(splan(), SIZE, None, sctx(short_edge=ShortEdge.from_trades(240, 0.2)), current_price=100.0)
-    assert len(cs) == 18 and all(c.status is Status.PASS for c in cs)
+    cs = run_checks(splan(), SIZE, ODDS, sctx(short_edge=ShortEdge.from_trades(240, 0.2)), current_price=100.0)
+    assert len(cs) == 19 and all(c.status is Status.PASS for c in cs)
+
+
+# ---- H5b fix round 1 ----
+@pytest.mark.parametrize("mc, status, reason", [
+    (-0.21, Status.BLOCK, "Simulated short expectancy -0.21R is negative"),
+    (0.0, Status.BLOCK, "Simulated short expectancy +0.00R is not positive"),
+    (0.05, Status.WARN, "Simulated short expectancy +0.05R is thin (under +0.10R)"),
+    (0.4, Status.PASS, "Simulated short expectancy +0.40R is positive (above +0.10R)"),
+    (float("nan"), Status.BLOCK, "Simulated short expectancy is not a number — no trade without odds"),
+])
+def test_short_monte_carlo_mirrors_the_long_block(mc, status, reason):
+    from dataclasses import replace as _r
+    c = sby(run_checks(splan(), SIZE, _r(ODDS, mc_expectancy_r=mc), sctx(), current_price=100.0))["short_monte_carlo"]
+    assert (c.status, c.reason) == (status, reason)
+
+
+def test_short_monte_carlo_without_odds_blocks():
+    c = sby(run_checks(splan(), SIZE, None, sctx(), current_price=100.0))["short_monte_carlo"]
+    assert (c.status, c.reason) == (Status.BLOCK, "Short odds could not be computed — no trade without odds")
+
+
+@pytest.mark.parametrize("plan_kw, note", [
+    (dict(t1=96.0), "pooled figure uses the 1.5R rule"),  # a user target: 2R, not the pooled 1.5R
+])
+def test_a_short_off_the_pooled_rule_is_never_proven(plan_kw, note):
+    proven = ShortEdge.from_trades(240, 0.2)
+    c = sby(run_checks(splan(**plan_kw), SIZE, ODDS, sctx(short_edge=proven), current_price=100.0))["short_edge"]
+    assert c.status is Status.WARN and c.reason.endswith(f"; {note}")
+    from dataclasses import replace as _r
+    user_stop = _r(splan(), stop_basis="user")
+    c = sby(run_checks(user_stop, SIZE, ODDS, sctx(short_edge=proven), current_price=100.0))["short_edge"]
+    assert c.status is Status.WARN and c.reason.endswith("; pooled figure uses the opening-range-mid stop")
 
 
 @pytest.mark.parametrize("override, reason", [

@@ -8,8 +8,10 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -59,32 +61,45 @@ def pooled_short_edge(profile: MarketProfile, frames15: Mapping[str, pd.DataFram
     """Every ORB short the desk's live rule would have taken on a HOSTILE day across ``frames15`` (the eligible
     universe's 15-minute bars; each frame's latest session is left out), at ``slippage_mult`` x the slippage, pooled.
     proven = at least 200 trades and a positive expectancy. A frame that is missing or cannot be replayed is
-    skipped (it adds no trades: it can only make proving harder)."""
+    skipped (it adds no trades: it can only make proving harder) and counted in ``skipped`` with the first reason.
+    Survivorship: the universe is TODAY's F&O list; stocks that left it, and past F&O-ban days, are not replayed."""
     if profile.code != "NSE":
         raise ValueError("ORB shorts are NSE only")
     cost = short_cost_fn(profile, slippage_mult)
     rs: list[float] = []
+    skipped: list[str] = []
     for sym in sorted(frames15):
         df = frames15[sym]
         if df is None:
+            skipped.append(f"{sym}: no bars")
             continue
         try:
             trades = short_trades(df, profile, regime_by_day, rr=SHORT_RR_T1, cost_fn=cost)
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError) as e:
+            skipped.append(f"{sym}: {type(e).__name__}: {e}")
             continue
         rs += [t.r for t in trades if math.isfinite(t.r)]
-    if not rs:
-        return ShortEdge.from_trades(0, None)
-    return ShortEdge.from_trades(len(rs), math.fsum(rs) / len(rs))
+    edge = ShortEdge.from_trades(len(rs), math.fsum(rs) / len(rs) if rs else None)
+    return replace(edge, skipped=len(skipped), skip_reason=skipped[0] if skipped else "")
+
+
+SURVIVORSHIP_NOTE = "universe = today's F&O list, past bans not replayed"
 
 
 def edge_line(e: ShortEdge) -> str:
-    """One line: the numbers and whether they prove the edge."""
+    """One line: the numbers, whether they prove the edge, and the survivorship caveat."""
     exp = "no expectancy yet" if e.expectancy_r is None else f"{e.expectancy_r:+.2f}R"
     head = f"{e.n} trades, {exp} at {SHORT_SLIPPAGE_MULT:g}× slippage, HOSTILE days"
     if e.proven:
-        return f"{head}: proven"
-    return f"{head}: not proven (needs at least {MIN_TRADES} trades and a positive R)"
+        return f"{head}: proven; {SURVIVORSHIP_NOTE}"
+    return f"{head}: not proven (needs at least {MIN_TRADES} trades and a positive R); {SURVIVORSHIP_NOTE}"
+
+
+def skipped_line(e: ShortEdge) -> str:
+    """"Skipped N frame(s) (first: SYM: why)", or "" when nothing was skipped."""
+    if not e.skipped:
+        return ""
+    return f"Skipped {e.skipped} frame{'' if e.skipped == 1 else 's'} (first: {e.skip_reason})"
 
 
 # ---------------------------------------------------------------- the daily cache
@@ -95,8 +110,9 @@ def save_edge(path: Path, profile: MarketProfile, day: date, edge: ShortEdge, *,
     path = Path(path)
     body = {"version": CACHE_VERSION, "market": profile.code, "day": day.isoformat(), "n": edge.n,
             "expectancy_r": edge.expectancy_r, "proven": edge.proven, "slippage_mult": SHORT_SLIPPAGE_MULT,
-            "min_trades": MIN_TRADES, "symbols": int(symbols),
-            "computed_at": (now or datetime.now()).isoformat()}
+            "min_trades": MIN_TRADES, "symbols": int(symbols), "skipped": int(edge.skipped),
+            "skip_reason": str(edge.skip_reason),
+            "computed_at": (now or datetime.now(ZoneInfo(profile.tz))).astimezone(ZoneInfo(profile.tz)).isoformat()}
     _atomic_write(path, json.dumps(body, indent=2, allow_nan=False) + "\n")
 
 
@@ -133,6 +149,9 @@ def load_edge(path: Path, profile: MarketProfile, day: date) -> tuple[ShortEdge 
     edge = ShortEdge.from_trades(n, exp)
     if d.get("proven") is not edge.proven:
         return _bad("proven flag does not match the numbers")
+    skipped, why = d.get("skipped", 0), d.get("skip_reason", "")
+    if isinstance(skipped, int) and not isinstance(skipped, bool) and skipped >= 0 and isinstance(why, str):
+        edge = replace(edge, skipped=skipped, skip_reason=why)
     return edge, ""
 
 
