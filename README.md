@@ -71,9 +71,11 @@ python3.13 -m nse_backtest.desk scoreboard --market US --json
 ```
 
 - **TAKE**: no check blocks and the current price (live quote, else the last close with a WARN) is
-  within about 1% of the planned entry. You get a ticket to type into your broker yourself.
+  within about 1% of the planned entry (intraday: at or below the stop-limit's limit price). You get a
+  ticket to type into your broker yourself.
 - **WAIT**: nothing blocks, but the price is below the entry (buy only above the trigger) or has run more
-  than 1% past it (buy only on a pullback). The ticket is shown as "IF TRIGGERED".
+  than 1% past it (intraday: above the stop-limit's limit, so the order would not fill). The ticket is
+  shown as "IF TRIGGERED".
 - **SKIP**: at least one check BLOCKs (named in the headline), or there is no usable current price.
 
 ### The 17 checks
@@ -129,9 +131,12 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
   default) and a time exit at the last close. A swing TAKE logged while its fill session was open is
   filled from the 15-minute bars after the verdict (the day's earlier low happened before the order).
-  Intraday: a BUY LIMIT, as the ticket prints it: 15-minute bars after the verdict, filled when the low
-  reaches the entry, at the bar's open if lower, flat by the session's flat-by time. When a bar touches
-  both stop and target, the stop wins.
+  Intraday: a BUY stop-limit, as the ticket prints it (trigger at the entry, limit = entry + the smaller
+  of 0.25R and 0.5%, rounded up to the tick): 15-minute bars after the verdict; the first bar whose high
+  reaches the trigger fills at its open or the trigger, whichever is higher, when it opens at or below the
+  limit; a bar opening above the limit leaves a resting limit, filled at the limit when price trades back
+  to it. Flat by the session's flat-by time. The Time Machine's intraday history uses the same rule. When
+  a bar touches both stop and target, the stop wins.
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.

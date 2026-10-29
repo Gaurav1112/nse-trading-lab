@@ -48,6 +48,7 @@ class TradePlan:
     last_close: float
     last_bar: str  # ISO timestamp of last bar used
     stop_basis: str  # "2×ATR" | "10-bar swing low" | "1×ATR floor" | "user" | "opening-range mid"
+    entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (swing: None)
 
     @property
     def risk_per_share(self) -> float:

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pandas as pd
 
+from nse_backtest.desk import fills
 from nse_backtest.desk.calendars import flat_by_for
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import Mode, TradePlan
@@ -98,7 +100,10 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
     if t1 <= e:
         raise ValueError("target must be above entry")
     t2 = max(t1, e + r_mult2 * r)
-    return TradePlan(symbol=symbol, market=profile.code, mode=mode, entry=float(e), stop=float(s),
+    plan = TradePlan(symbol=symbol, market=profile.code, mode=mode, entry=float(e), stop=float(s),
                      target_1=float(t1), target_2=float(t2), atr=a, max_hold_bars=hold,
                      last_close=last_close, last_bar=last_ts.isoformat(),
                      stop_basis=basis)
+    if mode is Mode.INTRADAY:
+        plan = replace(plan, entry_limit=fills.entry_limit(plan.entry, plan.stop, profile.tick))
+    return plan

@@ -14,6 +14,7 @@ NOW = datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
 P = TradePlan("ABC", "NSE", Mode.SWING, 100, 98, 103, 106, 2, 15, 100, "2026-10-28T00:00:00", "user")
 S = Sizing(250, "position cap", 640.0, 25_000.0, 140.0, False, "250 shares")
 OK = (Check("regime", Status.PASS, ""),)
+PI = replace(P, mode=Mode.INTRADAY, entry_limit=100.5)
 
 
 def test_take_ticket_nse_swing():
@@ -37,8 +38,23 @@ def test_wait_below_trigger_and_after_runaway():
 def test_us_and_intraday_tickets():
     us = ticket_lines(replace(P, market="US"), S, US)
     assert us == ("BUY 250 ABC LIMIT 100.00 — bracket: stop-loss 98.00, take-profit 103.00, GTC",)
-    mis = ticket_lines(replace(P, mode=Mode.INTRADAY), S, NSE)
-    assert mis[0].startswith("BUY 250 ABC MIS LIMIT") and mis[-1] == "Square off by 15:15 IST"
+    mis = ticket_lines(PI, S, NSE)  # C1: the intraday entry is a stop-limit (SL) order
+    assert mis == ("BUY 250 ABC MIS SL trigger 100.00 limit 100.50", "SL-M SELL 250 ABC trigger 98.00",
+                   "SELL 250 ABC LIMIT 103.00", "Square off by 15:15 IST")
+    us_mis = ticket_lines(replace(PI, market="US"), S, US)
+    assert us_mis == ("BUY 250 ABC STOP-LIMIT stop 100.00 limit 100.50 — bracket: stop-loss 98.00, "
+                      "take-profit 103.00, DAY", "Flat by 15:55 ET")
+    # a plan built without a limit price gets the same formula (entry 100, stop 98, NSE tick)
+    assert ticket_lines(replace(P, mode=Mode.INTRADAY), S, NSE)[0] == "BUY 250 ABC MIS SL trigger 100.00 limit 100.50"
+
+
+def test_intraday_take_needs_price_at_or_below_the_stop_limit():
+    assert decide(PI, S, None, OK, NSE, 100.5, NOW).action is Action.TAKE
+    v = decide(PI, S, None, OK, NSE, 100.55, NOW)
+    assert v.action is Action.WAIT and v.trigger == 100 and v.ticket[0] == "IF TRIGGERED:"
+    assert v.headline == ("WAIT ABC — Price ₹100.55 is above the stop-limit's limit ₹100.50 — "
+                          "the order would not fill")
+    assert decide(P, S, None, OK, NSE, 100.55, NOW).action is Action.TAKE  # swing keeps the 1% band
 
 
 def test_hash_is_stable_and_input_sensitive():

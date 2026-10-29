@@ -155,3 +155,21 @@ def test_s2_intraday_hold_uses_early_close_flat_by():
     p = build_plan(df, "X", Mode.INTRADAY, US)
     # last bar 10:15 -> flat by 12:45 (13:00 early close - 15 min) = 10 bars of 15 min
     assert p.max_hold_bars == 10
+
+
+# ---- trade chooser C1: intraday entry is a stop-limit
+def test_market_ticks():
+    from nse_backtest.desk.markets import US
+    assert NSE.tick == 0.05 and US.tick == 0.01
+
+
+def test_intraday_plan_carries_stop_limit_price_swing_does_not():
+    from nse_backtest.desk.markets import US
+    idx = pd.date_range("2026-10-28 09:15", periods=6, freq="15min")
+    df = pd.DataFrame({"Open": [100, 101, 102, 102, 103, 103], "High": [102, 103, 103, 104, 104, 104],
+                       "Low": [99, 100, 101, 101, 102, 102], "Close": [101, 102, 102, 103, 103, 104],
+                       "Volume": 1e5}, index=idx)
+    # entry 102, stop 100.5: min(0.25 x 1.5, 0.5% x 102) = 0.375 -> 102.375, rounded UP to the tick
+    assert build_plan(df, "X", Mode.INTRADAY, NSE).entry_limit == pytest.approx(102.40)
+    assert build_plan(df, "X", Mode.INTRADAY, US).entry_limit == pytest.approx(102.38)
+    assert build_plan(flat(), "X", Mode.SWING, NSE).entry_limit is None

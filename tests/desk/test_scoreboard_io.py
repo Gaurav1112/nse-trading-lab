@@ -477,7 +477,7 @@ def test_same_day_not_filled_and_intraday_not_cached(paths):
     write_audit(paths[0], [row(datetime(2026, 10, 28, 9, 0, tzinfo=IST)),
                            row(datetime(2026, 10, 28, 9, 50, tzinfo=IST), symbol="XYZ", mode="intraday", h="i")])
     idx = pd.date_range("2026-10-28 09:15", "2026-10-28 15:15", freq="15min")
-    flat = pd.DataFrame({"Open": 101.0, "High": 101.5, "Low": 100.5, "Close": 101.2}, index=idx)  # R1: above the limit
+    flat = pd.DataFrame({"Open": 99.0, "High": 99.5, "Low": 98.5, "Close": 99.2}, index=idx)  # C1: never up to the trigger
     res = run(paths, Loader({"ABC": frame({"2026-10-28": (101, 102, 100.5, 101)})}), Loader({"XYZ": flat}),
               now=datetime(2026, 10, 28, 15, 40, tzinfo=IST))
     assert [o.status for o in res.outcomes] == [Status.NOT_FILLED, Status.NOT_FILLED]
@@ -846,3 +846,15 @@ def test_r1_backup_without_hard_link_support_leaves_cache_untouched(paths, monke
     res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
     assert res.outcomes[0].status is Status.WON
     assert "could not be backed up" in res.cache_note and paths[1].read_text() == "{not json"
+
+
+# ---- C1: the stop-limit's limit price is part of the ticket a cached outcome must match
+def test_intraday_cached_outcome_needs_the_same_entry_limit(paths):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday")])
+    run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    (entry,) = _cached(paths).values()
+    assert entry["candidate"]["entry_limit"] == 100.5  # old row without it: computed, entry 100 / stop 98
+    write_audit(paths[0], [row(created, mode="intraday", entry_limit=100.3)])
+    res = run(paths, intraday=boom_loader(), now=datetime(2027, 1, 29, 12, 0, tzinfo=IST))
+    assert "cached result no longer matches the logged ticket (kept in cache)" in res.outcomes[0].note

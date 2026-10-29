@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from dataclasses import replace
+
+from nse_backtest.desk.fills import entry_limit
 from nse_backtest.desk.models import Mode
 from nse_backtest.desk.scoreboard import (
     Candidate, Outcome, Status, default_session_of, load_candidates, resolve_intraday, resolve_swing, summarize,
@@ -94,13 +97,14 @@ def _session(over, first="09:45", last="15:00", idle=(99, 99.5, 98.9, 99.2)):
 
 def test_intraday_fill_and_target():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    # R1: BUY LIMIT fill (Low <= entry at min(Open, entry)); the 09:30 bar starts before created_at
+    # C1: BUY stop-limit (trigger 100, limit 100.5): 09:45 trades through 100 opening at the limit -> fill at its
+    # open 100.5; the 09:30 bar starts before created_at
     bars = _bars([("09:15", 99, 99.5, 98.5, 99), ("09:30", 99, 99.5, 98.9, 99.2),
                   ("09:45", 100.5, 100.9, 100.3, 100.6), ("10:00", 100.2, 100.6, 99.9, 100.3),
                   ("10:15", 100.3, 103.1, 100, 103), ("15:15", 50, 200, 40, 60)])
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.WON and o.fill_price == pytest.approx(100.0) and o.exit_price == 103
-    assert o.fill_at.startswith("2026-10-27 10:00") and o.realised_r == pytest.approx(1.5)
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.5) and o.exit_price == 103
+    assert o.fill_at.startswith("2026-10-27 09:45") and o.realised_r == pytest.approx(1.25)
 
 
 def test_intraday_time_exit_ignores_bars_at_flat_by():
@@ -114,10 +118,13 @@ def test_intraday_time_exit_ignores_bars_at_flat_by():
 
 def test_intraday_not_filled_and_open():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({}, idle=(101, 101.5, 100.5, 101))  # R1: never down to the limit
-    assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.NOT_FILLED
     live = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
-    assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
+    never_triggered = _session({})  # every High below the 100 trigger
+    above_limit = _session({}, idle=(101, 101.5, 100.6, 101))  # C1: triggered above the 100.5 limit, never back
+    for bars in (never_triggered, above_limit):
+        o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
+        assert o.status is Status.NOT_FILLED and o.note == "stop-limit not filled before flat-by"
+        assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
 
 
 def test_load_candidates():
@@ -293,10 +300,10 @@ def test_swing_open_below_stop_exits_at_open():
 
 def test_intraday_stop_on_fill_bar_lost_at_stop():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({"09:45": (100.2, 100.5, 97.5, 99)})  # R1: limit fill at min(Open, entry) = 100
+    bars = _session({"09:45": (100.2, 100.5, 97.5, 99)})  # C1: stop-limit fill at max(Open, trigger) = 100.2
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-    assert o.fill_price == 100 and o.status is Status.LOST and o.exit_price == 98
-    assert o.realised_r == pytest.approx(-1.0 - 0.0)
+    assert o.fill_price == 100.2 and o.status is Status.LOST and o.exit_price == 98
+    assert o.realised_r == pytest.approx(-1.1)
 
 
 def test_win_pct_excludes_cost_eaten_wins():
@@ -445,9 +452,9 @@ def test_swing_uncovered_year_notes_say_so():
     assert o.note == "missing daily bar for 2027-03-03 (holiday calendar not available)"
 
 
-def test_scoreboard_version_bumped_for_r1_rules():
+def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 2  # gap, price-scale and fill rules changed: version-1 caches are not served
+    assert SCOREBOARD_VERSION == 3  # C1: intraday fills are a stop-limit now: version-2 caches are not served
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -614,7 +621,7 @@ def test_swing_before_open_or_after_close_keeps_daily_rule():
     assert not logged_mid_session(after, date(2026, 10, 27))
 
 
-# ---- intraday fill = the printed ticket: BUY MIS LIMIT at entry
+# ---- intraday fill = the printed ticket: BUY stop-limit, trigger at entry, limit at entry_limit
 def test_intraday_limit_fill_probe3_not_filled():
     c = Candidate(datetime(2026, 10, 26, 10, 0, tzinfo=IST), "NSE", "FAKE", Mode.INTRADAY, 100.0, 99.0, 101.5, 20,
                   0.0, 10, 0.2, None, "h|x")
@@ -623,14 +630,26 @@ def test_intraday_limit_fill_probe3_not_filled():
     bars = pd.DataFrame({"Open": op, "High": [x + 0.3 for x in op], "Low": [x - 0.2 for x in op],
                          "Close": [x + 0.05 for x in op]}, index=idx)
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=datetime(2026, 10, 27, 9, 0, tzinfo=IST))
-    assert o.status is Status.NOT_FILLED  # price stayed above the limit: a BUY LIMIT never fills
+    assert o.status is Status.NOT_FILLED  # triggered above the 100.25 limit and never back to it: no fill
 
 
-def test_intraday_limit_fills_at_min_open_entry():
+def test_intraday_gap_above_limit_rests_and_fills_at_the_limit():
     c = _ic()
     bars = _session({"10:00": (99.6, 100.0, 99.4, 99.8), "10:15": (99.9, 103.2, 99.8, 103)}, idle=(101, 101.5, 100.5, 101))
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.WON and o.fill_price == pytest.approx(99.6) and o.fill_at.startswith("2026-10-27 10:00")
+    # 09:45 opens at 101 above the 100.5 limit: the order rests and fills at the limit (Low 100.5), never better
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.5) and o.fill_at.startswith("2026-10-27 09:45")
+
+
+def test_intraday_uses_the_logged_entry_limit():
+    c = _ic()
+    bars = _session({"09:45": (100.3, 100.6, 100.25, 100.4), "10:00": (100.4, 100.5, 100.15, 100.3),
+                     "10:15": (100.3, 103.2, 100.25, 103)})
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)  # no logged limit: 100.5 computed
+    assert o.fill_price == pytest.approx(100.3) and o.fill_at.startswith("2026-10-27 09:45")
+    tight = replace(c, entry_limit=100.2)  # 09:45 opens above it: the order rests until 10:00 trades at 100.2
+    o = resolve_intraday(tight, bars, flat_by=time(15, 15), now=NOW)
+    assert o.fill_price == pytest.approx(100.2) and o.fill_at.startswith("2026-10-27 10:00")
 
 
 def test_parse_row_uses_early_close_flat_by():
@@ -644,15 +663,16 @@ def test_parse_row_uses_early_close_flat_by():
 
 # ---- review round R1 follow-up: a stop exit is never above the bar's open; LOST never books a gain
 def test_intraday_fill_bar_opening_below_stop_exits_at_open():
-    # probe_b: the first bar after the TAKE opens at 97 (below the 98 stop): filled at 97, out at 97, never +0.5R
+    # probe_b: the first bar after the TAKE opens at 97 (below the 98 stop) and trades up through the 100 trigger:
+    # filled at 100, out at that bar's open 97, never at the higher stop (C1: stop-limit fill)
     c = Candidate(datetime(2026, 10, 27, 10, 5, tzinfo=IST), "NSE", "ABC", Mode.INTRADAY, 100.0, 98.0, 103.0, 20,
                   0.0, 10, None, None, "h|x")
-    rows = [(101, 101, 100.5, 101)] * 4 + [(97, 99, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
+    rows = [(101, 101, 100.5, 101)] * 4 + [(97, 100.2, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
     idx = pd.date_range("2026-10-27 09:15", periods=len(rows), freq="15min")
     bars = pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
     o = resolve_intraday(c, bars, flat_by=time(15, 10), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
-    assert o.status is Status.LOST and o.fill_price == 97 and o.exit_price == 97
-    assert o.realised_r == pytest.approx(0.0) and summarize([o])[0].wins == 0
+    assert o.status is Status.LOST and o.fill_price == 100 and o.exit_price == 97
+    assert o.realised_r == pytest.approx(-1.5) and summarize([o])[0].wins == 0
 
 
 def _random_bars(rng, n, base=100.0, spread=4.0):
@@ -670,7 +690,9 @@ def _check_invariants(c, o):
         assert o.realised_r + c.cost_per_share / (c.entry - c.stop) <= 1e-9  # no gain before costs
     if o.status is Status.WON:
         assert o.exit_price >= c.target_1 - 1e-9
-    if o.fill_price is not None:
+    if o.fill_price is not None and c.mode is Mode.INTRADAY:  # a BUY stop-limit fills inside [trigger, limit]
+        assert c.entry - 1e-9 <= o.fill_price <= entry_limit(c.entry, c.stop, 0.05) + 1e-9
+    elif o.fill_price is not None:
         assert o.fill_price <= c.entry + 1e-9  # a BUY LIMIT never pays above its limit
 
 
@@ -743,3 +765,34 @@ def test_intraday_price_scale_needs_the_last_bar():
     o = check_intraday_price_scale(_ic_scaled(last_bar="2026-10-27T08:00:00"), _ic_bars())
     assert o.status is Status.UNAVAILABLE and "last bar" in o.note
     assert check_intraday_price_scale(_ic_scaled(last_bar=None), _ic_bars()).status is Status.UNAVAILABLE
+
+
+# ---- C1: intraday rows carry the stop-limit's limit price
+def test_load_candidates_reads_or_computes_entry_limit():
+    base = dict(action="TAKE", market="NSE", symbol="ABC", mode="intraday", entry=100, stop=99.6, target_1=103,
+                qty=10, input_hash="h", created_at="2026-10-27T10:00:00+05:30")
+    (logged,), _ = load_candidates([dict(base, entry_limit=100.15)])
+    (old,), _ = load_candidates([base])
+    (swing,), _ = load_candidates([dict(base, mode="swing")])
+    assert logged.entry_limit == 100.15
+    assert old.entry_limit == pytest.approx(100.10)  # entry + 0.25R = 100.1, on the 0.05 tick
+    assert swing.entry_limit is None
+
+
+@pytest.mark.parametrize("bad", [99.9, float("nan"), "x"])
+def test_load_candidates_rejects_bad_entry_limit(bad):
+    row = dict(action="TAKE", market="NSE", symbol="ABC", mode="intraday", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-10-27T10:00:00+05:30", entry_limit=bad)
+    cands, rejects = load_candidates([row])
+    assert not cands and "entry_limit" in rejects[0][1]
+
+
+def test_audit_writes_entry_limit(tmp_path):
+    from nse_backtest.desk import audit
+    from nse_backtest.desk.markets import NSE
+    from nse_backtest.desk.verdict import decide
+    from tests.desk.test_verdict_service import NOW as VNOW, OK, P, PI, S
+    rec = json.loads(audit.append_verdict(decide(PI, S, None, OK, NSE, 100.0, VNOW), tmp_path / "i.jsonl").read_text())
+    assert rec["entry_limit"] == 100.5
+    rec = json.loads(audit.append_verdict(decide(P, S, None, OK, NSE, 100.0, VNOW), tmp_path / "s.jsonl").read_text())
+    assert rec["entry_limit"] is None

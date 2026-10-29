@@ -38,6 +38,7 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
         "target_2": p.target_2, "last_bar": p.last_bar, "current_price": v.current_price,
         "stop_basis": p.stop_basis,
         "last_close": p.last_close,  # the plan's last daily Close: the scoreboard's price-scale check
+        "entry_limit": p.entry_limit,  # intraday stop-limit's limit price (None for swing)
     }
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:

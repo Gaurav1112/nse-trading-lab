@@ -13,6 +13,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from nse_backtest.desk.fills import entry_limit, stop_limit_fill
 from nse_backtest.desk.markets import get_profile
 from nse_backtest.desk.models import Mode, Odds, TradePlan
 from nse_backtest.desk.plan import atr_series, swing_stop
@@ -147,12 +148,13 @@ def _swing_history(df, plan, cost_per_share, years):
 
 
 def _intraday_history(df, plan, cost_per_share):
-    """Replay the desk's live rule. Opening range = the bar at session_open. The breakout is the first
-    bar inside [no_entry_before, no_entry_after] whose High clears the OR high (a breakout outside the
-    window = no trade); it fills at max(bar Open, OR high), like the live stop-buy at the OR high.
-    Stop = OR mid, target = entry + rr_t1 x R. On the breakout bar only the stop counts (its Low at or
-    below the stop is a stop-out: we cannot know it reached target first); then later bars are walked.
-    No later bars = time exit at the breakout bar's Close."""
+    """Replay the desk's live rule. Opening range = the bar at session_open; stop = OR mid. The entry is the
+    live ticket's buy stop-limit (trigger at the OR high, limit = fills.entry_limit), filled by
+    fills.stop_limit_fill over the bars inside [no_entry_before, no_entry_after]: a breakout outside the window,
+    or one that gaps above the limit and never trades back to it there, is no trade. Target = fill + rr_t1 x R,
+    R measured from the actual fill. On the fill bar only the stop counts (its Low at or below the stop is a
+    stop-out at min(Open, stop): we cannot know it reached target first); then later bars are walked.
+    No later bars = time exit at the fill bar's Close."""
     prof = get_profile(plan.market)
     op, hi, lo, cl = (df[c].to_numpy(dtype=float) for c in ("Open", "High", "Low", "Close"))
     atrs = atr_series(df).to_numpy()
@@ -170,12 +172,14 @@ def _intraday_history(df, plan, cost_per_share):
             continue  # no opening-range bar this session
         a = opens[0]
         or_high, or_low = hi[a], lo[a]
-        k = next((p for p in pos[pos > a]
-                  if prof.no_entry_before <= times[p] <= prof.no_entry_after and hi[p] > or_high), None)
-        if k is None:
-            continue
-        entry = float(max(op[k], or_high))
         stop = (or_high + or_low) / 2
+        window = [p for p in pos[pos > a] if prof.no_entry_before <= times[p] <= prof.no_entry_after]
+        if not window or not or_high > stop:
+            continue  # no entry window, or a zero-range opening bar (no stop-limit price exists)
+        got = stop_limit_fill(op, hi, lo, window[0], window[-1], or_high, entry_limit(or_high, stop, prof.tick))
+        if got is None:
+            continue
+        k, entry = got
         risk = entry - stop
         # Same degenerate-risk guard as swing: drops zero-range opening bars (R ~ 0 explodes R-multiples).
         if not risk > 0 or risk < 0.1 * atrs[k]:
@@ -183,9 +187,9 @@ def _intraday_history(df, plan, cost_per_share):
         target = entry + plan.rr_t1 * risk
         rest = pos[pos > k]
         if lo[k] <= stop:
-            px = stop  # stop wins on the breakout bar itself
+            px = min(op[k], stop)  # stop wins on the fill bar itself; a bar opening below it is out at its open
         elif len(rest) == 0:
-            px = cl[k]  # accepted trade with nothing after: time exit at the breakout bar's Close
+            px = cl[k]  # accepted trade with nothing after: time exit at the fill bar's Close
         else:
             res = _walk(op, hi, lo, cl, rest[0], rest[-1], stop, target)
             px = res[0] if res is not None else cl[rest[-1]]

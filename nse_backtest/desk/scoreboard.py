@@ -17,12 +17,13 @@ import numpy as np
 import pandas as pd
 
 from . import calendars as cal
+from . import fills
 from .costs import round_trip_cost
 from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 2  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
+SCOREBOARD_VERSION = 3  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -46,6 +47,7 @@ class Candidate:
     key: str                    # f"{input_hash}|{created_at.isoformat()}"
     last_bar: str | None = None     # the plan's last bar (ISO); None in rows logged before it was recorded
     last_close: float | None = None  # the plan's last daily Close; None in rows logged before R1
+    entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (None: computed from the tick)
 
 
 class Status(str, Enum):
@@ -145,11 +147,22 @@ def _parse_row(row: dict) -> Candidate:
             raise ValueError("invalid computed cost_per_share")
     last_bar = row.get("last_bar")
     last_close = _opt(row, "last_close")
+    limit = None
+    if mode is Mode.INTRADAY:
+        if row.get("entry_limit") is None:  # rows logged before the stop-limit ticket
+            limit = fills.entry_limit(entry, stop, profile.tick)
+        else:
+            try:
+                limit = float(row["entry_limit"])
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid entry_limit {row['entry_limit']!r}") from None
+            if not (math.isfinite(limit) and limit >= entry):
+                raise ValueError(f"invalid entry_limit {row['entry_limit']!r}")
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
                      f"{row['input_hash']}|{created.isoformat()}",
                      str(last_bar) if last_bar not in (None, "") else None,
-                     last_close if last_close is not None and last_close > 0 else None)
+                     last_close if last_close is not None and last_close > 0 else None, limit)
 
 
 def default_session_of(market: str, created_at: datetime) -> date:
@@ -440,9 +453,9 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
 
 
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
-    """MIS LIMIT at entry over created_at's session, bars strictly after created_at and before flat_by: filled at
-    the first bar with Low <= entry at min(Open, entry) (a BUY LIMIT, as the ticket prints it); only the stop can
-    trigger on the fill bar."""
+    """BUY stop-limit (trigger = entry, limit = entry_limit, as the ticket prints it) over created_at's session,
+    bars strictly after created_at and before flat_by, filled by fills.stop_limit_fill: never better than the
+    trigger, never worse than the limit. Only the stop can trigger on the fill bar, exiting at min(Open, stop)."""
     tz = ZoneInfo(get_profile(c.market).tz)
     created = c.created_at.astimezone(tz).replace(tzinfo=None)
     now_l = now.astimezone(tz).replace(tzinfo=None)
@@ -465,14 +478,16 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = sess.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    k = next((p for p in range(len(sess)) if lo[p] <= c.entry), None)  # BUY LIMIT, as the ticket prints
-    if k is None:
+    limit = c.entry_limit if c.entry_limit is not None else fills.entry_limit(
+        c.entry, c.stop, get_profile(c.market).tick)
+    got = fills.stop_limit_fill(op, hi, lo, 0, len(sess) - 1, c.entry, limit)  # BUY stop-limit, as printed
+    if got is None:
         if not session_over:
-            return _outcome(c, Status.OPEN, "limit not reached yet")
+            return _outcome(c, Status.OPEN, "stop-limit not filled yet")
         if incomplete:
             return _outcome(c, Status.UNAVAILABLE, incomplete_note)
-        return _outcome(c, Status.NOT_FILLED, "limit not reached before flat-by")
-    fill = min(op[k], c.entry)
+        return _outcome(c, Status.NOT_FILLED, "stop-limit not filled before flat-by")
+    k, fill = got
     fill_at = sess.index[k]
     if lo[k] <= c.stop:
         # a bar that opens below the stop fills at its open and is out at that open, never at the higher stop

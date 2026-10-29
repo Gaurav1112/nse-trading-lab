@@ -11,21 +11,30 @@ from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
 
+from . import fills
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan
+
+
+def stop_limit(plan: TradePlan, profile: MarketProfile) -> float:
+    """The intraday buy stop-limit's limit price (computed for a plan built without one)."""
+    if plan.entry_limit is not None:
+        return plan.entry_limit
+    return fills.entry_limit(plan.entry, plan.stop, profile.tick)
 
 
 def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile) -> tuple[str, ...]:
     sym, qty = plan.symbol, sizing.qty
     intraday = plan.mode is Mode.INTRADAY
     if profile.code == "US":
-        lines = (f"BUY {qty} {sym} LIMIT {plan.entry:.2f} — bracket: stop-loss {plan.stop:.2f}, "
-                 f"take-profit {plan.target_1:.2f}, {'DAY' if intraday else 'GTC'}",)
         if intraday:
-            lines += (f"Flat by {profile.flat_by:%H:%M} ET",)
-        return lines
+            return (f"BUY {qty} {sym} STOP-LIMIT stop {plan.entry:.2f} limit {stop_limit(plan, profile):.2f} — "
+                    f"bracket: stop-loss {plan.stop:.2f}, take-profit {plan.target_1:.2f}, DAY",
+                    f"Flat by {profile.flat_by:%H:%M} ET")
+        return (f"BUY {qty} {sym} LIMIT {plan.entry:.2f} — bracket: stop-loss {plan.stop:.2f}, "
+                f"take-profit {plan.target_1:.2f}, GTC",)
     if intraday:
-        return (f"BUY {qty} {sym} MIS LIMIT {plan.entry:.2f}",
+        return (f"BUY {qty} {sym} MIS SL trigger {plan.entry:.2f} limit {stop_limit(plan, profile):.2f}",
                 f"SL-M SELL {qty} {sym} trigger {plan.stop:.2f}",
                 f"SELL {qty} {sym} LIMIT {plan.target_1:.2f}",
                 f"Square off by {profile.flat_by:%H:%M} IST")
@@ -76,7 +85,12 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
         action, trigger = Action.WAIT, plan.entry
         ticket = ("IF TRIGGERED:",) + lines
         headline = f"WAIT {sym} — buy only above {m(plan.entry)} (now {m(current_price)})"
-    elif current_price > plan.entry * 1.01:
+    elif plan.mode is Mode.INTRADAY and current_price > (limit := stop_limit(plan, profile)):
+        action, trigger = Action.WAIT, plan.entry
+        ticket = ("IF TRIGGERED:",) + lines
+        headline = (f"WAIT {sym} — Price {m(current_price)} is above the stop-limit's limit {m(limit)} — "
+                    "the order would not fill")
+    elif plan.mode is Mode.SWING and current_price > plan.entry * 1.01:
         action, trigger = Action.WAIT, plan.entry
         ticket = ("IF TRIGGERED:",) + lines
         headline = f"WAIT {sym} — price ran past entry; buy only on a pullback to {m(plan.entry)}"
