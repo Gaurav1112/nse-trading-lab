@@ -141,11 +141,29 @@ def test_robustness_not_run_stays_pass():
     assert _s(plan(), replace(ODDS, noise_negative_frac=None), ctx())["robustness"] is Status.PASS
 
 
-def test_nan_pnl_row_skipped_in_daily_loss():
+def test_nan_pnl_row_unreadable_warns_in_daily_loss():
     j = ({"pnl": NAN, "closed_date": "2026-10-29"}, {"pnl": -1500, "closed_date": "2026-10-29"},
          {"pnl": -1500, "closed_date": "2026-10-29"})
-    assert _s(plan(), ODDS, ctx(journal=j))["daily_loss"] is Status.BLOCK
-    assert _s(plan(), ODDS, ctx(journal=({"pnl": NAN, "closed_date": "2026-10-29"},)))["daily_loss"] is Status.PASS
+    assert _s(plan(), ODDS, ctx(journal=j))["daily_loss"] is Status.BLOCK  # BLOCK still wins
+    c = _c("daily_loss", journal=({"pnl": NAN, "closed_date": "2026-10-29"},))
+    assert c.status is Status.WARN
+    assert c.reason == "Could not read today's P&L for 1 journal row(s) — daily loss limit not verified"
+
+
+def test_nan_pnl_falls_back_to_net_pnl():
+    j = ({"pnl": NAN, "net_pnl": -5000, "closed_date": "2026-10-29"},)
+    assert _c("daily_loss", journal=j).status is Status.BLOCK
+
+
+def test_none_pnl_today_warns_and_other_day_ignored():
+    assert _c("daily_loss", journal=({"pnl": None, "closed_date": "2026-10-29"},)).status is Status.WARN
+    assert _c("daily_loss", journal=({"pnl": "oops", "closed_date": "2026-10-29"},)).status is Status.WARN
+    assert _c("daily_loss", journal=({"pnl": None, "closed_date": "2026-10-20"},)).status is Status.PASS
+
+
+def test_unreadable_rows_ignored_by_streak():
+    L = lambda d: {"pnl": -1, "closed_date": f"2026-10-{d}"}
+    assert stoploss_streak([L(20), {"pnl": None, "closed_date": "2026-10-21"}, L(22), L(23)], "NSE") is True
 
 
 def test_regime_none_intraday_warns():
@@ -316,3 +334,49 @@ def test_string_numerics_never_raise():
     assert _c("monte_carlo", o=replace(ODDS, mc_expectancy_r="1")).status is Status.WARN
     assert _c("setup_history", o=replace(ODDS, history_expectancy_r="x")).status is Status.WARN
     assert _c("robustness", o=replace(ODDS, noise_negative_frac="x")).status is Status.WARN
+
+
+def test_string_mode_normalised():
+    p = replace(plan(), mode="swing")
+    assert _c("regime", p=p, regime="HOSTILE").status is Status.BLOCK
+    assert _c("entry_window", p=p).status is Status.PASS
+
+
+@pytest.mark.parametrize("sym", ["NSE:ABC", "ABC-EQ", "nse:abc-eq", "ABC.NS"])
+def test_ban_symbol_normalisation(sym):
+    b = BanList(frozenset({"ABC"}), "ok", None, "")
+    assert _c("ban_list", p=replace(plan(), symbol=sym), ban=b).status is Status.BLOCK
+
+
+@pytest.mark.parametrize("val,st", [
+    (datetime(2026, 12, 30, 9, 0), Status.PASS),
+    (datetime(2026, 11, 2, 9, 0), Status.WARN),
+    ("2026-12-30", Status.PASS),
+    ("2026-12-30T00:00:00", Status.PASS),
+    ("garbage", Status.WARN),
+])
+def test_next_earnings_types(val, st):
+    c = _c("earnings", next_earnings=val)
+    assert c.status is st
+    if val == "garbage":
+        assert "Could not check earnings date" in c.reason
+
+
+def test_next_earnings_pandas_timestamp():
+    import pandas as pd
+    assert _c("earnings", next_earnings=pd.Timestamp("2026-12-30")).status is Status.PASS
+
+
+def test_size_below_one_share_reason_and_nan_text():
+    c = _c("size", s=replace(SIZE, qty=0.5, note=""))
+    assert c.status is Status.BLOCK and "below one share" in c.reason
+    assert "not a valid number" in _c("size", s=replace(SIZE, qty=NAN)).reason
+
+
+def test_slightly_future_bar_reads_current_and_stale_unknown_asof():
+    p = _intra()
+    p = replace(p, last_bar="2026-10-29T10:03:00")
+    c = _c("freshness", p=p)
+    assert c.status is Status.PASS and "Last bar is current" in c.reason
+    c = _c("ban_list", ban=BanList(frozenset(), "stale", None, ""))
+    assert "last fetch date unknown" in c.reason and "None" not in c.reason

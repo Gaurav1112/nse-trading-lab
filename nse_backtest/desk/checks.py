@@ -30,22 +30,33 @@ class CheckContext:
     day_trades_5d: int = 0
 
 
-def _entry(e: dict) -> tuple[str, date, float] | None:
-    """(market, date, pnl) for a journal entry, or None if unusable."""
+def _entry(e: dict) -> tuple[str, date, float | None] | None:
+    """(market, date, pnl) for a journal entry; pnl is None when unreadable.
+
+    Uses `pnl` if it is a finite number, else `net_pnl` if finite, else None.
+    Returns None only when the market/date cannot be read at all.
+    """
     try:
         raw = next((e[k] for k in ("closed_date", "exit_date", "date") if e.get(k)), None)
         d = date.fromisoformat(str(raw)[:10])
-        pnl = e["pnl"] if e.get("pnl") is not None else e.get("net_pnl")
-        pnl = float(pnl)
-        if not math.isfinite(pnl):
-            return None
+        pnl = _num(e.get("pnl"))
+        if pnl is None:
+            pnl = _num(e.get("net_pnl"))
+        market = str(e.get("market") or "NSE").upper()
     except (TypeError, ValueError, KeyError, AttributeError):
         return None
-    return (str(e.get("market") or "NSE").upper(), d, pnl)
+    return (market, d, pnl)
+
+
+def unreadable_today(journal, market: str, today: date) -> int:
+    """Count journal rows for this market dated today whose P&L cannot be read."""
+    rows = (_entry(e) for e in journal)
+    return sum(1 for r in rows if r is not None and r[0] == str(market).upper() and r[1] == today and r[2] is None)
 
 
 def _market_entries(journal, market: str) -> list[tuple[date, float]]:
-    rows = [r for r in (_entry(e) for e in journal) if r is not None and r[0] == str(market).upper()]
+    rows = [r for r in (_entry(e) for e in journal)
+            if r is not None and r[2] is not None and r[0] == str(market).upper()]
     # Stable sort: entries sharing a date keep their original journal order,
     # so the later-listed entry counts as the more recent one in a streak.
     return sorted(((d, p) for _, d, p in rows), key=lambda r: r[0])
@@ -84,11 +95,12 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 
 def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext) -> list[Check]:
     p, lim, prof = plan, ctx.limits, ctx.profile
+    mode = Mode(p.mode)
     now = ctx.now
     naive = now.tzinfo is None
     if not naive:
         now = now.astimezone(ZoneInfo(prof.tz))
-    swing = p.mode is Mode.SWING
+    swing = mode is Mode.SWING
     out: list[Check] = []
     P, W, B = Status.PASS, Status.WARN, Status.BLOCK
 
@@ -132,7 +144,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     if qty is None:
         out.append(_ck("size", B, "Position size is not a valid number"))
     elif qty < 1:
-        out.append(_ck("size", B, f"Position size is zero: {sizing.note}" if sizing.note else "Position size is zero shares"))
+        why = "Position size is zero" if qty <= 0 else "Position size is below one share"
+        out.append(_ck("size", B, f"{why}: {sizing.note}" if sizing.note else why + (" shares" if qty <= 0 else "")))
     else:
         out.append(_ck("size", P, f"Size {sizing.qty} shares, limited by {sizing.binding_limit}"))
 
@@ -152,13 +165,20 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("daily_loss", B, "Daily loss limit is not configured"))
     elif lost >= cap:
         out.append(_ck("daily_loss", B, f"Daily loss limit hit: lost {prof.money(lost)} today against a limit of {prof.money(cap)}"))
+    elif (bad := unreadable_today(ctx.journal, prof.code, now.date())) > 0:
+        out.append(_ck("daily_loss", W, f"Could not read today's P&L for {bad} journal row(s) — daily loss limit not verified"))
     else:
         out.append(_ck("daily_loss", P, f"Daily loss {prof.money(max(lost, 0.0))} is within the limit of {prof.money(cap)}"))
 
     # 6 ban_list
     sym = str(p.symbol).strip().upper()
-    if sym.endswith("." + prof.exchange) and prof.exchange:
+    if sym.startswith("NSE:"):
+        sym = sym[4:].strip()
+    if prof.exchange and sym.endswith("." + prof.exchange):
         sym = sym[: -len(prof.exchange) - 1]
+    for suffix in (".NS", "-EQ"):
+        if sym.endswith(suffix):
+            sym = sym[: -len(suffix)]
     if not prof.has_ban_list:
         out.append(_ck("ban_list", P, f"No ban list for {prof.code}"))
     elif ctx.ban is None or ctx.ban.status not in ("ok", "cached", "stale"):
@@ -166,7 +186,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     elif sym in ctx.ban.symbols:
         out.append(_ck("ban_list", B, f"{sym} is in the NSE F&O ban list: no fresh positions allowed"))
     elif ctx.ban.status == "stale":
-        out.append(_ck("ban_list", W, f"F&O ban list is stale (last fetched {ctx.ban.as_of}): {sym} not on it but verify on NSE"))
+        out.append(_ck("ban_list", W, f"F&O ban list is stale ({'last fetch date unknown' if ctx.ban.as_of is None else 'last fetched ' + str(ctx.ban.as_of)}): {sym} not on it but verify on NSE"))
     else:
         out.append(_ck("ban_list", P, f"{sym} is not in the F&O ban list"))
 
@@ -201,6 +221,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         age_min = (now - bar).total_seconds() / 60
         if age_min < -5:
             out.append(_ck("freshness", W, "Last bar is in the future — check the clock/data"))
+        elif age_min < 0:
+            out.append(_ck("freshness", P, "Last bar is current"))
         elif now - bar > timedelta(minutes=30):
             out.append(_ck("freshness", B, f"Data is stale: last intraday bar is {age_min:.0f} minutes old (limit 30)"))
         else:
@@ -228,24 +250,34 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("liquidity", P, f"20-day turnover {prof.money(turn)} meets the minimum {prof.money(prof.min_turnover)}"))
 
     # 11 earnings
-    if not ctx.earnings_checked:
+    ne = ctx.next_earnings
+    if isinstance(ne, datetime):  # includes pd.Timestamp
+        ne = ne.date()
+    elif isinstance(ne, str):
+        try:
+            ne = date.fromisoformat(ne.strip()[:10])
+        except ValueError:
+            ne = "unreadable"
+    if ne == "unreadable" or (ne is not None and not isinstance(ne, date)):
         out.append(_ck("earnings", W, "Could not check earnings date: results may land inside the trade"))
-    elif ctx.next_earnings is None:
+    elif not ctx.earnings_checked:
+        out.append(_ck("earnings", W, "Could not check earnings date: results may land inside the trade"))
+    elif ne is None:
         out.append(_ck("earnings", P, "No upcoming earnings date found"))
     else:
-        days = (ctx.next_earnings - now.date()).days
+        days = (ne - now.date()).days
         if swing:
             window = math.ceil(p.max_hold_bars * 7 / 5)
             if days < 0:
-                out.append(_ck("earnings", W, f"Earnings date looks stale: {ctx.next_earnings} is in the past"))
+                out.append(_ck("earnings", W, f"Earnings date looks stale: {ne} is in the past"))
             elif days <= window:
-                out.append(_ck("earnings", W, f"Earnings on {ctx.next_earnings} are {days} days away, inside the {window}-day hold window"))
+                out.append(_ck("earnings", W, f"Earnings on {ne} are {days} days away, inside the {window}-day hold window"))
             else:
-                out.append(_ck("earnings", P, f"Next earnings on {ctx.next_earnings} are outside the {window}-day hold window"))
-        elif ctx.next_earnings == now.date():
-            out.append(_ck("earnings", W, f"Earnings are today ({ctx.next_earnings}): expect a violent move"))
+                out.append(_ck("earnings", P, f"Next earnings on {ne} are outside the {window}-day hold window"))
+        elif ne == now.date():
+            out.append(_ck("earnings", W, f"Earnings are today ({ne}): expect a violent move"))
         else:
-            out.append(_ck("earnings", P, f"Next earnings on {ctx.next_earnings} are not today"))
+            out.append(_ck("earnings", P, f"Next earnings on {ne} are not today"))
 
     # 12 setup_history
     if odds is None:
@@ -294,7 +326,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("robustness", P, f"Only {nf:.0%} of noisy replays lose money (limit 25%)"))
 
     # 16 pdt
-    if prof.code == "US" and p.mode is Mode.INTRADAY and lim.pdt_guard and ctx.day_trades_5d >= 3:
+    if prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and ctx.day_trades_5d >= 3:
         out.append(_ck("pdt", B, f"Pattern day trader guard: {ctx.day_trades_5d} day trades in the last 5 days (limit 3)"))
     else:
         out.append(_ck("pdt", P, "Pattern day trader guard does not apply or is within limits"))
