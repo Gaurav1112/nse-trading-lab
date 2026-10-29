@@ -6,13 +6,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nse_backtest import tape_monitor
 
 from . import audit, strength
-from .calendars import is_trading_day
+from .calendars import is_trading_day, session_close_for
 from .checks import CheckContext
 from .models import Action, DeskVerdict, LiveQuote, Limits, Mode
 from .service import check_trade
@@ -36,6 +37,8 @@ class DailyPlan:
     # turns, never a trade. Empty with a reason in holding_up_note when the index can't anchor it.
     holding_up: tuple[tuple[str, float], ...] = ()
     holding_up_note: str | None = None
+    # Why the "desk sat out" record could not be written for this plan (None: written, or nothing to write).
+    sat_out_note: str | None = None
     # LAST field: the skips whose exception is not a ValueError (the desk's "unusable data" signal) — a code bug,
     # never a quiet day. Also in ``skipped``; shown in red by the page and the CLI (plan_errors_line).
     errors: tuple[tuple[str, str], ...] = ()
@@ -282,13 +285,18 @@ def _sat_out_sessions(path: Path) -> set[tuple[str, str, date]] | None:
     return out
 
 
-def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> None:
+SAT_OUT_UNREADABLE = "Sat-out record not written: the audit log could not be read (no duplicates risked)"
+
+
+def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> str | None:
     """One SAT_OUT row per symbol per session for every full-checked verdict the regime alone kept out (the rows the
-    scoreboard's "Desk sat out (market regime)" record replays). Never stops the plan."""
+    scoreboard's "Desk sat out (market regime)" record replays). Never stops the plan; returns why some rows could
+    not be written (DailyPlan.sat_out_note), else None."""
     if not verdicts:
-        return
+        return None
     from .scoreboard_io import fill_session_of
     seen = None
+    failed: list[tuple[str, str]] = []
     for v in verdicts:
         try:
             if sat_out_refusal(v, profile) is not None:
@@ -296,18 +304,39 @@ def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> Non
             if seen is None:  # the log is read once, and only when there is something to log
                 seen = _sat_out_sessions(audit_path)
                 if seen is None:
-                    return
+                    return SAT_OUT_UNREADABLE
             key = (v.plan.market, v.plan.symbol, fill_session_of(v.plan.market, datetime.fromisoformat(v.created_at)))
             if key in seen:
                 continue
             audit.append_sat_out(v, audit_path)
             seen.add(key)
-        except Exception:  # noqa: BLE001 - the sat-out record is a measurement; the plan itself must still come back
-            continue
+        except Exception as e:  # noqa: BLE001 - the sat-out record is a measurement; the plan itself must come back
+            failed.append((v.plan.symbol, _err(e)))
+    if not failed:
+        return None
+    return f"Sat-out record not written for {len(failed)} symbol(s): {failed[0][0]}: {failed[0][1]}"
 
 
-def _holding_up(frames, regime_df) -> tuple[tuple[tuple[str, float], ...], str | None]:
+def _completed_bars(df, profile, now):
+    """``df`` without today's still-open daily bar (as loaders drops it from the stock frames), so the index and the
+    stocks end on the same completed session. Unreadable input is returned as it is (holding_up_report judges it)."""
     try:
+        if now is None or df is None or len(df) == 0:
+            return df
+        local = now.astimezone(ZoneInfo(profile.tz)) if now.tzinfo is not None else now
+        day = local.date()
+        if (pd.Timestamp(df.index[-1]).date() == day and is_trading_day(profile, day)
+                and local.time() < session_close_for(profile, day)):
+            return df.iloc[:-1]
+    except Exception:  # noqa: BLE001 - a frame this can't read is left for holding_up_report to reject
+        return df
+    return df
+
+
+def _holding_up(frames, regime_df, profile=None, now=None) -> tuple[tuple[tuple[str, float], ...], str | None]:
+    try:
+        if profile is not None:
+            regime_df = _completed_bars(regime_df, profile, now)
         held, why = strength.holding_up_report(frames, regime_df)
         return tuple(held), why
     except Exception as e:  # noqa: BLE001 - a watchlist failure never stops the plan
@@ -344,10 +373,12 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
                                   earnings_lookup, quote_lookup)
     final_take, take_over = _overflow(t2, top_take, _neg_exp)
     final_watch, watch_over = _overflow(w2, top_watch, _closeness)
+    sat_note = None
     if audit_path is not None:  # only a plan that writes its own audit log measures sitting out
-        _log_sat_outs(profile, w2 + o2, audit_path)
+        sat_note = _log_sat_outs(profile, w2 + o2, audit_path)
     others = [*take_over, *watch_over, *o2, *takes_rest, *watch_rest, *p1.others]
-    held, held_note = _holding_up(frames, regime_df)
+    held, held_note = _holding_up(frames, regime_df, profile, ctx.now)
     return DailyPlan(profile.code, regime, regime_text, flip_conditions(regime_df, profile),
                      tuple(final_take), tuple(final_watch), tuple(p1.skipped + s2),
-                     tuple(p1.unavailable), tuple(others), held, held_note, errors=tuple(p1.errors + e2))
+                     tuple(p1.unavailable), tuple(others), held, held_note, sat_out_note=sat_note,
+                     errors=tuple(p1.errors + e2))

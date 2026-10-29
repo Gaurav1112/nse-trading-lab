@@ -43,7 +43,8 @@ LIM = Limits(capital=500_000)  # fictional
 
 def short_ctx(**kw):
     base = dict(regime="HOSTILE", governor_can_trade=True, ban=BanList(frozenset(), "ok", "2026-10-29", ""),
-                earnings_checked=True, turnover_20d=1e11, today_gap_pct=0.1, fno=frozenset({"FICT"}), fno_as_of=NOW.date(),
+                earnings_checked=True, turnover_20d=1e11, today_gap_pct=0.1, fno=frozenset({"FICT"}),
+                fno_as_of=NOW.date(),
                 short_edge=ShortEdge.from_trades(250, 0.12))
     base.update(kw)
     return CheckContext(NSE, LIM, NOW, **base)
@@ -370,3 +371,53 @@ def test_m11_cache_round_trip_keeps_coverage_and_rejects_a_tampered_list(tmp_pat
     old = {k: v for k, v in good.items() if k not in ("digest", "pooled_symbols", "pooled", "eligible")}
     p.write_text(json.dumps({**old, "version": 1}))
     assert load_edge(p, NSE, day)[0] is None  # an old-format cache is recomputed, never trusted
+
+
+# ---------------------------------------------------------------- M9: holding-up during the session
+
+def test_m9_holding_up_drops_todays_partial_index_bar_like_the_stocks():
+    from nse_backtest.desk import daily
+    days = pd.bdate_range(end="2026-10-29", periods=120)
+    idx = pd.DataFrame({"Close": np.linspace(100, 90, 120)}, index=days)  # incl. today's partial bar
+    stocks = {f"S{i}": pd.DataFrame({"Close": np.linspace(100, 110 + i, 119)}, index=days[:-1]) for i in range(5)}
+    during = datetime(2026, 10, 29, 11, 0, tzinfo=IST)
+    held, why = daily._holding_up(stocks, idx, NSE, during)
+    assert why is None and [s for s, _ in held] == ["S4", "S3", "S2", "S1", "S0"]
+    after = datetime(2026, 10, 29, 16, 0, tzinfo=IST)  # after the close today's bar is complete: kept
+    held, why = daily._holding_up(stocks, idx, NSE, after)
+    assert held == () and "different days" in why
+
+
+# ---------------------------------------------------------------- M7: sat-out failures surface
+
+def test_m7_a_failed_sat_out_write_is_noted_on_the_plan(tmp_path, monkeypatch):
+    import tests.desk.test_daily as td
+    from nse_backtest.desk import audit
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(audit, "append_sat_out", boom)
+    dp = td._plan(audit_path=tmp_path / "audit.jsonl", regime="HOSTILE")
+    assert {v.plan.symbol for v in dp.watch} == {"A", "B", "C", "F"}  # the plan still comes back
+    assert dp.sat_out_note == "Sat-out record not written for 4 symbol(s): A: OSError: disk full"
+
+
+def test_m7_an_unreadable_audit_log_is_noted(tmp_path, monkeypatch):
+    import tests.desk.test_daily as td
+    from nse_backtest.desk import daily
+    monkeypatch.setattr(daily, "_sat_out_sessions", lambda path: None)
+    dp = td._plan(audit_path=tmp_path / "audit.jsonl", regime="HOSTILE")
+    assert dp.sat_out_note == "Sat-out record not written: the audit log could not be read (no duplicates risked)"
+    assert td._plan(audit_path=tmp_path / "b.jsonl").sat_out_note is None  # nothing to log: no note
+
+
+def test_m7_cli_prints_the_sat_out_note(monkeypatch, capsys, tmp_path):
+    from argparse import Namespace
+    from dataclasses import replace
+    import tests.desk.test_daily as td
+    from nse_backtest.desk import cli, session
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    plan = replace(td._plan(), sat_out_note="Sat-out record not written for 1 symbol(s): A: OSError: x")
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+    cli.cmd_plan(Namespace(json=False, all=False), NSE)
+    assert "Sat-out record not written for 1 symbol(s): A: OSError: x" in capsys.readouterr().out

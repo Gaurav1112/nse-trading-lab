@@ -213,8 +213,10 @@ def test_no_sat_out_when_the_regime_is_unknown(tmp_path):
 
 def test_plan_holding_up_says_so_when_the_index_and_stocks_end_on_different_days():
     import pandas as pd
-    idx = series(step=1.004, n=401, end="2026-10-29")  # one bar ahead of every stock
+    # one completed session BEHIND every stock (F2/M9: an index bar for today, 10:00 IST, is today's partial bar
+    # and is dropped like the stocks' own, so "one bar ahead" during the session is no longer a mismatch)
+    idx = series(step=1.004, n=399, end="2026-10-27")
     dp = daily_plan(NSE, _frames(), idx, Limits(capital=100_000), ctx(), replays=300, regime="HOSTILE")
     assert dp.holding_up == ()
-    assert dp.holding_up_note == ("index and stock data end on different days (index 2026-10-29, stocks 2026-10-28)"
+    assert dp.holding_up_note == ("index and stock data end on different days (index 2026-10-27, stocks 2026-10-28)"
                                   " — holding-up list unavailable")

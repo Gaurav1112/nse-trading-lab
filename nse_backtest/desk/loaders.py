@@ -456,9 +456,9 @@ def day_trades_5d(journal: list[dict], today: date, profile: MarketProfile | Non
 
 def fno_underlyings(profile: MarketProfile, now: datetime | None = None
                     ) -> tuple[frozenset[str] | None, date | None]:
-    """(NSE's F&O underlyings — who may be shorted intraday —, the date that list is from); (None, None) for a market
-    without one or when the list cannot be verified (the short_fno check then BLOCKs). The day is the market's
-    (IST), never the machine's."""
+    """(NSE's F&O underlyings, i.e. who may be shorted intraday, and the date that list is from); (None, None) for a
+    market without one or when the list cannot be verified (the short_fno check then BLOCKs). The day is the
+    market's (IST), never the machine's."""
     if profile.code != "NSE":
         return None, None
     tz = ZoneInfo(profile.tz)

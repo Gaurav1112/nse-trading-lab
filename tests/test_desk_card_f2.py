@@ -147,3 +147,16 @@ def test_m10_card_unknown_regime_is_a_red_recheck_not_an_override(monkeypatch):
     desk_card._ticket(v, desk_card.build_card(v, NSE, lim), NSE, lim, None, "w", key="choose", now=now)
     assert desk_card.st.shown[0] == "Market regime unknown (index data unavailable) — re-check"
     assert calls == [{"entry": v.plan.entry}]  # the Re-check ran; no override box
+
+
+def test_m7_page_plan_tab_shows_the_sat_out_note(monkeypatch, tmp_path):
+    from streamlit.testing.v1 import AppTest
+    from nse_backtest.desk.daily import DailyPlan
+    from tests.test_desk_page_smoke import _REPO, _plain
+    _patch_page(monkeypatch, tmp_path)
+    plan = DailyPlan("NSE", None, "", (), (), (), (), (), sat_out_note="Sat-out record not written: boom")
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    at.button(key="desk_build_plan").click().run()
+    assert not at.exception
+    assert any("Sat-out record not written: boom" in _plain(w.value) for w in at.warning)

@@ -321,6 +321,8 @@ with tab_plan:
                              "on Choose a Trade"):
                 st.dataframe(pd.DataFrame([(v.plan.symbol, v.action.value, v.headline) for v in plan.others],
                                           columns=["Symbol", "Desk says", "Why"]), hide_index=True, width="stretch")
+        if getattr(plan, "sat_out_note", None):
+            st.warning(shown(plan.sat_out_note))
         with st.expander(f"Skipped ({len(plan.skipped)}) and unavailable ({len(plan.unavailable)})"):
             if plan.skipped:
                 st.dataframe(pd.DataFrame(plan.skipped, columns=["Symbol", "Why"]), hide_index=True, width="stretch")
@@ -778,7 +780,8 @@ with tab_choose:
     st.caption("Your call — ranked by the desk's own odds: TAKE, then WAIT, then SKIPs blocked only by the market or "
                "the odds, then the rest; within each, the highest Monte Carlo expectancy (Exp R) first, with shorts "
                "whose pooled edge is not proven after the rest (a short's Exp R is at 1× slippage; its edge gate "
-               "uses 2×). A SKIP stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing. A top "
+               "uses 2×). A SKIP stays a SKIP. \"quick\" rows are priced on the last close: run a Full check "
+               "before choosing. A top "
                "TAKE that the full check demoted is not replaced by the next quick one: open that one yourself.")
     pstate, istate = st.session_state.get(PLAN_KEY), st.session_state.get(SCAN_KEY)
     have_plan, have_scan = bool(pstate and "ok" in pstate), bool(istate and "ok" in istate)

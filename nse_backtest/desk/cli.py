@@ -249,7 +249,8 @@ def cmd_plan(a, profile) -> int:
         return 1 if failed else 0
     if errline:
         print(errline, file=sys.stderr)
-    lines = warn + ([errline, ""] if errline else []) + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
+    lines = warn + ([errline, ""] if errline else [])
+    lines += [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
     lines += ["", "TAKE:"] + ([_format_row(v) for v in plan.take] or ["  none today — no trade is a valid answer"])
@@ -257,6 +258,8 @@ def cmd_plan(a, profile) -> int:
     for v in plan.take:
         lines += [""] + format_verdict(v, profile)
     lines += [""] + _holding_up_lines(plan, profile)
+    if getattr(plan, "sat_out_note", None):
+        lines += ["", plan.sat_out_note]
     if plan.unavailable:
         lines += ["", "No data: " + ", ".join(plan.unavailable)]
     if a.all:

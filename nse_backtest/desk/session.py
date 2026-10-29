@@ -29,6 +29,7 @@ from .service import check_trade
 from .verdict import ADVICE_GROUPS, block_groups, short_edge_cap
 
 Warn = Callable[[str], None] | None
+Progress = Callable[[int, int, str], None] | None  # on_progress(n, total, symbol): called BEFORE symbol n is loaded
 _RESOLVE = object()
 
 
@@ -213,12 +214,13 @@ class ShortcheckResult:
     failures: tuple[tuple[str, str], ...] = ()
 
 
-def run_shortcheck(profile, *, refresh: bool = False, on_warning: Warn = None, on_progress=None,
+def run_shortcheck(profile, *, refresh: bool = False, on_warning: Warn = None, on_progress: Progress = None,
                    now: datetime | None = None) -> ShortcheckResult:
     """Today's pooled ORB-short edge over the eligible universe (the desk's universe in NSE's F&O list), HOSTILE
     days only, at 2x slippage, cached for the day in the data dir. Uses today's cache unless ``refresh``. Raises
     ValueError when it cannot be computed honestly (not NSE, no F&O list, no regime index, no bars at all); nothing
-    is cached then, so the gate stays closed."""
+    is cached then, so the gate stays closed. ``on_progress(n, total, symbol)`` is called before symbol n's bars
+    are loaded (a failing callback is dropped, never stops the run)."""
     if profile.code != "NSE":
         raise ValueError("ORB shorts are NSE only")
     today = _market_today(profile, now)
@@ -309,11 +311,11 @@ def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: 
 
 
 def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLVE,
-                 on_warning: Warn = None, on_progress=None
+                 on_warning: Warn = None, on_progress: Progress = None
                  ) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
     """Opening-range scan over 15m frames; (verdicts, failures) with load failures included. Every TAKE is
-    logged to the audit log, so the scoreboard scores it. ``on_progress(done, total, symbol)`` is called after
-    each symbol is loaded (a failing callback never stops the scan). On a HOSTILE NSE day every symbol is also
+    logged to the audit log, so the scoreboard scores it. ``on_progress(n, total, symbol)`` is called before
+    symbol n is loaded (a failing callback never stops the scan). On a HOSTILE NSE day every symbol is also
     checked as an ORB breakdown short (shorts_today)."""
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
