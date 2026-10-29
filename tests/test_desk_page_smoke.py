@@ -855,3 +855,114 @@ def test_c7_zero_sized_choose_row_shows_dash_for_money(monkeypatch, tmp_path):
     df = next(d.value for d in at.dataframe if "Desk says" in d.value.columns)
     row = df.iloc[0]
     assert row["Qty"] == "0" and row["Max loss"] == "—" and row["Profit T1"] == "—"
+
+
+# ---------------------------------------------------------------- H2: every verdict keeps its numbers
+
+QUICK_MSG = "Quick check — run a full check before choosing"
+
+
+def _others():
+    """Two first-pass verdicts the plan kept in `others`: a 4th TAKE (OTK) and a regime-blocked breakout (OSK)."""
+    from dataclasses import replace
+    from nse_backtest.desk.models import Action, Check, Status
+    take = _cands()[0]
+    otk = replace(take, plan=replace(take.plan, symbol="OTK"), input_hash="o" * 64, headline="TAKE OTK",
+                  first_pass=True, quote_as_of=None, quote_live=False)
+    p = take.plan
+    osk = replace(take, action=Action.SKIP, input_hash="q" * 64, headline="SKIP OSK — blocked by: regime", ticket=(),
+                  plan=replace(p, symbol="OSK", entry=p.entry * 1.05, stop=p.stop * 1.05,
+                               target_1=p.target_1 * 1.05, target_2=p.target_2 * 1.05),
+                  checks=(Check("regime", Status.BLOCK, "HOSTILE"),), first_pass=True, quote_as_of=None)
+    return otk, osk
+
+
+def _others_page(monkeypatch, tmp_path):
+    from nse_backtest.desk import audit, session
+    from nse_backtest.desk.daily import DailyPlan
+    _patch_ok(monkeypatch, tmp_path)
+    take, wait, skip, intra = _cands()
+    otk, osk = _others()
+    plan = DailyPlan("NSE", "HOSTILE", "", (), (take,), (wait,), (("ZZZ", "RuntimeError: odd bars"),), (),
+                     (otk, osk, skip))
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([intra], []))
+    logged = []
+    monkeypatch.setattr(audit, "append_override", lambda v, path=None: logged.append(v))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    assert not at.exception
+    return _load(at), logged
+
+
+def test_h2_choose_table_has_numbers_for_others_and_the_new_columns(monkeypatch, tmp_path):
+    at, _ = _others_page(monkeypatch, tmp_path)
+    df = next(d.value for d in at.dataframe if "Desk says" in d.value.columns)
+    assert all(c in df.columns for c in ("Exp R", "Expected value", "To entry %"))
+    assert list(df["Symbol"]) == ["ABC", "OTK", "WTT", "OSK", "INT", "SKP", "ZZZ"]  # your-call ranking (ties: plan lists, scan, others)
+    for sym in ("OTK", "OSK"):
+        row = df[df["Symbol"] == sym].iloc[0]
+        assert row["Entry"].startswith("₹") and row["Max loss"].startswith("₹")
+        assert row["Expected value"].startswith("₹") and row["Exp R"].endswith("R")
+        assert row["To entry %"] == row["To entry %"]  # a number, not NaN
+    osk = df[df["Symbol"] == "OSK"].iloc[0]
+    assert osk["To entry %"] == pytest.approx(5.0, abs=0.01)
+    assert df[df["Symbol"] == "OTK"].iloc[0]["Desk says"] == "TAKE"
+    assert "quick" in df[df["Symbol"] == "OTK"].iloc[0]["Checked"]
+
+
+def test_h2_quick_card_has_no_ticket_and_no_override_until_full_check(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk import session
+    at, logged = _others_page(monkeypatch, tmp_path)
+    otk = _others()[0]
+    seen = []
+
+    def run_check(p, sym, mode, limits, **k):
+        seen.append((sym, mode.value, k))
+        return replace(otk, input_hash="f" * 64, first_pass=False)
+    monkeypatch.setattr(session, "run_check", run_check)
+    _pick(at, "TAKE OTK")
+    assert QUICK_MSG in _texts(at.warning)
+    assert "OTK" not in _codes(at)
+    assert not any(c.label.startswith("I choose this anyway") for c in at.checkbox)
+    assert "Max loss" in [m.label for m in at.metric]  # levels and money still shown
+    next(b for b in at.button if b.label == "Full check").click().run()
+    assert not at.exception
+    assert len(seen) == 1 and seen[0][:2] == ("OTK", "swing") and seen[0][2]["entry"] == otk.plan.entry
+    assert QUICK_MSG not in _texts(at.warning)
+    assert "OTK" in _codes(at)  # the full check's TAKE ticket replaces the quick card
+    assert logged == []
+
+
+def test_h2_quick_skip_card_offers_no_override_checkbox(monkeypatch, tmp_path):
+    at, _ = _others_page(monkeypatch, tmp_path)
+    _pick(at, "SKIP OSK")
+    assert QUICK_MSG in _texts(at.warning)
+    assert not any(c.label.startswith("I choose this anyway") for c in at.checkbox)
+    assert any(b.label == "Full check" for b in at.button)
+
+
+def test_h2_check_it_for_a_skipped_plan_symbol_uses_the_desks_entry(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk import session
+    at, _ = _others_page(monkeypatch, tmp_path)
+    take = _cands()[0]
+    seen = []
+    monkeypatch.setattr(session, "run_check", lambda p, sym, mode, limits, **k: seen.append(k) or
+                        replace(take, plan=replace(take.plan, symbol=sym), input_hash="z" * 64))
+    _pick(at, "SKIP ZZZ")
+    at.button(key="desk_choose_checkit").click().run()
+    assert not at.exception and len(seen) == 1 and seen[0].get("desk_entry") is True
+
+
+def test_h2_check_a_trade_entry_zero_is_the_desks_own_entry(monkeypatch, tmp_path):
+    from nse_backtest.desk import session
+    _patch_ok(monkeypatch, tmp_path)
+    take = _cands()[0]
+    seen = []
+    monkeypatch.setattr(session, "run_check", lambda p, sym, mode, limits, **k: seen.append(k) or take)
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    assert "0 = the desk's own entry (breakout above the 20-day high for swing)" in at.number_input(key="desk_entry").help
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.button(key="desk_check").click().run()
+    assert not at.exception and seen and seen[0]["entry"] is None and seen[0]["desk_entry"] is True

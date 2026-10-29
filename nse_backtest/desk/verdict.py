@@ -66,6 +66,12 @@ def ticket_lines(plan: TradePlan, sizing: Sizing, profile: MarketProfile, *, cur
             f"GTT OCO {sym}: stop-loss {plan.stop:.2f} / target {plan.target_1:.2f}")
 
 
+def is_quick(v: DeskVerdict) -> bool:
+    """True when the verdict came from the daily plan's first pass: priced on the last close with no live quote, no
+    earnings date and no robustness run, and never audited. Its ticket must not be used until a full check."""
+    return bool(getattr(v, "first_pass", False)) and v.quote_as_of is None
+
+
 def _plain(o):
     """Recursively convert enums to their .value so hashing never depends on str(Enum)."""
     if isinstance(o, Enum):

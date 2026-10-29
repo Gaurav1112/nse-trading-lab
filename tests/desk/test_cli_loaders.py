@@ -87,3 +87,24 @@ def test_d2_no_unused_imports_left():
         tree = ast.parse((root / rel).read_text())
         imported = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
         assert name not in imported, f"{rel} still imports {name}"
+
+
+def test_h2_plan_all_prints_the_ranked_table_with_a_check_hint_per_row(capsys, monkeypatch):
+    from nse_backtest.desk.markets import universe
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 5)
+    syms = universe(NSE)[:5]
+    assert cli.main(["plan", "--market", "NSE", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "Your call" in out
+    table = out.split("Your call", 1)[1]
+    for s in syms:
+        assert f"check {s} --choose --entry " in table
+    rows = [ln for ln in table.splitlines() if ln.strip().startswith(("TAKE", "WAIT", "SKIP"))]
+    assert len(rows) == 5 and all("exp " in r and "max loss" in r for r in rows)
+
+
+def test_h2_plan_without_all_names_the_others(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 5)
+    assert cli.main(["plan", "--market", "NSE"]) == 0
+    out = capsys.readouterr().out
+    assert "Also checked, not on today's lists: 2" in out and "plan --all" in out

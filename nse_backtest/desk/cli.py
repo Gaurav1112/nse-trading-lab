@@ -15,6 +15,7 @@ from . import audit, loaders, session
 from . import calendars as cal
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, summary_fields
+from .verdict import is_quick
 from .positions import review_positions
 from .tradecard import DAILY_LOSS_NOTE, build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
@@ -225,8 +226,48 @@ def cmd_plan(a, profile) -> int:
         lines += [""] + format_verdict(v, profile)
     if plan.unavailable:
         lines += ["", "No data: " + ", ".join(plan.unavailable)]
-    lines += ["", f"Skipped {len(plan.skipped)} symbols."]
+    if a.all:
+        lines += [""] + _your_call(plan, profile, limits)
+    else:
+        if plan.others:
+            lines += ["", f"Also checked, not on today's lists: {len(plan.others)} "
+                          "(plan --all ranks them with the money)."]
+        lines += ["", f"Skipped {len(plan.skipped)} symbols."]
     return _finish(lines)
+
+
+def _your_call_row(v: DeskVerdict, profile, limits) -> list[str]:
+    m, p = profile.money, v.plan
+    try:
+        card = build_card(v, profile, limits)
+        qty, loss = card.qty, ("n/a" if card.max_loss is None else m(card.max_loss))
+        ev = "n/a" if card.expected_value is None else m(card.expected_value)
+    except Exception as e:  # noqa: BLE001 - bad geometry: the row says why, the rest still print
+        qty, loss, ev = v.sizing.qty, f"unavailable ({type(e).__name__})", "n/a"
+    e = v.odds.mc_expectancy_r if v.odds is not None else None
+    blocks = ", ".join(c.name for c in v.blocks())
+    px = v.current_price
+    to_entry = (f"{(p.entry / px - 1) * 100:+.1f}%" if isinstance(px, (int, float)) and math.isfinite(px) and px > 0
+                else "n/a")
+    checked = "quick check" if is_quick(v) else "full check"
+    why = f" — blocked by: {blocks}" if blocks else ""
+    return [f"  {v.action.value:<4} {p.symbol:<12} {p.mode.value:<8} entry {m(p.entry)} ({to_entry} away)  "
+            f"stop {m(p.stop)}  T1 {m(p.target_1)}  qty {qty}  max loss {loss}  exp {_r(e)}  EV {ev}  "
+            f"[{checked}]{why}",
+            f"       -> check {p.symbol} --choose --entry {p.entry:.2f}"
+            + (" --mode intraday" if p.mode is Mode.INTRADAY else "")]
+
+
+def _your_call(plan, profile, limits) -> list[str]:
+    """Every verdict the plan computed, ranked (session.candidate_rank), with the money and a check hint."""
+    lines = ["Your call — every candidate the desk checked, ranked by its own odds (TAKE, WAIT, SKIP blocked only "
+             "by the market or the odds, then the rest). A SKIP stays a SKIP: --choose logs it as your override; "
+             "a quick check has no live price, earnings or robustness run, so run the check before choosing."]
+    for v in session.merge_candidates(plan, (), include_others=True):
+        lines += _your_call_row(v, profile, limits)
+    for sym, why in plan.skipped:
+        lines.append(f"  ---- {sym:<12} no verdict: {why}")
+    return lines
 
 
 def cmd_positions(a, profile) -> int:
@@ -421,6 +462,9 @@ def build_parser() -> argparse.ArgumentParser:
         common(p)
         if name == "intraday":
             p.add_argument("--symbols", help="comma separated; default first 15 of the universe")
+        if name == "plan":
+            p.add_argument("--all", action="store_true",
+                           help="also rank every other candidate the desk checked, with the money and a check hint")
         p.set_defaults(fn=fn)
     s = sub.add_parser("settings", help="show or change per-market limits")
     common(s)

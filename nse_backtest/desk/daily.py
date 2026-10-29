@@ -25,9 +25,11 @@ class DailyPlan:
     flip_conditions: tuple[str, ...]
     take: tuple[DeskVerdict, ...]
     watch: tuple[DeskVerdict, ...]
-    skipped: tuple[tuple[str, str], ...]
+    skipped: tuple[tuple[str, str], ...]  # symbols with no verdict at all: (symbol, why)
     unavailable: tuple[str, ...]
-
+    # Every other computed verdict (TAKEs beyond top_take, watch overflow, blocked and far symbols), numbers kept.
+    # First-pass ones are quick (verdict.is_quick) and never audited.
+    others: tuple[DeskVerdict, ...] = ()
 
 def turnover_20d(df) -> float | None:
     """Median Close*Volume over the last 20 bars; None when it cannot be computed. Never raises."""
@@ -98,6 +100,15 @@ def breakout_entry(df) -> tuple[str, float | None]:
     return "trigger", trigger * 1.001
 
 
+def plan_entry(df) -> float | None:
+    """The plan's own swing entry: None (buy at the close) at the 20-day high, else the breakout trigger
+    (20-day high x 1.001), also for a symbol far below it."""
+    kind, e = breakout_entry(df)
+    if kind == "far":
+        return float(df["High"].tail(20).max()) * 1.001
+    return e
+
+
 def _exp(v: DeskVerdict) -> float:
     return v.odds.mc_expectancy_r if v.odds is not None else float("-inf")
 
@@ -127,72 +138,76 @@ def _tape_or_none(regime_df):
         return None
 
 
-def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limits, ctx_base: CheckContext,
-               *, top_take: int = 3, top_watch: int = 5, replays: int = 3000,
-               audit_path: Path | None = None,
-               earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None,
-               quote_lookup: Callable[[str], LiveQuote | None] | None = None,
-               regime=_UNSET, tape=None) -> DailyPlan:
-    """Pass 1 ranks every symbol on its last close. Pass 2 re-checks only the TAKE/WATCH candidates
-    with the live quote, earnings date and robustness. `regime`/`tape`, when given, are used as-is
-    (so the page header and the plan agree) and the tape is not re-assessed."""
-    if regime is _UNSET:
-        tape = _tape_or_none(regime_df)
-        regime = tape.regime if tape else None
-    if tape is not None and getattr(tape, "regime", None) == regime:
-        regime_text = tape.recommendation
-    elif regime:
-        regime_text = f"Regime {regime}"
-    else:
-        regime_text = "Regime unknown — treat as HOSTILE"
-    ctx = replace(ctx_base, regime=regime)
+def _err(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}"
 
-    skipped: list[tuple[str, str]] = []
-    unavailable: list[str] = []
-    takes: list[DeskVerdict] = []
-    watch: list[DeskVerdict] = []
-    entries: dict[str, float | None] = {}
-    sym_ctx: dict[str, CheckContext] = {}
 
+def _overflow(vs: list, top: int, key) -> tuple[list, list]:
+    """(the best `top` by `key`, the rest in rank order)."""
+    ranked = sorted(vs, key=key)
+    return ranked[:top], ranked[top:]
+
+
+def _neg_exp(v: DeskVerdict) -> float:
+    return -_exp(v)
+
+
+@dataclass
+class _Pass1:
+    takes: list[DeskVerdict]
+    watch: list[DeskVerdict]
+    others: list[DeskVerdict]
+    skipped: list[tuple[str, str]]
+    unavailable: list[str]
+    entries: dict[str, float | None]
+    sym_ctx: dict[str, CheckContext]
+
+
+def _first_pass(profile, frames: dict[str, pd.DataFrame], ctx: CheckContext, limits: Limits,
+                replays: int) -> _Pass1:
+    """Every symbol on its last close (no quote, no robustness, never audited). Near a setup -> TAKE/WATCH
+    candidates; far symbols are priced at the plan's breakout trigger and kept in `others`; any exception is
+    that symbol's `skipped` reason."""
+    out = _Pass1([], [], [], [], [], {}, {})
     for sym, df in frames.items():
         if df is None or len(df) < 220:
-            unavailable.append(sym)
+            out.unavailable.append(sym)
             continue
         try:
-            kind, e = breakout_entry(df)
-        except Exception as err:  # noqa: BLE001
-            skipped.append((sym, str(err)))
-            continue
-        if kind == "far":
-            skipped.append((sym, "not near a setup"))
-            continue
-        c = replace(ctx, turnover_20d=turnover_20d(df), today_gap_pct=None)
-        try:
+            kind, _ = breakout_entry(df)
+            e = plan_entry(df)
+            c = replace(ctx, turnover_20d=turnover_20d(df), today_gap_pct=None)
             v = check_trade(df, sym, profile, Mode.SWING, limits, c, entry=e,
                             robustness=False, replays=replays, audit=False)
-        except ValueError as err:
-            skipped.append((sym, str(err)))
+        except Exception as err:  # noqa: BLE001 - one symbol never stops the plan
+            out.skipped.append((sym, _err(err)))
             continue
-        entries[sym], sym_ctx[sym] = e, c
+        v = replace(v, first_pass=True)
+        if kind == "far":
+            out.others.append(v)
+            continue
+        out.entries[sym], out.sym_ctx[sym] = e, c
         if v.action is Action.TAKE:
-            takes.append(v)
+            out.takes.append(v)
         elif _watch_eligible(v):
-            watch.append(v)
+            out.watch.append(v)
         else:
-            skipped.append((sym, v.headline))
+            out.others.append(v)
+    return out
 
-    takes.sort(key=_exp, reverse=True)
-    watch.sort(key=_closeness)
-    for v in takes[top_take:]:
-        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_take})"))
-    for v in watch[top_watch:]:
-        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_watch} watch)"))
 
-    final_take: list[DeskVerdict] = []
-    final_watch: list[DeskVerdict] = []
-    for v in takes[:top_take] + watch[:top_watch]:  # one network call of each kind per candidate
+def _second_pass(profile, frames, p1: _Pass1, candidates: list[DeskVerdict], limits: Limits, replays: int,
+                 audit_path: Path | None, earnings_lookup, quote_lookup
+                 ) -> tuple[list[DeskVerdict], list[DeskVerdict], list[DeskVerdict], list[tuple[str, str]]]:
+    """(takes, watch, others, skipped): the candidates re-checked with the live quote, earnings date and
+    robustness, audited. One network call of each kind per candidate."""
+    takes: list[DeskVerdict] = []
+    watch: list[DeskVerdict] = []
+    others: list[DeskVerdict] = []
+    skipped: list[tuple[str, str]] = []
+    for v in candidates:
         sym = v.plan.symbol
-        c2 = sym_ctx[sym]
+        c2 = p1.sym_ctx[sym]
         if earnings_lookup is not None:
             try:
                 nxt, checked = earnings_lookup(sym)
@@ -207,24 +222,49 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
                 quote = None
             c2 = replace(c2, today_gap_pct=today_gap_pct(frames[sym], quote, c2.now, profile))
         try:
-            v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, c2, entry=entries[sym],
+            v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, c2, entry=p1.entries[sym],
                              robustness=True, replays=replays, audit=True, audit_path=audit_path, quote=quote)
-        except ValueError as err:
-            skipped.append((sym, str(err)))
+        except Exception as err:  # noqa: BLE001 - one symbol never stops the plan
+            skipped.append((sym, _err(err)))
             continue
         if v2.action is Action.TAKE:
-            final_take.append(v2)
+            takes.append(v2)
         elif _watch_eligible(v2):
-            final_watch.append(v2)
+            watch.append(v2)
         else:
-            skipped.append((sym, v2.headline))
+            others.append(v2)
+    return takes, watch, others, skipped
 
-    final_take.sort(key=_exp, reverse=True)
-    for v in final_take[top_take:]:
-        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_take})"))
-    final_watch.sort(key=_closeness)
-    for v in final_watch[top_watch:]:
-        skipped.append((v.plan.symbol, f"{v.headline} (beyond top {top_watch} watch)"))
+
+def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limits, ctx_base: CheckContext,
+               *, top_take: int = 3, top_watch: int = 5, replays: int = 3000,
+               audit_path: Path | None = None,
+               earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None,
+               quote_lookup: Callable[[str], LiveQuote | None] | None = None,
+               regime=_UNSET, tape=None) -> DailyPlan:
+    """Pass 1 ranks every symbol on its last close. Pass 2 re-checks only the TAKE/WATCH candidates
+    with the live quote, earnings date and robustness. Every other verdict is kept in `others`.
+    `regime`/`tape`, when given, are used as-is (so the page header and the plan agree) and the tape is
+    not re-assessed."""
+    if regime is _UNSET:
+        tape = _tape_or_none(regime_df)
+        regime = tape.regime if tape else None
+    if tape is not None and getattr(tape, "regime", None) == regime:
+        regime_text = tape.recommendation
+    elif regime:
+        regime_text = f"Regime {regime}"
+    else:
+        regime_text = "Regime unknown — treat as HOSTILE"
+    ctx = replace(ctx_base, regime=regime)
+
+    p1 = _first_pass(profile, frames, ctx, limits, replays)
+    takes, takes_rest = _overflow(p1.takes, top_take, _neg_exp)
+    watch, watch_rest = _overflow(p1.watch, top_watch, _closeness)
+    t2, w2, o2, s2 = _second_pass(profile, frames, p1, takes + watch, limits, replays, audit_path,
+                                  earnings_lookup, quote_lookup)
+    final_take, take_over = _overflow(t2, top_take, _neg_exp)
+    final_watch, watch_over = _overflow(w2, top_watch, _closeness)
+    others = [*take_over, *watch_over, *o2, *takes_rest, *watch_rest, *p1.others]
     return DailyPlan(profile.code, regime, regime_text, flip_conditions(regime_df, profile),
-                     tuple(final_take[:top_take]), tuple(final_watch[:top_watch]), tuple(skipped),
-                     tuple(unavailable))
+                     tuple(final_take), tuple(final_watch), tuple(p1.skipped + s2),
+                     tuple(p1.unavailable), tuple(others))

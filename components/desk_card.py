@@ -22,6 +22,7 @@ from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.textsafe import md_escape, safe_url, shown
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
+from nse_backtest.desk.verdict import is_quick
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -34,6 +35,9 @@ OVERRIDES_KEY = "desk_overrides_logged"  # {input_hash: qty at the first confirm
 ACCOUNT_N = (10, 20, 50)
 STALE_INTRADAY_MIN = 15  # an intraday verdict older than this cannot be acted on from the card: re-check first
 RECHECK_KEY = "card_recheck"  # (RECHECK_KEY, key, input_hash) -> {"ok": fresh verdict} | {"error": reason}
+QUICK_CHECK_MSG = ("Quick check — run a full check before choosing. This verdict is priced on the last close: no "
+                   "live price, no earnings date and no robustness run, and it is not logged. The Full check runs "
+                   "them at the same entry; a TAKE it confirms is logged as a desk pick.")
 
 
 def _msg(e: Exception) -> str:
@@ -272,8 +276,33 @@ def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) 
         st.error(f"Re-check failed: {hit['error']}")
 
 
+def _full_check(v: DeskVerdict, profile, limits, key: str, wkey: str) -> None:
+    """The quick-verdict gate: no ticket and no override box, only a Full check that runs the full desk check at
+    the plan's own entry (and the owner's stop/target when they set them) and replaces the card's verdict."""
+    st.warning(QUICK_CHECK_MSG)
+    rk = (RECHECK_KEY, key, v.input_hash)
+    if st.button("Full check", key=f"{wkey}_fullcheck"):
+        p = v.plan
+        levels = dict(entry=p.entry)
+        if p.stop_basis == "user":
+            levels.update(stop=p.stop, target=p.target_1)
+        with st.spinner(f"Running the full check for {p.symbol}..."):
+            try:
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
+            except Exception as e:  # noqa: BLE001 - shown under the prompt
+                st.session_state[rk] = {"error": _msg(e)}
+        if "ok" in st.session_state[rk]:
+            st.rerun()
+    hit = st.session_state.get(rk)
+    if hit is not None and "error" in hit:
+        st.error(f"Full check failed: {hit['error']}")
+
+
 def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = "", now: datetime | None = None
             ) -> None:
+    if is_quick(v):
+        _full_check(v, profile, limits, key, wkey)
+        return
     reason = stale_reason(v, profile, now or market_now(profile))
     if reason is not None:
         _recheck(v, profile, limits, key, wkey, reason)

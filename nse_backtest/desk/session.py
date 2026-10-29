@@ -19,7 +19,7 @@ from . import calendars as cal
 from . import loaders
 from . import scoreboard_io
 from .audit import data_dir
-from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
+from .daily import DailyPlan, daily_plan, plan_entry, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .models import Action, DeskVerdict, Limits, Mode
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
@@ -147,12 +147,19 @@ def load_frames(profile, symbols: Iterable[str], on_warning: Warn = None) -> dic
 
 
 def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, stop=None, target=None,
-              regime=_RESOLVE, on_warning: Warn = None) -> DeskVerdict:
-    """Full single-symbol check. Raises ValueError for bad input / unusable data."""
+              regime=_RESOLVE, on_warning: Warn = None, desk_entry: bool = False) -> DeskVerdict:
+    """Full single-symbol check. Raises ValueError for bad input / unusable data. With ``desk_entry`` and no
+    ``entry``, a swing check uses the daily plan's own entry (the breakout above the 20-day high; the close when
+    already at it) instead of the last close."""
     sym = symbol.strip().upper()
     if not sym:
         raise ValueError("enter a symbol")
     daily = loaders.load_daily(profile, sym)
+    if desk_entry and entry is None and mode is Mode.SWING:
+        try:
+            entry = plan_entry(daily)
+        except Exception:  # noqa: BLE001 - unusable bars: build_plan below raises the real reason
+            entry = None
     df = loaders.load_intraday(profile, sym) if mode is Mode.INTRADAY else daily
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
@@ -210,27 +217,47 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
     return verdicts, load_failures + list(failures)
 
 
-def _expectancy(v: DeskVerdict) -> float | None:
+def expectancy(v: DeskVerdict) -> float | None:
     e = v.odds.mc_expectancy_r if v.odds is not None else None
     return e if isinstance(e, (int, float)) and e == e and abs(e) != float("inf") else None
 
 
-def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = ()) -> list[DeskVerdict]:
-    """Every verdict from the daily plan (TAKE and WATCH) and the intraday scan, one per (symbol, mode) (the first
-    seen wins), TAKE first, then by Monte Carlo expectancy (highest first; no odds last). The plan's skipped
-    symbols are (symbol, reason) only and are left to the caller."""
+ADVICE_BLOCKS = frozenset({"regime", "monte_carlo", "setup_history", "robustness"})
+
+
+def candidate_rank(v: DeskVerdict) -> tuple:
+    """Sort key for "your call": TAKE, then WAIT, then SKIPs blocked only by the market or the desk's own odds
+    (regime / monte_carlo / setup_history / robustness), then every other SKIP (data, limits, exchange). Within
+    a group, the highest Monte Carlo expectancy first; no odds last."""
+    blocks = {c.name for c in v.blocks()}
+    if v.action is Action.TAKE:
+        group = 0
+    elif v.action is Action.WAIT:
+        group = 1
+    elif blocks and blocks <= ADVICE_BLOCKS:
+        group = 2
+    else:
+        group = 3
+    e = expectancy(v)
+    return (group, e is None, -(e or 0.0))
+
+
+def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = (), *,
+                     include_others: bool = True) -> list[DeskVerdict]:
+    """Every verdict from the daily plan (TAKE, WATCH and, with ``include_others``, every other verdict it
+    computed) and the intraday scan, one per (symbol, mode) (the plan's lists win, then the scan, then
+    ``others``), ranked by candidate_rank. The plan's skipped symbols have no verdict and are left to the
+    caller."""
+    lists = (plan.take + plan.watch) if plan is not None else ()
+    extra = plan.others if plan is not None and include_others else ()
     seen: set = set()
     out: list[DeskVerdict] = []
-    for v in [*((plan.take + plan.watch) if plan is not None else ()), *scan_verdicts]:
+    for v in [*lists, *scan_verdicts, *extra]:
         k = (v.plan.symbol, v.plan.mode)
         if k not in seen:
             seen.add(k)
             out.append(v)
-
-    def order(v: DeskVerdict):
-        e = _expectancy(v)
-        return (v.action is not Action.TAKE, e is None, -(e or 0.0))
-    return sorted(out, key=order)
+    return sorted(out, key=candidate_rank)
 
 
 def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,

@@ -28,6 +28,7 @@ from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.positions import review_positions
 from nse_backtest.desk.textsafe import shown
 from nse_backtest.desk.tradecard import build_card
+from nse_backtest.desk.verdict import is_quick
 
 st.set_page_config(page_title="Desk | Trading Lab", page_icon="🧭", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
@@ -298,6 +299,11 @@ with tab_plan:
                          column_config={"Distance %": st.column_config.NumberColumn(format="%.1f%%")})
         else:
             st.caption("Nothing on the watch list.")
+        if plan.others:
+            with st.expander(f"Also checked, not on today's lists ({len(plan.others)}) — ranked with the money "
+                             "on Choose a Trade"):
+                st.dataframe(pd.DataFrame([(v.plan.symbol, v.action.value, v.headline) for v in plan.others],
+                                          columns=["Symbol", "Desk says", "Why"]), hide_index=True, width="stretch")
         with st.expander(f"Skipped ({len(plan.skipped)}) and unavailable ({len(plan.unavailable)})"):
             if plan.skipped:
                 st.dataframe(pd.DataFrame(plan.skipped, columns=["Symbol", "Why"]), hide_index=True, width="stretch")
@@ -313,7 +319,10 @@ with tab_check:
     symbol = c1.text_input("Symbol", key="desk_symbol", placeholder="e.g. RELIANCE" if market == "NSE" else "e.g. AAPL")
     mode = c2.radio("Mode", ["swing", "intraday"], key="desk_mode", horizontal=True)
     e1, e2, e3 = st.columns(3)
-    entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry")
+    entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry",
+                            help="0 = the desk's own entry (breakout above the 20-day high for swing), the same entry "
+                                 "as today's plan; the close when the stock is already at that high. Intraday: the "
+                                 "opening-range high.")
     stop = e2.number_input("Stop (0 = auto)", min_value=0.0, value=0.0, key="desk_stop")
     target = e3.number_input("Target (0 = auto)", min_value=0.0, value=0.0, key="desk_target")
     result_key = ("check", market, _today(profile), _limits_key(limits), symbol.strip().upper(), mode,
@@ -322,7 +331,8 @@ with tab_check:
         with st.spinner("Checking..."):
             try:
                 v = session.run_check(profile, symbol, Mode(mode), limits, entry=entry or None,
-                                      stop=stop or None, target=target or None, regime=regime_name)
+                                      stop=stop or None, target=target or None, regime=regime_name,
+                                      desk_entry=True)
                 cstate = {"ok": v, "at": _now_hhmm(profile)}
             except ValueError as e:
                 cstate = {"error": shown(e) if str(e) else "Invalid input"}
@@ -554,6 +564,12 @@ def _dash(x) -> str:
     return "—" if x is None else profile.money(x)
 
 
+def _to_entry_pct(v: DeskVerdict) -> float | None:
+    px = v.current_price
+    ok = isinstance(px, (int, float)) and not isinstance(px, bool) and math.isfinite(px) and px > 0
+    return round((v.plan.entry / px - 1) * 100, 2) if ok else None
+
+
 def _candidate_row(v: DeskVerdict) -> dict:
     p = v.plan
     try:
@@ -562,13 +578,21 @@ def _candidate_row(v: DeskVerdict) -> dict:
         card = None
     blocks = ", ".join(c.name for c in v.blocks())
     built = desk_card.built_at(v, profile)
+    e = session.expectancy(v)
+    quick = is_quick(v)
+    why = (blocks or v.headline) if v.action is not Action.TAKE else (
+        "not in today's top picks — run a Full check before choosing" if quick else "")
     return {"Symbol": p.symbol, "Mode": p.mode.value, "Desk says": v.action.value,
+            "Checked": "quick (last close)" if quick else "full",
             "Built": "—" if built is None else f"{built:%H:%M}",
-            "Entry": profile.money(p.entry), "Stop": profile.money(p.stop), "T1": profile.money(p.target_1),
+            "Entry": profile.money(p.entry), "To entry %": _to_entry_pct(v), "Stop": profile.money(p.stop),
+            "T1": profile.money(p.target_1),
             "T2": profile.money(p.target_2), "Qty": str(card.qty if card else v.sizing.qty),
             "Max loss": _dash(card.max_loss if card else None), "Profit T1": _dash(card.profit_t1 if card else None),
             "Win odds": _pct(v.odds.p_target) if v.odds is not None else "n/a",
-            "Why": "" if v.action is Action.TAKE else (blocks or v.headline)}
+            "Exp R": "n/a" if e is None else f"{e:+.2f}R",
+            "Expected value": _dash(card.expected_value if card else None),
+            "Why": why}
 
 
 def _warn_scan_failures(istate, have_scan: bool) -> None:
@@ -578,8 +602,9 @@ def _warn_scan_failures(istate, have_scan: bool) -> None:
 
 
 def _skipped_row(sym: str, why: str) -> dict:
-    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Built": "—", "Entry": "—", "Stop": "—", "T1": "—",
-            "T2": "—", "Qty": "—", "Max loss": "—", "Profit T1": "—", "Win odds": "—", "Why": why}
+    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Checked": "no verdict", "Built": "—", "Entry": "—",
+            "To entry %": None, "Stop": "—", "T1": "—", "T2": "—", "Qty": "—", "Max loss": "—", "Profit T1": "—",
+            "Win odds": "—", "Exp R": "—", "Expected value": "—", "Why": why}
 
 
 def _load_candidates(have_plan: bool, have_scan: bool) -> None:
@@ -605,7 +630,8 @@ def _render_skipped(sym: str, why: str) -> None:
     if st.button("Check it", key="desk_choose_checkit"):
         with st.spinner(f"Checking {sym}..."):
             try:
-                st.session_state[ck] = {"ok": session.run_check(profile, sym, Mode.SWING, limits, regime=regime_name),
+                st.session_state[ck] = {"ok": session.run_check(profile, sym, Mode.SWING, limits, regime=regime_name,
+                                                                desk_entry=True),  # the plan's own entry
                                         "at": _now_hhmm(profile)}
             except Exception as e:  # noqa: BLE001
                 st.session_state[ck] = {"error": f"Check failed: {shown(e) if str(e) else type(e).__name__}"}
@@ -628,6 +654,9 @@ def _render_choice(v: DeskVerdict) -> None:
 with tab_choose:
     st.caption("Every candidate from today's plan and the intraday scan, with the money at stake. The desk's "
                "TAKE / WAIT / SKIP is advice: you choose.")
+    st.caption("Your call — ranked by the desk's own odds: TAKE, then WAIT, then SKIPs blocked only by the market or "
+               "the odds, then the rest; within each, the highest Monte Carlo expectancy (Exp R) first. A SKIP "
+               "stays a SKIP. \"quick\" rows are priced on the last close: run a Full check before choosing.")
     pstate, istate = st.session_state.get(PLAN_KEY), st.session_state.get(SCAN_KEY)
     have_plan, have_scan = bool(pstate and "ok" in pstate), bool(istate and "ok" in istate)
     if st.button("Load candidates", key="desk_choose_load"):
@@ -646,9 +675,11 @@ with tab_choose:
         try:
             plan_now = pstate["ok"] if have_plan else None
             verdicts = session.merge_candidates(plan_now, istate["ok"][0] if have_scan else ())
-            skipped = tuple(plan_now.skipped) if plan_now is not None else ()
+            have = {v.plan.symbol for v in verdicts if v.plan.mode is Mode.SWING}
+            skipped = tuple((s, w) for s, w in (plan_now.skipped if plan_now is not None else ()) if s not in have)
             rows = [_candidate_row(v) for v in verdicts] + [_skipped_row(s, w) for s, w in skipped]
-            labels = ([f"{v.action.value} {v.plan.symbol} · {v.plan.mode.value}" for v in verdicts]
+            labels = ([f"{v.action.value} {v.plan.symbol} · {v.plan.mode.value}"
+                       + (" (quick check)" if is_quick(v) else "") for v in verdicts]
                       + [f"SKIP {s} · swing (not checked)" for s, _ in skipped])
         except Exception as e:  # noqa: BLE001 - never a blank tab
             st.error(f"Could not list the candidates: {type(e).__name__}: {shown(e)}")
@@ -657,7 +688,8 @@ with tab_choose:
             st.info("No candidates today — no trade is a valid answer.")
             _warn_scan_failures(istate, have_scan)
         else:
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                         column_config={"To entry %": st.column_config.NumberColumn(format="%.1f%%")})
             _warn_scan_failures(istate, have_scan)
             pick = st.selectbox("Open a trade card", labels, key="desk_choose_pick")
             i = labels.index(pick) if pick in labels else 0
