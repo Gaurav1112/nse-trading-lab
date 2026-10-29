@@ -113,6 +113,13 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 
 
 _QUOTE_MAX_AGE_MIN = 20
+RR_TOLERANCE = 1e-9  # an auto plan's T1 is exactly min_rr R away; float rounding can leave rr a hair below it
+
+
+def meets_min_rr(rr: float, min_rr: float) -> bool:
+    """True when ``rr`` meets ``min_rr`` up to float rounding (an auto 1.5R plan computes 1.4999999999999998 about
+    a third of the time); NaN never meets it."""
+    return rr >= min_rr - RR_TOLERANCE
 
 # The desk's held-out result for swing longs per (market, regime) (% per trade), measured on NSE only (the Picks
 # page's 2026 held-out run). Shown in the regime check and in the cost line of an override against it
@@ -328,7 +335,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         d = 3
         while d < 9 and f"{rr:.{d}f}" == f"{lim.min_rr:.{d}f}":
             d += 1
-    if not (rr >= lim.min_rr):
+    if not meets_min_rr(rr, lim.min_rr):
         out.append(_ck("reward_risk", B, f"Reward:risk 1:{rr:.{d}f} is below minimum 1:{lim.min_rr:.{d}f}"))
     else:
         out.append(_ck("reward_risk", P, f"Reward:risk 1:{rr:.{d}f} meets minimum 1:{lim.min_rr:.{d}f}"))

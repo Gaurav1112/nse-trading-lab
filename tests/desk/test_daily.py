@@ -23,7 +23,9 @@ def _far():
 
 def _frames():
     fr = {s: series(step=k) for s, k in TAKEABLE.items()}
-    fr["D"] = series(step=1.0045)  # blocked by reward_risk
+    # blocked by liquidity (thin volume). It was "blocked by reward_risk" until F2/I4: that BLOCK was the float tie
+    # (rr 1.4999999999999971 < 1.5) of an auto 1.5R plan, not a real shortfall.
+    fr["D"] = series(step=1.0045).assign(Volume=10.0)
     fr["FAR"] = _far()
     return fr
 
@@ -62,7 +64,7 @@ def test_far_symbol_is_checked_at_the_plans_breakout_entry_with_full_money():
 
 def test_blocked_pass_one_verdict_keeps_its_numbers_in_others():
     d = next(v for v in _plan().others if v.plan.symbol == "D")
-    assert d.action is Action.SKIP and [c.name for c in d.blocks()] == ["reward_risk"]
+    assert d.action is Action.SKIP and [c.name for c in d.blocks()] == ["liquidity"]
     assert d.odds is not None and d.sizing is not None
 
 
@@ -128,7 +130,7 @@ def test_hostile_plan_logs_one_sat_out_per_regime_only_blocked_full_check(tmp_pa
     path = tmp_path / "audit.jsonl"
     dp = _plan(audit_path=path, regime="HOSTILE")
     assert dp.take == ()
-    # A, B, C, F pass every check but the regime; D is also blocked by reward_risk; FAR and D are quick (pass 1)
+    # A, B, C, F pass every check but the regime; D is also blocked by liquidity; FAR and D are quick (pass 1)
     assert _sat_outs(path) == ["A", "B", "C", "F"]
     rows = _rows(path)
     for r in (r for r in rows if r["action"] == "SAT_OUT"):

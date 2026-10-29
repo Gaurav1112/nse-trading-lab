@@ -163,3 +163,41 @@ def test_i3_cli_every_symbol_failing_is_still_plan_failed(monkeypatch, capsys, t
 def dataclasses_replace(x, **kw):
     from dataclasses import replace
     return replace(x, **kw)
+
+
+# ---------------------------------------------------------------- I4: a float tie at 1.5R is not a BLOCK
+
+def _tie_plans(n=100_000, seed=1):
+    """probe_rr_tie: auto ORB geometry on the NSE tick grid, long (T1 = OR high + 1.5R) and short (OR low - 1.5R)."""
+    from nse_backtest.desk.models import TradePlan
+    rng = np.random.default_rng(seed)
+    for _ in range(n):
+        lo = round(rng.uniform(50, 5000) / 0.05) * 0.05
+        hi = lo + round(rng.uniform(0.2, 30) / 0.05) * 0.05
+        s = (hi + lo) / 2
+        yield TradePlan("X", "NSE", Mode.INTRADAY, hi, s, hi + 1.5 * (hi - s), hi + 3 * (hi - s), 1, 10, hi, "", "")
+        yield TradePlan("X", "NSE", Mode.INTRADAY, lo, s, lo - 1.5 * (s - lo), lo - 3 * (s - lo), 1, 10, lo, "", "",
+                        side=Side.SHORT)
+
+
+def test_i4_no_false_reward_risk_blocks_over_100k_auto_plans():
+    from nse_backtest.desk.checks import meets_min_rr
+    plans = list(_tie_plans())
+    raw = sum(not (p.rr_t1 >= 1.5) for p in plans)
+    assert raw > 10_000  # the float tie the probe found (~30% of plans) is real
+    assert sum(not meets_min_rr(p.rr_t1, 1.5) for p in plans) == 0
+
+
+def test_i4_tie_passes_and_a_real_shortfall_still_blocks():
+    from dataclasses import replace
+    from nse_backtest.desk.checks import meets_min_rr, run_checks
+    from tests.desk.test_checks import SIZE, ODDS, sctx, splan
+    tie = next(p for p in _tie_plans(2000) if p.is_short and not (p.rr_t1 >= 1.5))
+    tie = replace(tie, symbol="ABC", last_bar="2026-10-29T09:45:00+05:30")
+    c = next(c for c in run_checks(tie, SIZE, ODDS, sctx(or_low=tie.entry), current_price=tie.entry)
+             if c.name == "reward_risk")
+    assert (c.status, c.reason) == (Status.PASS, "Reward:risk 1:1.50 meets minimum 1:1.50")
+    assert not meets_min_rr(1.4999, 1.5) and not meets_min_rr(float("nan"), 1.5)
+    low = replace(splan(), target_1=100.0 - 2.0 * 1.49)  # 1.49R: a real shortfall
+    c = next(c for c in run_checks(low, SIZE, ODDS, sctx(), current_price=100.0) if c.name == "reward_risk")
+    assert c.status is Status.BLOCK and c.reason == "Reward:risk 1:1.49 is below minimum 1:1.50"
