@@ -112,3 +112,84 @@ def test_withheld_reason_never_shows_the_home_directory(tmp_path, monkeypatch):
                                     audit_path=tmp_path / "a.jsonl")
     (sym, why), = failures
     assert sym == "AAA" and home not in why and "desk_audit.jsonl" in why and "withheld" in why
+
+
+# ---- H5a: the scan adds ORB shorts on HOSTILE NSE days ----
+from nse_backtest.desk.models import Side  # noqa: E402
+
+
+def _side_check(seen: list, short_action=Action.WAIT):
+    def check(df, sym, profile, mode, limits, c, **kw):
+        side = kw.get("side", Side.LONG)
+        seen.append((sym, side, c.fno))
+        p = replace(PI, symbol=sym, side=side)
+        v = decide(p, S, None, OK, NSE, 100.0, VNOW)
+        return replace(v, action=short_action if side is Side.SHORT else Action.WAIT)
+    return check
+
+
+def test_orb_scan_checks_each_requested_side(monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(intraday, "check_trade", _side_check(seen))
+    verdicts, failures = intraday.orb_scan(NSE, {"AAA": pd.DataFrame(), "BBB": pd.DataFrame()},
+                                           Limits(capital=100_000), ctx(), sides=(Side.LONG, Side.SHORT))
+    assert [(s, d) for s, d, _ in seen] == [("AAA", Side.LONG), ("AAA", Side.SHORT), ("BBB", Side.LONG),
+                                            ("BBB", Side.SHORT)]
+    assert sorted((v.plan.symbol, v.plan.side) for v in verdicts) == [
+        ("AAA", Side.LONG), ("AAA", Side.SHORT), ("BBB", Side.LONG), ("BBB", Side.SHORT)]
+    assert failures == []
+
+
+def test_orb_scan_is_long_only_by_default(monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(intraday, "check_trade", _side_check(seen))
+    intraday.orb_scan(NSE, {"AAA": pd.DataFrame()}, Limits(capital=100_000), ctx())
+    assert [d for _, d, _ in seen] == [Side.LONG]
+
+
+def test_orb_scan_short_failure_is_labelled_and_the_long_survives(monkeypatch):
+    ok = _side_check([])
+
+    def check(df, sym, *a, **kw):
+        if kw.get("side") is Side.SHORT:
+            raise ValueError("stop must be above entry")
+        return ok(df, sym, *a, **kw)
+    monkeypatch.setattr(intraday, "check_trade", check)
+    verdicts, failures = intraday.orb_scan(NSE, {"AAA": pd.DataFrame()}, Limits(capital=100_000), ctx(),
+                                           sides=(Side.LONG, Side.SHORT))
+    assert [v.plan.side for v in verdicts] == [Side.LONG]
+    assert failures == [("AAA", "short: stop must be above entry")]
+
+
+def _run(monkeypatch, tmp_path, regime, profile=NSE, fno=frozenset({"AAA"})):
+    from nse_backtest.desk import loaders, session
+    from tests.desk.test_cli_loaders import series
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
+    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    asked = []
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: asked.append(p.code) or (fno, None))
+    seen: list = []
+    monkeypatch.setattr(intraday, "check_trade", _side_check(seen))
+    warns: list = []
+    session.run_intraday(profile, Limits(capital=100_000), ["AAA"], regime=regime, on_warning=warns.append)
+    return seen, asked, warns
+
+
+def test_run_intraday_adds_shorts_only_on_hostile_nse_days(tmp_path, monkeypatch):
+    from nse_backtest.desk.markets import US
+    seen, asked, _ = _run(monkeypatch, tmp_path, "HOSTILE")
+    assert [(s, d, f) for s, d, f in seen] == [("AAA", Side.LONG, frozenset({"AAA"})),
+                                                ("AAA", Side.SHORT, frozenset({"AAA"}))]
+    assert asked == ["NSE"]
+    for regime in ("TRENDING", "MIXED", None):
+        seen, asked, _ = _run(monkeypatch, tmp_path, regime)
+        assert [d for _, d, _ in seen] == [Side.LONG] and asked == []
+    seen, asked, _ = _run(monkeypatch, tmp_path, "HOSTILE", profile=US)
+    assert [d for _, d, _ in seen] == [Side.LONG] and asked == []
+
+
+def test_run_intraday_says_when_the_fno_list_is_unavailable(tmp_path, monkeypatch):
+    seen, _, warns = _run(monkeypatch, tmp_path, "HOSTILE", fno=None)
+    assert [d for _, d, _ in seen] == [Side.LONG, Side.SHORT]  # still checked: short_eligibility BLOCKs them
+    assert any("could not verify F&O eligibility" in w for w in warns)

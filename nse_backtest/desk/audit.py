@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .markets import get_profile
-from .models import Action, DeskVerdict
+from .models import Action, DeskVerdict, Side
 
 
 def data_dir() -> Path:
@@ -27,7 +27,8 @@ def data_dir() -> Path:
 
 def _row(v: DeskVerdict) -> dict:
     p, o, s = v.plan, v.odds, v.sizing
-    return {
+    side = {"side": p.side.value} if p.side is Side.SHORT else {}  # long rows are unchanged
+    return {**side,
         "created_at": v.created_at, "action": v.action.value, "symbol": p.symbol, "market": p.market,
         "mode": p.mode.value, "entry": p.entry, "stop": p.stop, "target_1": p.target_1,
         "qty": s.qty, "risk_amount": s.risk_amount,
@@ -72,6 +73,11 @@ def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime |
     move that ran before the decision is never credited to it."""
     if v.action is Action.TAKE:
         raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
+    from .verdict import data_broken, safety_blocked  # verdict imports this module's neighbours; keep it local
+    if (why := safety_blocked(v)):
+        raise ValueError(f"this short can't be taken ({'; '.join(why)}): no override")
+    if (why := data_broken(v)):
+        raise ValueError(f"the data is broken ({'; '.join(why)}): re-check, no override")
     tz = ZoneInfo(get_profile(v.plan.market).tz)
     if now is None:
         at = datetime.now(tz)
@@ -80,3 +86,14 @@ def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime |
     at = at.isoformat()
     return _append({**_row(v), "created_at": at, "verdict_created_at": v.created_at, "action": "OVERRIDE",
                     "desk_action": v.action.value, "chosen_by": "owner"}, path)
+
+
+def append_sat_out(v: DeskVerdict, path: Path | None = None) -> Path:
+    """The desk sat out a trade because of the market regime alone: the verdict's own row with action SAT_OUT (every
+    other field unchanged, so the scoreboard replays it exactly like a desk TAKE, in its own record). Raises
+    ValueError unless the only BLOCK is the regime and the desk would otherwise have taken it (swing long, full
+    check)."""
+    from .verdict import sat_out_refusal  # verdict imports this module's neighbours; keep the import local
+    if (why := sat_out_refusal(v, get_profile(v.plan.market))):
+        raise ValueError(f"not a sat-out: {why}")
+    return _append({**_row(v), "action": "SAT_OUT"}, path)

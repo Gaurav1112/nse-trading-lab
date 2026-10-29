@@ -19,9 +19,10 @@ import streamlit as st
 
 from nse_backtest.desk import audit, charts, loaders, projections, research, session
 from nse_backtest.desk import calendars as cal
-from nse_backtest.desk.models import Action, DeskVerdict, Mode
+from nse_backtest.desk.models import Action, DeskVerdict, Mode, Status
 from nse_backtest.desk.textsafe import md_escape, safe_url, shown
-from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
+from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card, ev_basis_note
+from nse_backtest.desk.verdict import REGIME_UNKNOWN, block_groups, data_broken, is_quick, safety_blocked
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -34,6 +35,9 @@ OVERRIDES_KEY = "desk_overrides_logged"  # {input_hash: qty at the first confirm
 ACCOUNT_N = (10, 20, 50)
 STALE_INTRADAY_MIN = 15  # an intraday verdict older than this cannot be acted on from the card: re-check first
 RECHECK_KEY = "card_recheck"  # (RECHECK_KEY, key, input_hash) -> {"ok": fresh verdict} | {"error": reason}
+QUICK_CHECK_MSG = ("Quick check — run a full check before choosing. This verdict is priced on the last close: no "
+                   "live price, no earnings date and no robustness run, and it is not logged. The Full check runs "
+                   "them at the same entry; a TAKE it confirms is logged as a desk pick.")
 
 
 def _msg(e: Exception) -> str:
@@ -169,16 +173,69 @@ def _header(v: DeskVerdict) -> None:
     color = ACTION_COLOR.get(v.action.value, "#888888")
     st.markdown(f"<div style='font-size:2.2rem;font-weight:800;color:{color};line-height:1.1'>"
                 f"{v.action.value} <span style='font-size:1.2rem'>{html.escape(v.plan.symbol)} · "
-                f"{v.plan.mode.value}</span></div>", unsafe_allow_html=True)
+                f"{v.plan.mode.value}</span>{short_badge(v)}</div>", unsafe_allow_html=True)
     st.markdown(f"**{html.escape(v.headline)}**")
     st.caption("The desk's verdict is advice. You make the call and type any ticket in yourself.")
 
 
-def _reasons(v: DeskVerdict, card) -> None:
+def short_badge(v: DeskVerdict) -> str:
+    """The SHORT badge (HTML) for a short verdict; "" for a long."""
+    if not v.plan.is_short:
+        return ""
+    return (" <span style='font-size:1rem;font-weight:800;color:#fff;background:#b02a37;border-radius:4px;"
+            "padding:2px 8px;vertical-align:middle'>SHORT</span>")
+
+
+def side_levels(p) -> dict:
+    """The check levels a Re-check / Full check passes for this plan's side (a long passes nothing extra)."""
+    return {"side": p.side} if p.is_short else {}
+
+
+def _check_args(v: DeskVerdict) -> dict:
+    """The run_check keyword arguments a Re-check / Full check of ``v`` passes (one source for both). Swing: the
+    plan's own entry (the breakout trigger, never silently the last close), plus the owner's stop and target when
+    they set them. Intraday: nothing — a re-check rebuilds from today's opening range (yesterday's levels are not
+    today's plan). A short also passes its side."""
+    p = v.plan
+    args: dict = {}
+    if p.mode is Mode.SWING:
+        args["entry"] = p.entry
+        if p.stop_basis == "user":
+            args.update(stop=p.stop, target=p.target_1)
+    args.update(side_levels(p))
+    return args
+
+
+def _bullets(checks) -> str:
+    return "\n".join(f"- {c.status.value} {c.name} — {c.reason}" for c in checks)
+
+
+def _reasons(v: DeskVerdict, flips=()) -> None:
+    """Why the desk did not say TAKE, by kind: the market regime and the desk's odds are advice (amber); broken
+    data and the owner's limits are real problems (red when they BLOCK, amber when they only WARN)."""
     if v.action is Action.TAKE:
         return
-    lines = list(card.reasons) or [v.headline]
-    st.error(f"The desk says {v.action.value}:\n\n" + "\n".join(f"- {r}" for r in lines))
+    g = block_groups(v)
+    market = [c for c in g["market"] if c.status is Status.BLOCK]
+    if market:
+        text = "**Market says sit out** — advice, not a fault in this trade:\n\n" + _bullets(market)
+        if flips:
+            text += "\n\nWhat would change it:\n" + "\n".join(f"- {f}" for f in flips)
+        st.warning(text)
+    advice = [c for c in g["market"] if c.status is not Status.BLOCK] + g["odds"]
+    if advice:
+        st.warning("**Advice** — the market and the desk's odds on this setup:\n\n" + _bullets(advice))
+    safety = [c for c in g["safety"] if c.status is Status.BLOCK]
+    if safety:
+        st.error("\n\n".join(f"This short can't be taken: {c.reason}" for c in safety))
+    problems = [c for c in g["data"] + g["limits"] if c.status is Status.BLOCK]
+    if problems:
+        st.error(f"**Real problems** — the desk says {v.action.value}:\n\n" + _bullets(problems))
+    cautions = [c for c in g["data"] + g["safety"] + g["limits"] if c.status is not Status.BLOCK]
+    if cautions:
+        st.warning("**Check before entering:**\n\n" + _bullets(cautions))
+    if not (market or advice or safety or problems or cautions):
+        st.error(f"The desk says {v.action.value}:\n\n- {v.headline}")
 
 
 def _levels(card, profile) -> None:
@@ -210,6 +267,8 @@ def _money(card, profile) -> None:
         st.caption(f"Profit at T1 and T2 {card.fill_note}.")
     if card.fill_note and card.expected_value is not None:
         st.caption(f"Expected value {card.fill_note}.")
+    if card.expected_value is not None and (basis := ev_basis_note(card.verdict)):
+        st.caption(f"Expected value {basis}.")
     st.caption(f"{card.qty} shares{' (your quantity)' if card.qty_is_override else ''} · notional "
                f"{m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital) · at risk "
                f"{card.pct_capital_at_risk:.1f}% of capital · costs {m(card.cost)}. {card.gap_note}")
@@ -252,17 +311,17 @@ def recheck_prompt(v: DeskVerdict, profile, limits, key: str, wkey: str, reason:
     _recheck(v, profile, limits, key, wkey, reason)
 
 
-def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) -> None:
+def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str, *, broken: bool = False) -> None:
     """The stale-verdict prompt: no ticket and no override box, only a Re-check that runs the full desk check for
-    this symbol and mode and replaces the card's verdict."""
-    st.warning(reason)
+    this symbol and mode with _check_args and replaces the card's verdict. ``broken`` (the data is broken) shows it
+    in red."""
+    (st.error if broken else st.warning)(reason)
     rk = (RECHECK_KEY, key, v.input_hash)
     if st.button("Re-check", key=f"{wkey}_recheck"):
         p = v.plan
-        levels = (dict(entry=p.entry, stop=p.stop, target=p.target_1) if p.stop_basis == "user" else {})
         with st.spinner(f"Re-checking {p.symbol}..."):
             try:
-                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **_check_args(v))}
             except Exception as e:  # noqa: BLE001 - shown under the prompt
                 st.session_state[rk] = {"error": _msg(e)}
         if "ok" in st.session_state[rk]:
@@ -272,11 +331,46 @@ def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) 
         st.error(f"Re-check failed: {hit['error']}")
 
 
+def _full_check(v: DeskVerdict, profile, limits, key: str, wkey: str) -> None:
+    """The quick-verdict gate: no ticket and no override box, only a Full check that runs the full desk check with
+    _check_args (the plan's own entry, and the owner's stop/target when they set them) and replaces the card's
+    verdict."""
+    st.warning(QUICK_CHECK_MSG)
+    rk = (RECHECK_KEY, key, v.input_hash)
+    if st.button("Full check", key=f"{wkey}_fullcheck"):
+        p = v.plan
+        with st.spinner(f"Running the full check for {p.symbol}..."):
+            try:
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **_check_args(v))}
+            except Exception as e:  # noqa: BLE001 - shown under the prompt
+                st.session_state[rk] = {"error": _msg(e)}
+        if "ok" in st.session_state[rk]:
+            st.rerun()
+    hit = st.session_state.get(rk)
+    if hit is not None and "error" in hit:
+        st.error(f"Full check failed: {hit['error']}")
+
+
 def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = "", now: datetime | None = None
             ) -> None:
+    if is_quick(v):
+        _full_check(v, profile, limits, key, wkey)
+        return
     reason = stale_reason(v, profile, now or market_now(profile))
     if reason is not None:
         _recheck(v, profile, limits, key, wkey, reason)
+        return
+    broken = data_broken(v)
+    if broken == (REGIME_UNKNOWN,):  # the index data failed: not market advice, nothing to override
+        _recheck(v, profile, limits, key, wkey, f"{REGIME_UNKNOWN} — re-check", broken=True)
+        return
+    if broken:  # broken inputs are not an opinion to override: no ticket, no override box, only a Re-check
+        _recheck(v, profile, limits, key, wkey,
+                 f"Data is broken ({'; '.join(broken)}) — re-check before choosing", broken=True)
+        return
+    unsafe = safety_blocked(v)
+    if unsafe:  # the exchange's rules, not the desk's opinion: no ticket, no override box
+        st.error("\n\n".join(f"This short can't be taken: {r}" for r in unsafe))
         return
     if v.action is Action.TAKE:
         if card.ticket:
@@ -418,10 +512,12 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
 
 # ---------------------------------------------------------------- entry point
 
-def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header: bool = True) -> None:
+def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header: bool = True,
+                flips: tuple[str, ...] = ()) -> None:
     """One trade card. ``key`` namespaces the widgets; they are also keyed by the verdict's input hash so a new
     verdict starts from the desk's own quantity and an unticked override box. A Re-check of a stale intraday
-    verdict replaces it here (session state), until the page builds a new verdict for the row."""
+    verdict replaces it here (session state), until the page builds a new verdict for the row. ``flips`` are the
+    regime's flip conditions, shown under a "Market says sit out" banner."""
     v = current_verdict(v, key)  # follow re-checks: each replaces the verdict it was made from
     wkey = f"{key}_{v.input_hash[:12]}"
     now = market_now(profile)
@@ -438,7 +534,7 @@ def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header
     except Exception as e:  # noqa: BLE001 - invalid geometry or quantity: no money, no ticket
         st.error(f"Trade card unavailable: {_msg(e)}")
         return
-    _section("Reasons", _reasons, v, card)
+    _section("Reasons", _reasons, v, tuple(flips or ()))
     st.markdown("**Levels**")
     _section("Levels", _levels, card, profile)
     st.markdown("**Money**")

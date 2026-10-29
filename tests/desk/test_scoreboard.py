@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 13  # F1 r9b (13): start at the quote; F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 14  # H5c (14): shorts mirrored, candidates carry the side; F1 r9b (13): start at the quote; F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -876,7 +876,7 @@ def test_score_stats_record_is_the_last_field_defaulting_to_desk():
     from dataclasses import fields
     from nse_backtest.desk.scoreboard import ScoreStats
     f = fields(ScoreStats)
-    assert f[-1].name == "record" and f[-1].default == "desk"
+    assert f[-2].name == "record" and f[-2].default == "desk"  # H5c: side follows it (test_scoreboard_short)
     assert summarize(_outs([1.0]))[0].record == "desk"
 
 
@@ -1480,3 +1480,54 @@ def test_r9b_swing_fill_day_starts_at_the_quote():
                       bars15=_fill_day({"14:30": (99.9, 100.2, 99.8, 100.0), "14:45": (100.0, 100.2, 99.9, 100.1)}))
     assert o.fill_at is None or not o.fill_at.startswith("2026-10-26 14:30")  # nothing before the quote counts
     assert o.candidate.created_at == datetime(2026, 10, 26, 14, 20, tzinfo=IST)
+
+
+# ---------------------------------------------------------------- H6: the desk sat out (market regime)
+
+def test_h6_sat_out_rows_are_their_own_record_with_their_own_key():
+    from nse_backtest.desk.scoreboard import RECORD_LABELS, RECORD_OF_ACTION
+    assert RECORD_OF_ACTION["SAT_OUT"] == "sat_out"
+    assert list(RECORD_LABELS.items())[-1] == ("sat_out", "Desk sat out (market regime)")
+    assert list(RECORD_LABELS)[:2] == ["desk", "override"]  # the existing records keep their order
+    rows = [_row("TAKE", "t"), _row("SAT_OUT", "t", blocks=["regime"])]  # same ticket, same instant
+    cands, rejects = load_candidates(rows)
+    assert rejects == []
+    by = {c.record: c for c in cands}
+    assert set(by) == {"desk", "sat_out"}
+    assert by["desk"].key == "t|2026-10-27T10:00:00+05:30"  # unchanged
+    assert by["sat_out"].key == by["desk"].key + "|sat_out"  # one cache slot each
+    same = lambda c: replace(c, record="desk", key="")  # noqa: E731
+    assert same(by["sat_out"]) == same(by["desk"])  # parsed field for field like the TAKE
+
+
+@pytest.mark.parametrize("bad, why", [
+    (dict(blocks=["regime", "liquidity"]), "only BLOCK"),
+    (dict(blocks=[]), "only BLOCK"),
+    (dict(), "only BLOCK"),
+    (dict(blocks="regime"), "only BLOCK"),
+    (dict(mode="intraday", created="2026-10-27T10:07:00+05:30", blocks=["regime"]), "swing"),
+    (dict(side="short", blocks=["regime"]), "long"),
+])
+def test_h6_malformed_sat_out_rows_are_rejected(bad, why):
+    created = bad.pop("created", "2026-10-27T10:00:00+05:30")
+    cands, rejects = load_candidates([_row("SAT_OUT", "s", created=created, **bad)])
+    assert cands == [] and len(rejects) == 1 and why in rejects[0][1]
+
+
+def test_h6_sat_out_dedupe_is_per_record_and_session():
+    rows = [_row("SAT_OUT", "a", blocks=["regime"]),
+            _row("SAT_OUT", "b", created="2026-10-27T11:00:00+05:30", blocks=["regime"]),
+            _row("TAKE", "c", created="2026-10-27T11:00:00+05:30")]
+    cands, _ = load_candidates(rows)
+    assert sorted((c.record, c.created_at.hour) for c in cands) == [("desk", 11), ("sat_out", 10)]
+
+
+def test_h6_summarize_never_pools_sat_out_and_lists_it_last():
+    desk = _outs([1.0] * 3)
+    sat = [replace(o, candidate=replace(o.candidate, record="sat_out", key=o.candidate.key + "|sat_out"))
+           for o in _outs([-1.0] * 2)]
+    over = [replace(o, candidate=replace(o.candidate, record="override", key=o.candidate.key + "|o"))
+            for o in _outs([0.5])]
+    stats = summarize(sat + over + desk)
+    assert [(s.record, s.n) for s in stats] == [("desk", 3), ("override", 1), ("sat_out", 2)]
+    assert stats[2].mean_r == pytest.approx(-1.0) and stats[0].mean_r == pytest.approx(1.0)

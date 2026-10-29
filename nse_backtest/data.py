@@ -19,7 +19,7 @@ import re
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -255,6 +255,96 @@ def _write_cache(df: pd.DataFrame, cache_file: str, symbol: str) -> None:
         log.warning("Cache write failed for %s: %s", symbol, e)
 
 
+# ---------------------------------------------------------------- lagging start/end top-up
+# Yahoo can serve a start/end daily request a session behind a period= request for the same ticker
+# (observed 2026-10-30: RELIANCE.NS start/end ended 10-28, period='5d' had 10-29). When the caller
+# knows the market's latest completed session and the download ends before it, ONE period='5d'
+# request fills in the missing later bars. Existing bars are never replaced; on any failure the
+# original frame is kept, so the desk's freshness check still BLOCKs (fail-closed).
+
+def _lags(df: pd.DataFrame, latest_completed: Optional[date]) -> bool:
+    return (latest_completed is not None and len(df) > 0
+            and pd.Timestamp(df.index[-1]).date() < latest_completed)
+
+
+def _append_newer(df: pd.DataFrame, extra: pd.DataFrame) -> pd.DataFrame:
+    """``df`` plus the rows of ``extra`` dated after df's last bar; existing rows are never replaced."""
+    last = pd.Timestamp(df.index[-1]).normalize()
+    newer = extra[pd.DatetimeIndex(extra.index).normalize() > last]
+    newer = newer[~newer.index.duplicated(keep="first")]
+    if newer.empty:
+        return df
+    newer = newer.reindex(columns=df.columns)
+    for c in df.columns:  # keep df's dtypes (e.g. int64 Volume) when the values allow it
+        try:
+            newer[c] = newer[c].astype(df[c].dtype)
+        except (TypeError, ValueError):
+            pass
+    out = pd.concat([df, newer])
+    out = out[~out.index.duplicated(keep="first")].sort_index()
+    out.index.name = df.index.name
+    out.index.freq = None
+    log.info("Topped up %d later bar(s) through %s", len(newer), pd.Timestamp(out.index[-1]).date())
+    return out
+
+
+def _period_download(tickers, label: str, adjusted: bool, batch: bool) -> Optional[pd.DataFrame]:
+    """The single top-up request (no retries: one call). None when it fails or returns nothing."""
+    kw = dict(period="5d", interval="1d", auto_adjust=adjusted, progress=False, threads=False)
+    try:
+        if batch:
+            raw = _yf_retry(lambda: yf.download(tickers=tickers, group_by="ticker", **kw), label, retries=1)
+        else:
+            raw = _yf_retry(lambda: yf.download(tickers, **kw), label, retries=1)
+    except Exception as e:  # noqa: BLE001 - keep the original frame; freshness decides
+        log.warning("Top-up of %s failed: %s — keeping the start/end bars", label, e)
+        return None
+    if raw is None or raw.empty:
+        log.warning("Top-up of %s returned nothing — keeping the start/end bars", label)
+        return None
+    return raw
+
+
+def _top_up_clean(raw: pd.DataFrame, df: pd.DataFrame, ticker: str,
+                  latest_completed: date) -> pd.DataFrame:
+    try:
+        lo = pd.Timestamp(df.index[-1]).date().isoformat()
+        extra = _clean_download(raw, ticker, lo, (latest_completed + timedelta(days=1)).isoformat())
+    except Exception as e:  # noqa: BLE001
+        log.warning("Top-up of %s unusable: %s — keeping the start/end bars", ticker, e)
+        return df
+    out = _append_newer(df, extra)
+    if _lags(out, latest_completed):
+        log.warning("%s still ends %s after the top-up (latest completed session %s)",
+                    ticker, pd.Timestamp(out.index[-1]).date(), latest_completed)
+    return out
+
+
+def _top_up_one(df: pd.DataFrame, ticker: str, adjusted: bool, latest_completed: date) -> pd.DataFrame:
+    raw = _period_download(ticker, ticker, adjusted, batch=False)
+    return df if raw is None else _top_up_clean(raw, df, ticker, latest_completed)
+
+
+def _top_up_many(frames: dict, ticker_of: dict, adjusted: bool, latest_completed: date) -> dict:
+    """Top up every lagging frame in ``frames`` (symbol -> frame) with ONE batched period request."""
+    lagging = [s for s, df in frames.items() if _lags(df, latest_completed)]
+    if not lagging:
+        return frames
+    tickers = [ticker_of[s] for s in lagging]
+    label = f"{len(tickers)} tickers" if len(tickers) > 1 else tickers[0]
+    raw = _period_download(tickers, label, adjusted, batch=True)
+    if raw is None:
+        return frames
+    out = dict(frames)
+    for sym in lagging:
+        sub = _ticker_frame(raw, ticker_of[sym], len(tickers))
+        if sub is None or sub.empty:
+            log.warning("Top-up has no bars for %s — keeping the start/end bars", ticker_of[sym])
+            continue
+        out[sym] = _top_up_clean(sub, frames[sym], ticker_of[sym], latest_completed)
+    return out
+
+
 def fetch_nse(
     symbol: str,
     start: str = "2015-01-01",
@@ -262,11 +352,14 @@ def fetch_nse(
     exchange: str = "NS",
     use_cache: bool = True,
     adjusted: bool = True,
+    latest_completed: Optional[date] = None,
 ) -> pd.DataFrame:
     """Fetch historical OHLCV for an Indian stock.  Symbols are validated.
 
     ``adjusted=False`` asks yfinance for unadjusted bars (``auto_adjust=False``: no dividend adjustment;
-    yfinance still applies split adjustment) and caches them under their own key."""
+    yfinance still applies split adjustment) and caches them under their own key.
+    ``latest_completed``: the market's most recent completed session. When a download ends before it,
+    one ``period='5d'`` request appends the missing later bars (never replacing a bar) before caching."""
     symbol = _validate_symbol(symbol)
     exchange = _validate_exchange(exchange)
 
@@ -283,6 +376,8 @@ def fetch_nse(
     ticker = f"{symbol}.{exchange}" if exchange else symbol
     log.info("Fetching %s from %s to %s", ticker, start, end)
     df = _clean_download(_yf_download(ticker, start, end, adjusted=adjusted), ticker, start, end)
+    if _lags(df, latest_completed):
+        df = _top_up_one(df, ticker, adjusted, latest_completed)
 
     if use_cache:
         _write_cache(df, cache_file, symbol)
@@ -325,6 +420,7 @@ def fetch_many_daily(
     use_cache: bool = True,
     refetch_if=None,
     adjusted: bool = True,
+    latest_completed: Optional[date] = None,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     """Daily OHLCV for many symbols with ONE yfinance call for the uncached ones.
 
@@ -335,6 +431,8 @@ def fetch_many_daily(
     anyway (served neither from nor, in the fallback, re-read from the cache). If the batch call
     fails (exception or entirely empty) the uncached symbols are fetched one by one with
     ``fetch_nse`` instead, so the result is never worse than the per-symbol path.
+    ``latest_completed``: as for ``fetch_nse``; every downloaded frame that ends before it is topped up
+    by ONE batched ``period='5d'`` request before caching (per-symbol retries top up on their own).
     """
     frames: dict[str, pd.DataFrame] = {}
     errors: dict[str, str] = {}
@@ -401,6 +499,7 @@ def fetch_many_daily(
             # yfinance stores a ticker whose request failed as an empty frame (all-NaN after padding), so a
             # partly failed batch is not empty and _yf_retry never retried it: retry such tickers one by one
             retry = []
+            downloaded: dict[str, pd.DataFrame] = {}
             for sym in pending:
                 ticker = ticker_of[sym]
                 raw_df = _ticker_frame(data, ticker, len(tickers))
@@ -416,6 +515,9 @@ def fetch_many_daily(
                 except Exception as e:  # noqa: BLE001 - real bars that clean to nothing: same as fetch_nse
                     bad[sym] = f"{sym}: {e}"
                     continue
+                downloaded[sym] = df
+            downloaded = _top_up_many(downloaded, ticker_of, adjusted, latest_completed)
+            for sym, df in downloaded.items():
                 if use_cache:
                     _write_cache(df, _cache_path(sym, exchange, start, end, adjusted), sym)
                 got[sym] = df
@@ -425,7 +527,7 @@ def fetch_many_daily(
         for sym in retry:
             try:
                 got[sym] = fetch_nse(sym, start, end, exchange, use_cache=use_cache and sym not in forced,
-                                     adjusted=adjusted)
+                                     adjusted=adjusted, latest_completed=latest_completed)
             except Exception as e2:  # noqa: BLE001
                 where = "the batch download failed" if batch_failed else (
                     f"no bars for {ticker_of[sym]} in the batch download")

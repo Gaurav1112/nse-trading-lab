@@ -3,8 +3,9 @@
 Adapted from github.com/Jakeschincariol/day-trader-skill (MIT).
 
 R is the worst-fill risk per share: entry - stop for swing (a LIMIT buy never fills above entry), and
-entry_limit - stop for intraday (a buy stop-limit can fill anywhere up to its limit). The cost is the round trip
-from that worst entry to an exit at the stop. ``loss_at_stop`` is the one figure the headline, the audit row and the
+entry_limit - stop for intraday (a buy stop-limit can fill anywhere up to its limit), and stop - entry_limit for an
+intraday short (a sell stop-limit can fill anywhere down to its limit). The cost is the round trip from that worst
+entry to an exit at the stop (costs.side_cost: a short sells at the entry and buys back at the stop). ``loss_at_stop`` is the one figure the headline, the audit row and the
 trade card all show.
 
 The risk quantity is found by binary search over [0, floor(budget / R)] for the largest q with
@@ -16,18 +17,31 @@ from __future__ import annotations
 import math
 
 from . import fills
-from .costs import DEFAULT_SPREAD, round_trip_cost
+from .costs import DEFAULT_SPREAD, side_cost
 from .markets import MarketProfile
-from .models import Limits, Mode, Sizing, TradePlan
+from .models import Limits, Mode, Side, Sizing, TradePlan
 
 _ORDER = ("max loss per trade", "position cap", "cash after buffer")
 
 
 def worst_entry(plan: TradePlan, profile: MarketProfile) -> float:
-    """The worst price the entry order can fill at: the stop-limit's limit for intraday, the entry for swing."""
+    """The worst price the entry order can fill at: the stop-limit's limit for intraday (above the trigger for a
+    long, below it for a short), the entry for swing."""
     if plan.mode is Mode.INTRADAY:
+        if plan.side is Side.SHORT:
+            return fills.short_limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
         return fills.limit_or_default(plan.entry_limit, plan.entry, plan.stop, profile.tick)
     return plan.entry
+
+
+def _risk(plan: TradePlan, entry: float) -> float:
+    """Per-share loss from a fill at ``entry`` to the stop (before costs)."""
+    return plan.stop - entry if plan.side is Side.SHORT else entry - plan.stop
+
+
+def worst_risk(plan: TradePlan, profile: MarketProfile) -> float:
+    """The worst-fill risk per share: worst_entry - stop for a long, stop - worst_entry for a short."""
+    return _risk(plan, worst_entry(plan, profile))
 
 
 def loss_at_stop(plan: TradePlan, profile: MarketProfile, qty: int, *, entry: float | None = None,
@@ -35,7 +49,7 @@ def loss_at_stop(plan: TradePlan, profile: MarketProfile, qty: int, *, entry: fl
     """Money lost by qty shares filled at ``entry`` (default: the worst fill) and stopped out, incl. the round-trip
     cost with the exit at the stop. A gap through the stop can lose more."""
     e = worst_entry(plan, profile) if entry is None else entry
-    return qty * (e - plan.stop) + round_trip_cost(profile, plan.mode, e, plan.stop, qty, spread_per_side)
+    return qty * _risk(plan, e) + side_cost(profile, plan.mode, e, plan.stop, qty, spread_per_side, side=plan.side)
 
 
 def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
@@ -48,15 +62,16 @@ def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
         raise ValueError("stop must be positive")
     R = plan.risk_per_share
     if not R > 0:
-        raise ValueError("risk per share must be positive (stop below entry)")
+        raise ValueError("risk per share must be positive (stop above entry)" if plan.side is Side.SHORT
+                         else "risk per share must be positive (stop below entry)")
     if plan.entry <= 0:
         raise ValueError("entry must be positive")
 
     worst = worst_entry(plan, profile)
-    R = worst - plan.stop  # worst-fill risk per share (intraday: up to the stop-limit's limit)
+    R = worst_risk(plan, profile)  # worst-fill risk per share (intraday: out to the stop-limit's limit)
 
     def cost(q: int) -> float:
-        return round_trip_cost(profile, plan.mode, worst, plan.stop, q, spread_per_side)
+        return side_cost(profile, plan.mode, worst, plan.stop, q, spread_per_side, side=plan.side)
 
     budget = limits.capital * limits.risk_per_trade_pct / 100
     if halve:

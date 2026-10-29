@@ -331,8 +331,8 @@ def test_market_filter_and_stats_never_combine(paths):
 
 # ---------------------------------------------------------------- CLI
 
-DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed exactly "
-              "— not your real P&L.")
+DISCLAIMER = ("Paper record of the desk's TAKEs, your overrides and the TAKEs it sat out because of the market "
+              "regime, as if each ticket were followed exactly — not your real P&L.")
 
 
 def _cli_env(tmp_path, monkeypatch, rows):
@@ -788,7 +788,8 @@ def test_r1_save_has_no_chmod_after_replace(tmp_path, monkeypatch):
 
 # ---- surfaces: coverage sentence, warnings and rejects on the page
 COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
-            "your overrides are scored as a separate record.")
+            "your overrides are scored as a separate record, and so are the plan's TAKEs the desk sat out "
+            "only because of the market regime (what sitting out saved or cost).")
 
 
 def test_r1_cli_disclaimer_line_2_and_note(tmp_path, monkeypatch, capsys):
@@ -939,7 +940,7 @@ def test_c2_page_shows_the_two_records_under_separate_subheaders(monkeypatch, tm
     at.button(key="desk_load_scoreboard").click().run()
     assert not at.exception
     tab = at.tabs[5]
-    assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides"]
+    assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides", "Desk sat out (market regime)"]
     kids = [(type(e).__name__, e.value if type(e).__name__ in ("Subheader", "Info", "Error") else None)
             for e in tab.children.values()]
     d = kids.index(("Subheader", "Desk picks"))
@@ -1123,3 +1124,98 @@ def test_swing_logged_before_open_with_quote_after_open_loads_fill_day_bars(tmp_
     o = r.outcomes[0]
     assert calls, "fill-day 15-minute bars were never loaded"
     assert o.status is not Status.UNAVAILABLE, o.note
+
+
+# ---------------------------------------------------------------- H6: the desk sat out (market regime)
+
+def _sat_row(created, **kw):
+    return row(created, action="SAT_OUT", blocks=["regime"], **kw)
+
+
+@pytest.mark.parametrize("bars", [WIN_BARS,
+                                  {"2026-10-16": (101, 101.5, 99.5, 100.5), "2026-10-19": (100, 100.2, 97, 97.5)},
+                                  {"2026-10-16": (102, 102.5, 101.5, 102)}])
+def test_h6_a_sat_out_replays_exactly_like_the_same_desk_take(paths, bars):
+    at = PRE_OPEN_16
+    write_audit(paths[0], [row(at), _sat_row(at)])
+    res = run(paths, Loader({"ABC": frame(bars)}))
+    assert res.rejects == []
+    by = {o.candidate.record: o for o in res.outcomes}
+    assert set(by) == {"desk", "sat_out"}
+    d, s = by["desk"], by["sat_out"]
+    fields = ("status", "fill_price", "fill_at", "exit_price", "exit_at", "realised_r", "mtm_r", "bars_held", "note")
+    assert {f: getattr(s, f) for f in fields} == {f: getattr(d, f) for f in fields}
+    assert [st.record for st in res.stats] == ["desk", "sat_out"]  # never pooled
+    assert res.stats[0].n == res.stats[1].n
+
+
+def test_h6_sat_out_is_cached_in_its_own_slot_and_served_from_it(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16), _sat_row(PRE_OPEN_16)])
+    run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    cache = json.loads(paths[1].read_text())
+    assert cache["version"] == SCOREBOARD_VERSION == 14  # the entry shape is unchanged: no bump
+    keys = sorted(cache["outcomes"])
+    assert len(keys) == 2 and keys[1] == keys[0] + "|sat_out"
+    assert cache["outcomes"][keys[1]]["candidate"]["record"] == "sat_out"
+    res = run(paths, Loader(exc=RuntimeError("must not load")))
+    assert sorted((o.candidate.record, o.status) for o in res.outcomes) == [("desk", Status.WON),
+                                                                         ("sat_out", Status.WON)]
+
+
+def test_h6_a_take_alone_scores_as_before(paths):
+    """The desk record is untouched by H6: a log without SAT_OUT rows gives the same outcomes and stats."""
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    alone = run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    paths[1].unlink()
+    write_audit(paths[0], [row(PRE_OPEN_16), _sat_row(PRE_OPEN_16, symbol="XYZ")])
+    both = run(paths, Loader({"ABC": frame(WIN_BARS), "XYZ": frame(WIN_BARS)}))
+    desk = [o for o in both.outcomes if o.candidate.record == "desk"]
+    assert desk == alone.outcomes
+    assert [st for st in both.stats if st.record == "desk"] == alone.stats
+
+
+def test_h6_malformed_sat_out_is_reported(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16, action="SAT_OUT", blocks=["regime", "liquidity"])])
+    res = run(paths)
+    assert res.outcomes == [] and len(res.rejects) == 1 and "malformed SAT_OUT" in res.rejects[0][1]
+
+
+def _three_records_result():
+    from nse_backtest.desk.scoreboard import Candidate, Outcome, summarize
+    res = _two_records_result()
+    c = Candidate(datetime(2026, 10, 20, 10, 0, tzinfo=IST), "NSE", "SAT", Mode.SWING, 100.0, 98.0, 103.0,
+                  15, 0.0, 10, 0.3, None, "hs|x|sat_out", record="sat_out")
+    outs = res.outcomes + [Outcome(c, Status.LOST, 100.0, "2026-10-21", 98.0, "2026-10-22", -1.0, None, 1, "")]
+    return session.ScoreboardResult(outs, summarize(outs), res.rejects, res.cache_note, None)
+
+
+def test_h6_cli_prints_a_third_section_with_its_own_verdict_line():
+    from nse_backtest.desk.cli import format_scoreboard
+    lines = format_scoreboard(_three_records_result(), "NSE")
+    d, o, s = (lines.index(x) for x in ("Desk picks", "Your overrides", "Desk sat out (market regime)"))
+    assert d < o < s
+    assert lines[s + 1].startswith("NSE swing: ")  # its own verdict line, first
+    assert lines[s + 2].startswith("  trades 1 ")  # one trade: never pooled with the desk's 3 or the override
+    trades = [x for x in lines if x.startswith("  2026-10-20 ")]
+    assert len(trades) == 1 and " sat_out " in trades[0]
+
+
+def test_h6_cli_empty_sat_out_section_says_so():
+    from nse_backtest.desk.cli import format_scoreboard
+    lines = format_scoreboard(_two_records_result(), "NSE")
+    s = lines.index("Desk sat out (market regime)")
+    assert lines[s + 1] == "  No sat-out trades logged yet (the desk logs one when only the market regime blocks a TAKE)."
+
+
+def test_h6_page_shows_the_sat_out_record_under_its_own_subheader(monkeypatch, tmp_path):
+    monkeypatch.setattr(session, "run_scoreboard", lambda market=None, **k: _three_records_result())
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    tab = at.tabs[5]
+    assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides", "Desk sat out (market regime)"]
+    kids = list(tab.children.values())
+    s = next(i for i, e in enumerate(kids) if e.type == "subheader" and e.value.startswith("Desk sat out"))
+    assert kids[s + 1].type in ("info", "error", "success", "warning")  # its own verdict banner first
+    df = next(d.value for d in at.dataframe if "Record" in d.value.columns)
+    assert list(df[df["Symbol"] == "SAT"]["Record"]) == ["Desk sat out (market regime)"]

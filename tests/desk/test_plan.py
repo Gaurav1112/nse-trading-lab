@@ -173,3 +173,104 @@ def test_intraday_plan_carries_stop_limit_price_swing_does_not():
     assert build_plan(df, "X", Mode.INTRADAY, NSE).entry_limit == pytest.approx(102.40)
     assert build_plan(df, "X", Mode.INTRADAY, US).entry_limit == pytest.approx(102.38)
     assert build_plan(flat(), "X", Mode.SWING, NSE).entry_limit is None
+
+
+def sessions15(n_days=25, seed=19, last_day_bars=4, end="2026-10-29"):
+    """Deterministic 15-minute bars: n_days sessions of 25 bars (09:15-15:15), the last one cut to last_day_bars.
+    The opening bar of every session trades 3x the volume of the others."""
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range(end=end, periods=n_days)
+    rows, idx, px = [], [], 100.0
+    for k, d in enumerate(days):
+        for b in range(last_day_bars if k == n_days - 1 else 25):
+            o = px
+            c = o * (1 + rng.normal(0, 0.003))
+            h = max(o, c) * (1 + rng.uniform(0, 0.002))
+            lo = min(o, c) * (1 - rng.uniform(0, 0.002))
+            idx.append(d + pd.Timedelta(hours=9, minutes=15 + 15 * b))
+            rows.append((o, h, lo, c, 1e5 * (3 if b == 0 else 1)))
+            px = c
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=pd.DatetimeIndex(idx))
+
+
+# ---- H5a: ORB breakdown short plan ----
+from nse_backtest.desk.models import Side, TradePlan  # noqa: E402
+
+
+def _or_df():
+    idx = pd.date_range("2026-10-28 09:15", periods=6, freq="15min")
+    return pd.DataFrame({"Open": [100, 101, 102, 102, 103, 103], "High": [102, 103, 103, 104, 104, 104],
+                         "Low": [99, 100, 101, 101, 102, 102], "Close": [101, 102, 102, 103, 103, 104],
+                         "Volume": 1e5}, index=idx)
+
+
+def test_short_plan_mirrors_the_opening_range():
+    p = build_plan(_or_df(), "X", Mode.INTRADAY, NSE, side=Side.SHORT)
+    # OR high 102, low 99: entry 99 (OR low), stop 100.5 (OR mid), R = 1.5
+    assert p.side is Side.SHORT and p.entry == 99 and p.stop == pytest.approx(100.5)
+    assert p.stop_basis == "opening-range mid"
+    assert p.risk_per_share == pytest.approx(1.5)
+    assert p.target_1 == pytest.approx(96.75) and p.target_2 == pytest.approx(94.5)  # entry - 1.5R, entry - 3R
+    assert p.rr_t1 == pytest.approx(1.5)
+    assert p.entry_limit == pytest.approx(98.60)  # 99 - min(0.375, 0.495) = 98.625, DOWN to the tick
+    assert p.max_hold_bars == 18  # last bar 10:30 -> square off by 15:10 = 18 whole bars
+
+
+def test_long_plan_is_unchanged_and_long_by_default():
+    p = build_plan(_or_df(), "X", Mode.INTRADAY, NSE)
+    assert p.side is Side.LONG and p.entry == 102 and p.entry_limit == pytest.approx(102.40)  # 102.375 UP
+    assert p.max_hold_bars == 19
+
+
+def test_short_plan_user_levels_and_bad_geometry():
+    p = build_plan(_or_df(), "X", Mode.INTRADAY, NSE, side=Side.SHORT, entry=99.0, stop=100.0, target=97.0)
+    assert (p.entry, p.stop, p.target_1, p.stop_basis) == (99.0, 100.0, 97.0, "user")
+    assert p.target_2 == pytest.approx(96.0)  # min(T1, entry - 3R)
+    with pytest.raises(ValueError, match="stop must be above entry"):
+        build_plan(_or_df(), "X", Mode.INTRADAY, NSE, side=Side.SHORT, entry=99.0, stop=98.0)
+    with pytest.raises(ValueError, match="target must be below entry"):
+        build_plan(_or_df(), "X", Mode.INTRADAY, NSE, side=Side.SHORT, entry=99.0, stop=100.0, target=99.5)
+
+
+def test_short_is_intraday_only():
+    with pytest.raises(ValueError, match="intraday only"):
+        build_plan(flat(), "X", Mode.SWING, NSE, side=Side.SHORT)
+
+
+def test_short_trade_plan_geometry_properties():
+    p = TradePlan("X", "NSE", Mode.INTRADAY, 100.0, 102.0, 97.0, 94.0, 1.0, 10, 100.0, "x", "user",
+                  side=Side.SHORT)
+    assert p.risk_per_share == 2.0 and p.rr_t1 == 1.5
+    q = TradePlan("X", "NSE", Mode.INTRADAY, 100.0, 98.0, 103.0, 106.0, 1.0, 10, 100.0, "x", "user")
+    assert q.side is Side.LONG and q.risk_per_share == 2.0 and q.rr_t1 == 1.5
+
+
+def test_or_relative_volume():
+    from nse_backtest.desk.plan import or_relative_volume
+    df = sessions15(n_days=25)
+    assert or_relative_volume(df) == pytest.approx(1.0)  # every opening bar trades 3e5
+    first_today = df.index[df.index.normalize() == df.index[-1].normalize()][0]
+    df.loc[first_today, "Volume"] = 6e5
+    assert or_relative_volume(df) == pytest.approx(2.0)
+    assert or_relative_volume(sessions15(n_days=20)) is None  # 19 earlier sessions: not a 20-session median
+    assert or_relative_volume(sessions15(n_days=21)) == pytest.approx(1.0)
+    assert or_relative_volume(df.drop(columns=["Volume"])) is None
+    zero = sessions15(n_days=25)
+    zero["Volume"] = 0.0
+    assert or_relative_volume(zero) is None
+
+
+
+def test_or_volume_nan_opening_bar_is_missing_not_the_second_bar():
+    from nse_backtest.desk.plan import or_relative_volume, or_volume
+    df = sessions15(n_days=25)
+    first_today = df.index[df.index.normalize() == df.index[-1].normalize()][0]
+    df.loc[first_today, "Volume"] = float("nan")
+    assert or_relative_volume(df) is None
+    assert or_volume(df) == (None, "opening volume unavailable")
+    assert or_volume(sessions15(n_days=25)) == (pytest.approx(1.0), "")
+    assert or_volume(sessions15(n_days=20)) == (None, "need 20 earlier sessions")
+    old = sessions15(n_days=21)  # 20 earlier sessions, one of them without an opening volume
+    first_old = old.index[old.index.normalize() == old.index[0].normalize()][0]
+    old.loc[first_old, "Volume"] = float("nan")  # an earlier session's missing opening volume is not the 2nd bar
+    assert or_volume(old) == (None, "need 20 earlier sessions")

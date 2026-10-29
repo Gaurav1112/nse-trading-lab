@@ -4,7 +4,7 @@ from __future__ import annotations
 from nse_backtest.picker_replay import _delivery_costs_pct
 
 from .markets import MarketProfile
-from .models import Mode
+from .models import Mode, Side
 
 DEFAULT_SPREAD = 0.00075  # assumed bid-ask spread per side when the frame cannot estimate one
 
@@ -28,3 +28,12 @@ def round_trip_cost(profile: MarketProfile, mode: Mode, entry: float, exit_price
     sec = 0.0000278 * sell
     taf = min(0.000166 * qty, 8.30)
     return sec + taf + (buy + sell) * spread_per_side
+
+
+def side_cost(profile: MarketProfile, mode: Mode, entry: float, exit_price: float, qty: int,
+              spread_per_side: float = DEFAULT_SPREAD, *, side: Side = Side.LONG) -> float:
+    """round_trip_cost for a trade entered at ``entry`` and closed at ``exit_price``. A short sells at the entry and
+    buys back at the exit, so the buy leg (stamp duty) is the exit and the sell leg (STT) is the entry."""
+    if Side(side) is Side.SHORT:
+        return round_trip_cost(profile, mode, exit_price, entry, qty, spread_per_side)
+    return round_trip_cost(profile, mode, entry, exit_price, qty, spread_per_side)

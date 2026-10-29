@@ -189,7 +189,7 @@ def test_d2_card_errors_never_show_the_home_dir_or_markdown(monkeypatch, tmp_pat
     from nse_backtest.desk import audit, loaders
     from nse_backtest.desk.models import Action, Check, Status
     home = str(Path.home())
-    v = replace(_base(monkeypatch, tmp_path), action=Action.SKIP, checks=(Check("gap", Status.BLOCK, "wide"),))
+    v = replace(_base(monkeypatch, tmp_path), action=Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "thin"),))
     at, _ = _card_page(monkeypatch, tmp_path, v)
 
     def bad_override(*a, **k):

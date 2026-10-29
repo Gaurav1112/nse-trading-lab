@@ -1,8 +1,10 @@
-"""The 17 PASS/WARN/BLOCK safety checks. Missing data is never a PASS."""
+"""The 17 PASS/WARN/BLOCK safety checks (a short swaps the long-only odds checks for its own: 19 checks). Missing
+data is never a PASS."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -10,8 +12,10 @@ import numpy as np
 
 from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.markets import MarketProfile
-from nse_backtest.desk.models import Check, Limits, Mode, Odds, Sizing, Status, TradePlan
+from nse_backtest.desk.models import (SHORT_EDGE_MIN_COVERAGE, Check, Limits, Mode, Odds, ShortEdge, Side, Sizing,
+                                     Status, TradePlan, coverage_ok, regime_name)
 from nse_backtest.desk.nse_lists import BanList
+from nse_backtest.desk.plan import SHORT_RR_T1
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,20 @@ class CheckContext:
     journal_readable: bool = True
     quote_as_of: datetime | None = None  # tz-aware time of the live quote
     price_is_live: bool = False  # True only when the current price came from a live quote
+    # Shorts only (longs never read these): NSE's F&O underlyings (None = could not verify -> short_fno
+    # BLOCKs) and the opening bar's volume over its 20-session median (None = not measured -> relative_volume WARNs).
+    fno: frozenset[str] | None = None
+    fno_as_of: date | None = None  # the date the F&O list is from (not today = a cached copy; None = unknown -> WARN)
+    or_rel_volume: float | None = None
+    or_rel_volume_why: str = ""  # why or_rel_volume is None (shown in the WARN)
+    # The pooled ORB-short edge for today (shortcheck; None = unavailable -> short_edge WARNs and caps at WAIT), why it
+    # is unavailable, and the market regime of each past day (the short odds replay HOSTILE days only).
+    short_edge: ShortEdge | None = None
+    short_edge_why: str = ""
+    regime_by_day: Mapping[date, str] | None = field(default=None, compare=False)
+    # Shorts only: the last session's opening-bar low, the entry the pooled history replays (None = unknown -> the
+    # short is off the pooled rule). Set by service.check_trade from the bars; never hashed.
+    or_low: float | None = None
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -98,6 +116,24 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 
 
 _QUOTE_MAX_AGE_MIN = 20
+RR_TOLERANCE = 1e-9  # an auto plan's T1 is exactly min_rr R away; float rounding can leave rr a hair below it
+
+
+def meets_min_rr(rr: float, min_rr: float) -> bool:
+    """True when ``rr`` meets ``min_rr`` up to float rounding (an auto 1.5R plan computes 1.4999999999999998 about
+    a third of the time); NaN never meets it."""
+    return rr >= min_rr - RR_TOLERANCE
+
+# The desk's held-out result for swing longs per (market, regime) (% per trade), measured on NSE only (the Picks
+# page's 2026 held-out run). Shown in the regime check and in the cost line of an override against it
+# (verdict.regime_override_note). A (market, regime) without an entry has no figure and says none.
+REGIME_HELD_OUT_PCT = {("NSE", "HOSTILE"): -1.61}
+REGIME_HELD_OUT_PERIOD = "held-out 2026"
+
+
+def signed_pct(x: float) -> str:
+    """A percentage with a true minus sign (−1.61), as the desk prints it."""
+    return f"{x:.2f}".replace("-", "−")
 
 
 def _days(n: int) -> str:
@@ -146,6 +182,122 @@ def _entry_window(prof: MarketProfile, now: datetime) -> Check:
     return _ck("entry_window", P if known else W, f"{now:%H:%M} is inside the entry window {window}{sfx}")
 
 
+SHORT_EDGE_UNAVAILABLE = "edge check unavailable"
+SHORT_EDGE_UNPROVEN = SHORT_EDGE_UNAVAILABLE  # the cap's reason when no pooled figure exists (verdict.short_edge_cap)
+SHORT_REL_VOLUME_MIN = 1.5
+
+
+def short_edge_check(ctx: CheckContext, plan: TradePlan | None = None) -> Check:
+    """The ORB-short edge gate: PASS only when today's pooled ORB-short history (shortcheck.pooled_short_edge: the
+    eligible universe, HOSTILE days only, 2x slippage) has at least 200 trades and a positive expectancy. Otherwise a
+    WARN, and verdict.short_edge_cap holds the short at WAIT. ``proven`` is re-derived from the numbers, never
+    trusted. No figure for today (not computed, unreadable cache) = "edge check unavailable"."""
+    e = ctx.short_edge
+    if not isinstance(e, ShortEdge):
+        why = ctx.short_edge_why.strip() if isinstance(ctx.short_edge_why, str) else ""
+        return _ck("short_edge", Status.WARN, f"{SHORT_EDGE_UNAVAILABLE} ({why})" if why else SHORT_EDGE_UNAVAILABLE)
+    n, exp = _num(e.n), _num(e.expectancy_r)
+    if n is None or n < 0:
+        return _ck("short_edge", Status.WARN, f"{SHORT_EDGE_UNAVAILABLE} (trade count unreadable)")
+    shown = "no expectancy yet" if exp is None else f"{exp:+.2f}R"
+    if not ShortEdge.from_trades(int(n), exp).proven:
+        return _ck("short_edge", Status.WARN,
+                   f"edge not proven on the desk's own history yet ({n:.0f} trades, {shown})")
+    if e.eligible is not None and not coverage_ok(e.pooled, e.eligible):
+        return _ck("short_edge", Status.WARN,
+                   f"edge not proven: pooled {e.pooled} of {e.eligible} symbols (needs "
+                   f"{SHORT_EDGE_MIN_COVERAGE:.0%}) ({n:.0f} trades, {shown})")
+    proven = f"edge proven on the desk's own history ({n:.0f} trades, {shown} at 2× slippage, HOSTILE days)"
+    off_rule = _off_pooled_rule(plan, ctx)
+    if off_rule:  # the pooled replay proves the desk's own geometry only, not a user's stop or target
+        return _ck("short_edge", Status.WARN, f"{proven}; {off_rule}")
+    return _ck("short_edge", Status.PASS, proven)
+
+
+def _off_pooled_rule(plan: TradePlan | None, ctx: CheckContext | None = None) -> str:
+    """Why ``plan`` is not the geometry the pooled replay proves (entry at the OR low, OR-mid stop, T1 at 1.5R), or
+    "". The entry must be the opening-range low (``ctx.or_low``) within half a tick; an unknown OR low is off."""
+    if plan is None:
+        return ""
+    orl = _num(ctx.or_low) if ctx is not None else None
+    if orl is None:
+        return "opening-range low unknown: entry basis not verified"
+    if abs(plan.entry - orl) > ctx.profile.tick / 2 + 1e-9:
+        return "entry differs from the opening-range low the pooled history tested"
+    if plan.stop_basis == "user":
+        return "pooled figure uses the opening-range-mid stop"
+    try:
+        rr = plan.rr_t1
+    except ZeroDivisionError:
+        rr = float("nan")
+    if not abs(rr - SHORT_RR_T1) < 1e-6:
+        return f"pooled figure uses the {SHORT_RR_T1:g}R rule"
+    return ""
+
+
+def _short_monte_carlo(odds: Odds | None) -> Check:
+    """The mirror of a long's monte_carlo check: this stock's own simulated short expectancy (the mirrored Monte
+    Carlo) must be positive as well as the pooled edge proven. "odds" group: advice, overridable."""
+    B = Status.BLOCK
+    if odds is None:
+        return _ck("short_monte_carlo", B, "Short odds could not be computed — no trade without odds")
+    mc = _num(odds.mc_expectancy_r)
+    if mc is None:
+        return _ck("short_monte_carlo", B, "Simulated short expectancy is not a number — no trade without odds")
+    if mc < 0:
+        return _ck("short_monte_carlo", B, f"Simulated short expectancy {mc:+.2f}R is negative")
+    if mc == 0:
+        return _ck("short_monte_carlo", B, f"Simulated short expectancy {mc:+.2f}R is not positive")
+    if mc < 0.1:
+        return _ck("short_monte_carlo", Status.WARN, f"Simulated short expectancy {mc:+.2f}R is thin (under +0.10R)")
+    return _ck("short_monte_carlo", Status.PASS, f"Simulated short expectancy {mc:+.2f}R is positive (above +0.10R)")
+
+
+def _short_regime(prof: MarketProfile, regime: str) -> Check:
+    """NSE and HOSTILE: market advice (overridable as the owner's call)."""
+    if prof.code != "NSE":
+        return _ck("short_regime", Status.BLOCK, "Shorts are NSE only")
+    if regime != "HOSTILE":
+        return _ck("short_regime", Status.BLOCK, f"ORB shorts are for HOSTILE days only (regime {regime or 'unknown'})")
+    return _ck("short_regime", Status.PASS, "HOSTILE NSE day: ORB shorts allowed")
+
+
+FNO_LIST_MAX_AGE_DAYS = 7  # nse_lists.FNO_LOTS_MAX_AGE: an older cached F&O list is not trusted
+
+
+def _short_fno(prof: MarketProfile, sym: str, fno: frozenset[str] | None, as_of: date | None = None,
+               today: date | None = None) -> Check:
+    """F&O membership (circuit-lock / auction risk outside it): a safety BLOCK, never overridable. A list from an
+    earlier day (the live fetch failed) WARNs with its date; one older than 7 days BLOCKs; an undated list WARNs."""
+    B = Status.BLOCK
+    if prof.code != "NSE":
+        return _ck("short_fno", B, "Shorts are NSE only (no F&O list)")
+    if fno is None:
+        return _ck("short_fno", B, "could not verify F&O eligibility")
+    if as_of is not None and today is not None and (today - as_of).days > FNO_LIST_MAX_AGE_DAYS:
+        return _ck("short_fno", B, f"could not verify F&O eligibility: the F&O list from {as_of} is older than "
+                                   f"{FNO_LIST_MAX_AGE_DAYS} days")
+    if sym not in fno:
+        return _ck("short_fno", B, f"{sym} is not an F&O stock: intraday shorts are F&O stocks only")
+    if as_of is None:
+        return _ck("short_fno", Status.WARN, "F&O list date unknown — verify on NSE")
+    if today is not None and as_of != today:
+        return _ck("short_fno", Status.WARN, f"F&O list from {as_of} (live fetch failed)")
+    return _ck("short_fno", Status.PASS, f"{sym} is an F&O stock")
+
+
+def _relative_volume(ratio, why: str = "") -> Check:
+    r = _num(ratio)
+    if r is None:
+        return _ck("relative_volume", Status.WARN,
+                   f"Relative volume of the opening bar could not be measured ({why or 'need 20 earlier sessions'})")
+    if r < SHORT_REL_VOLUME_MIN - 1e-12:
+        return _ck("relative_volume", Status.WARN,
+                   f"Opening bar volume is only {r:.2f}× its 20-session median (want at least {SHORT_REL_VOLUME_MIN}×)")
+    return _ck("relative_volume", Status.PASS,
+               f"Opening bar volume is {r:.2f}× its 20-session median (at least {SHORT_REL_VOLUME_MIN}×)")
+
+
 def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext,
                current_price: float | None = None) -> list[Check]:
     """`current_price` is the price the verdict uses (live quote, else the plan's last close)."""
@@ -158,21 +310,29 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     if not naive:
         now = now.astimezone(ZoneInfo(prof.tz))
     swing = mode is Mode.SWING
+    short = p.side is Side.SHORT
     out: list[Check] = []
     P, W, B = Status.PASS, Status.WARN, Status.BLOCK
 
     # 1 regime
-    r = (ctx.regime or "").strip().upper() if isinstance(ctx.regime, (str, type(None))) else ""
+    r = regime_name(ctx.regime) or ""
     unknown = "Regime unknown: could not classify the market, "
     if swing:
         if r == "HOSTILE":
-            out.append(_ck("regime", B, "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)"))
+            pct = REGIME_HELD_OUT_PCT.get((prof.code, "HOSTILE"))
+            held = "" if pct is None else f" ({REGIME_HELD_OUT_PERIOD}: {signed_pct(pct)}%/trade)"
+            out.append(_ck("regime", B, f"Market regime HOSTILE: swing longs historically lose here{held}"))
         elif r == "MIXED":
             out.append(_ck("regime", W, "Market regime MIXED: swing edge is weaker, take smaller or wait"))
         elif r == "TRENDING":
             out.append(_ck("regime", P, "Market regime TRENDING: swing longs have historically worked here"))
         else:
             out.append(_ck("regime", B, "Regime unknown — treated as HOSTILE (swing longs blocked)"))
+    elif short:  # eligibility (short_eligibility) BLOCKs a short on any other day
+        if r == "HOSTILE":
+            out.append(_ck("regime", P, "Market regime HOSTILE: the day ORB breakdown shorts are built for"))
+        else:
+            out.append(_ck("regime", W, f"Market regime {r or 'unknown'}: ORB shorts are for HOSTILE days only"))
     else:
         if r == "HOSTILE":
             out.append(_ck("regime", W, "Market regime HOSTILE: intraday longs face a falling market, be selective"))
@@ -193,7 +353,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         d = 3
         while d < 9 and f"{rr:.{d}f}" == f"{lim.min_rr:.{d}f}":
             d += 1
-    if not (rr >= lim.min_rr):
+    if not meets_min_rr(rr, lim.min_rr):
         out.append(_ck("reward_risk", B, f"Reward:risk 1:{rr:.{d}f} is below minimum 1:{lim.min_rr:.{d}f}"))
     else:
         out.append(_ck("reward_risk", P, f"Reward:risk 1:{rr:.{d}f} meets minimum 1:{lim.min_rr:.{d}f}"))
@@ -243,19 +403,35 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     for suffix in (".NS", "-EQ"):
         if sym.endswith(suffix):
             sym = sym[: -len(suffix)]
-    if not prof.has_ban_list:
+    if short and prof.has_ban_list:  # owner decision: a short in an F&O-ban stock is BLOCKed, and so is not knowing
+        if ctx.ban is None or ctx.ban.status not in ("ok", "cached", "stale"):
+            out.append(_ck("ban_list", B, "Could not verify the F&O ban list — no intraday shorts without it"))
+        elif sym in ctx.ban.symbols:
+            out.append(_ck("ban_list", B, f"{sym} is in the F&O ban — no intraday shorts"))
+        elif ctx.ban.status == "stale":
+            when = "last fetch date unknown" if ctx.ban.as_of is None else f"last fetched {ctx.ban.as_of}"
+            out.append(_ck("ban_list", B, f"F&O ban list is stale ({when}) — no intraday shorts without today's list"))
+        else:
+            out.append(_ck("ban_list", P, f"{sym} is not in the F&O ban list"))
+    elif not prof.has_ban_list:
         out.append(_ck("ban_list", P, f"No ban list for {prof.code}"))
     elif ctx.ban is None or ctx.ban.status not in ("ok", "cached", "stale"):
         out.append(_ck("ban_list", W, "Could not verify F&O ban list: check NSE before trading"))
-    elif sym in ctx.ban.symbols:
-        out.append(_ck("ban_list", B, f"{sym} is in the NSE F&O ban list: no fresh positions allowed"))
+    elif sym in ctx.ban.symbols:  # the ban restricts F&O only: a cash long (CNC or MIS) is allowed
+        cash = "cash delivery" if swing else "cash intraday"
+        out.append(_ck("ban_list", W, f"{sym} is in the F&O ban — derivatives only; {cash} allowed"))
     elif ctx.ban.status == "stale":
         out.append(_ck("ban_list", W, f"F&O ban list is stale ({'last fetch date unknown' if ctx.ban.as_of is None else 'last fetched ' + str(ctx.ban.as_of)}): {sym} not on it but verify on NSE"))
     else:
         out.append(_ck("ban_list", P, f"{sym} is not in the F&O ban list"))
 
-    # 7 monte_carlo
-    if odds is None:
+    # 7 monte_carlo (a short: the pooled short-edge gate AND its own mirrored Monte Carlo). A short's per-stock
+    # setup_history and robustness are deliberately NOT gated: ~60 days of 15-minute bars give a handful of HOSTILE
+    # days per stock, too few to judge; the pooled gate stands in for them (they are still shown on the card).
+    if short:
+        out.append(short_edge_check(ctx, p))
+        out.append(_short_monte_carlo(odds))
+    elif odds is None:
         out.append(_ck("monte_carlo", B, "Odds could not be computed — no trade without odds"))
     elif (mc := _num(odds.mc_expectancy_r)) is None:
         out.append(_ck("monte_carlo", B, "Monte Carlo expectancy is not a number — no trade without odds"))
@@ -293,7 +469,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("live_price", W, f"Price is the last close of {when} — confirm the live price before entering"))
     elif cp is None or cp <= 0:
         out.append(_ck("live_price", B, "Live price is not a valid number"))
-    elif cp <= p.stop:
+    elif short and cp >= p.stop:
+        out.append(_ck("live_price", B, f"Price {prof.money(cp)} is already at or above the stop {prof.money(p.stop)}"))
+    elif not short and cp <= p.stop:
         out.append(_ck("live_price", B, f"Price {prof.money(cp)} is already at or below the stop {prof.money(p.stop)}"))
     elif not isinstance(ctx.quote_as_of, datetime) or ctx.quote_as_of.tzinfo is None or naive:
         out.append(_ck("live_price", W, "Live price time unknown — confirm the live price before entering"))
@@ -361,8 +539,10 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         else:
             out.append(_ck("earnings", P, f"Next earnings on {ne} are not today"))
 
-    # 13 setup_history
-    if odds is None and not swing:
+    # 13 setup_history (long-only; a short's history is the short_edge gate)
+    if short:
+        pass
+    elif odds is None and not swing:
         out.append(_ck("setup_history", B, "Research only: setup history could not be computed for this stock"))
     elif odds is None:
         out.append(_ck("setup_history", W, "Setup history unavailable: no past trades of this setup to check"))
@@ -399,10 +579,12 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("gap", P, f"Today's gap of {g:+.1f}% is within 2%"))
 
-    # 16 robustness
+    # 16 robustness (long-only, as setup_history)
     raw_nf = odds.noise_negative_frac if odds is not None else None
     nf = _num(raw_nf)
-    if raw_nf is None:
+    if short:
+        pass
+    elif raw_nf is None:
         out.append(_ck("robustness", W, "Robustness not run — edge not stress-tested"))
     elif nf is None:
         out.append(_ck("robustness", W, "Noise robustness result is not a number: fragility unknown"))
@@ -422,5 +604,11 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("pdt", W, "Day-trade count not tracked — confirm with your broker"))
     else:
         out.append(_ck("pdt", P, "Pattern day trader guard does not apply or is within limits"))
+
+    # 18-20 shorts only: is it a short day, may this stock be shorted, and has the breakdown volume behind it
+    if short:
+        out.append(_short_regime(prof, r))
+        out.append(_short_fno(prof, sym, ctx.fno, ctx.fno_as_of, now.date()))
+        out.append(_relative_volume(ctx.or_rel_volume, ctx.or_rel_volume_why))
 
     return out

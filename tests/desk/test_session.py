@@ -163,3 +163,57 @@ def test_r1b_regime_stale_uncovered_year_names_missing_calendar():
     now = datetime(2027, 1, 7, 10, 0, tzinfo=ZoneInfo(NSE.tz))
     assert session._regime_stale(_regime_ending("2027-01-01"), NSE, now=now) == \
         "Regime index data is stale (last bar 2027-01-01) (holiday calendar not available for 2027)"
+
+
+# ---------------------------------------------------------------- H2: your-call ranking, the desk's own entry
+
+def _rank_v(sym, action, e, blocks=()):
+    from tests.desk.test_choose import v
+    from nse_backtest.desk.models import Action, Check, Status
+    from dataclasses import replace
+    checks = tuple(Check(b, Status.BLOCK, b) for b in blocks) or (Check("regime", Status.PASS, ""),)
+    return replace(v(sym, Action(action), e=e, checks=checks), regime="HOSTILE")  # known (F2/M10)
+
+
+def test_h2_candidate_rank_take_wait_advice_skip_then_other_skip_by_expectancy():
+    vs = [_rank_v("FRESH", "SKIP", 0.9, ["freshness"]),
+          _rank_v("RMC", "SKIP", -0.3, ["regime", "monte_carlo"]),
+          _rank_v("NOODDS", "SKIP", None, ["regime"]),
+          _rank_v("REG", "SKIP", 0.2, ["regime"]),
+          _rank_v("W1", "WAIT", 0.1), _rank_v("W2", "WAIT", 0.4),
+          _rank_v("T1", "TAKE", 0.05), _rank_v("HIST", "SKIP", 0.1, ["setup_history", "robustness"]),
+          _rank_v("LIM", "SKIP", None, ["size"])]
+    order = [x.plan.symbol for x in sorted(vs, key=session.candidate_rank)]
+    assert order == ["T1", "W2", "W1", "REG", "HIST", "RMC", "NOODDS", "FRESH", "LIM"]
+
+
+def test_h2_merge_candidates_includes_others_ranked_and_deduped():
+    from nse_backtest.desk.daily import DailyPlan
+    take = _rank_v("T1", "TAKE", 0.3)
+    others = (_rank_v("T4", "TAKE", 0.1), _rank_v("S1", "SKIP", 0.2, ["regime"]), _rank_v("T1", "SKIP", 0.0))
+    plan = DailyPlan("NSE", None, "", (), (take,), (), (), (), others)
+    out = [(x.plan.symbol, x.action.value) for x in session.merge_candidates(plan, ())]
+    assert out == [("T1", "TAKE"), ("T4", "TAKE"), ("S1", "SKIP")]
+    assert [x.plan.symbol for x in session.merge_candidates(plan, (), include_others=False)] == ["T1"]
+
+
+def test_h2_run_check_desk_entry_uses_the_plans_breakout_entry(offline_desk, monkeypatch):
+    df = series()
+    df.iloc[-1, df.columns.get_loc("Close")] = float(df.High.tail(20).max()) / 1.2  # far below the 20-day high
+    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: df)
+    want = float(df.High.tail(20).max()) * 1.001
+    v = session.run_check(NSE, "ABC", Mode.SWING, Limits(capital=100_000), desk_entry=True)
+    assert abs(v.plan.entry - want) < 1e-6
+    v0 = session.run_check(NSE, "ABC", Mode.SWING, Limits(capital=100_000))  # the CLI default: the last close
+    assert abs(v0.plan.entry - float(df.Close.iloc[-1])) < 1e-6
+    v1 = session.run_check(NSE, "ABC", Mode.SWING, Limits(capital=100_000), entry=150.0, desk_entry=True)
+    assert v1.plan.entry == 150.0  # an entry the owner typed always wins
+
+
+def test_h2_plan_entry_matches_the_plans_own_geometry():
+    from nse_backtest.desk.daily import plan_entry
+    at = series()
+    assert plan_entry(at) is None  # at the 20-day high: the plan buys at the close
+    far = series()
+    far.iloc[-1, far.columns.get_loc("Close")] = float(far.High.tail(20).max()) / 1.2
+    assert abs(plan_entry(far) - float(far.High.tail(20).max()) * 1.001) < 1e-9

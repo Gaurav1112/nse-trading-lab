@@ -1,5 +1,5 @@
-"""Scoreboard I/O: reads the audit log, keeps the resolved-outcome cache and replays every logged TAKE and
-owner override (two records, each with its own candidates, cache entries and stats).
+"""Scoreboard I/O: reads the audit log, keeps the resolved-outcome cache and replays every logged TAKE,
+owner override and regime sat-out (three records, each with its own candidates, cache entries and stats).
 
 The pure rules live in `scoreboard`; this module only feeds them bars and remembers final results.
 Safety rules: every candidate comes back (UNAVAILABLE, never dropped); only final statuses (won, lost, time,
@@ -32,10 +32,11 @@ from .scoreboard import (
 
 Warn = Callable[[str], None] | None
 
-SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs and your overrides, as if each ticket were followed "
-                         "exactly — not your real P&L.")
+SCOREBOARD_DISCLAIMER = ("Paper record of the desk's TAKEs, your overrides and the TAKEs it sat out because of the "
+                         "market regime, as if each ticket were followed exactly — not your real P&L.")
 SCOREBOARD_COVERAGE = ("Covers TAKEs from Check a Trade, Today's Plan and the Intraday-tab scan; "
-                       "your overrides are scored as a separate record.")
+                       "your overrides are scored as a separate record, and so are the plan's TAKEs the desk sat out "
+                       "only because of the market regime (what sitting out saved or cost).")
 AUDIT_FILE = "desk_audit.jsonl"
 CACHE_FILE = "desk_scoreboard.json"
 MAX_AUDIT_BYTES = 50 * 1024 * 1024
@@ -45,14 +46,14 @@ FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 _CANDIDATE_FIELDS = ("market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars", "cost_per_share",
                      "qty", "last_bar", "last_close", "entry_limit", "record", "current_price", "quote_live",
-                     "quote_as_of")
+                     "quote_as_of", "side")
 
 
 @dataclass(frozen=True)
 class ScoreboardResult:
     outcomes: list[Outcome]            # every candidate, in created_at order — none silently dropped
     stats: list[ScoreStats]            # summarize(outcomes)
-    rejects: list[tuple[int, str]]     # (audit line number, reason): unreadable lines, malformed TAKE/OVERRIDE rows
+    rejects: list[tuple[int, str]]     # (audit line number, reason): unreadable lines, malformed TAKE/OVERRIDE/SAT_OUT rows
     cache_note: str | None             # set when the cache was unreadable, of another version or not writable
     note: str | None = None            # set when there is no audit log at all
 
@@ -152,7 +153,7 @@ def _row_market(row: dict) -> str | None:
 
 
 def _screen(rows: list[dict], session_of) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """Rows whose TAKE/OVERRIDE parses and can be placed in a session; others come back with a reason. A single
+    """Rows whose TAKE/OVERRIDE/SAT_OUT parses and can be placed in a session; others come back with a reason. A single
     odd row (a date at the edge of the calendar, a 1e999 quantity) must become a reject, never crash the
     scoreboard. Rows of other actions are kept: load_candidates ignores them."""
     keep: list[dict] = []
@@ -177,7 +178,7 @@ def _screen(rows: list[dict], session_of) -> tuple[list[dict], list[tuple[dict, 
 
 def candidates_from(rows: list[tuple[int, dict]], market: str | None = None
                     ) -> tuple[list[Candidate], list[tuple[int, str]]]:
-    """Candidates (created_at order) and (line, reason) rejects for malformed TAKE/OVERRIDE rows. Swing rows are
+    """Candidates (created_at order) and (line, reason) rejects for malformed TAKE/OVERRIDE/SAT_OUT rows. Swing rows are
     deduped on the fill session, intraday rows on the market-local date of created_at, each within its record. A
     row whose market cannot be read is kept whatever the filter, so a malformed row is always reported."""
     if market is not None:
@@ -210,7 +211,8 @@ def _candidate_record(c: Candidate) -> dict:
             "history_expectancy_r": c.history_expectancy_r, "key": c.key, "last_bar": c.last_bar,
             "last_close": c.last_close, "entry_limit": c.entry_limit, "record": c.record,
             "current_price": c.current_price, "quote_live": c.quote_live,
-            "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of is not None else None}
+            "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of is not None else None,
+            "side": c.side.value}
 
 
 def _entry(o: Outcome) -> dict:
@@ -455,7 +457,8 @@ def _cacheable(o: Outcome, now: datetime) -> bool:
 
 def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, load_intraday,
                    on_warning: Warn = None) -> list[Outcome]:
-    """Outcomes for uncached candidates of one (market, symbol, mode); the bars are loaded at most once."""
+    """Outcomes for uncached candidates of one (market, symbol, mode), longs and shorts alike; the bars are loaded at
+    most once. A short's replay holds it only to its own square-off (scoreboard.short_hold)."""
     profile = get_profile(cs[0].market)
     symbol = cs[0].symbol
     now_l = now.astimezone(ZoneInfo(profile.tz))

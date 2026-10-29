@@ -119,3 +119,71 @@ def test_r9_audit_row_records_the_quote_time(tmp_path):
     v = replace(_verdict(Action.SKIP), quote_live=True, quote_as_of="2026-10-29T10:01:00+05:30")
     (rec,) = [json.loads(x) for x in audit.append_verdict(v, tmp_path / "a.jsonl").read_text().splitlines()]
     assert rec["quote_as_of"] == "2026-10-29T10:01:00+05:30"
+
+
+# ---------------------------------------------------------------- H6: the desk sat out (market regime)
+
+from nse_backtest.desk.models import Check, Mode, Status  # noqa: E402
+
+REGIME = Check("regime", Status.BLOCK, "regime HOSTILE")
+
+
+def _sat(checks=(REGIME,), price=100.0, plan=None, regime="HOSTILE"):
+    return replace(decide(plan or P, S, None, checks, NSE, price, VNOW), cost_per_share=0.37, regime=regime)
+
+
+def test_append_sat_out_is_the_verdict_row_with_action_sat_out(tmp_path):
+    v = _sat()
+    assert v.action is Action.SKIP
+    path = audit.append_sat_out(v, tmp_path / "a.jsonl")
+    (rec,) = [json.loads(x) for x in path.read_text().splitlines()]
+    desk = json.loads(audit.append_verdict(v, tmp_path / "d.jsonl").read_text())
+    assert rec == {**desk, "action": "SAT_OUT"}  # nothing else differs: it replays like a desk TAKE
+    assert rec["blocks"] == ["regime"]
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize("checks", [
+    (),                                                                   # not blocked at all
+    (Check("regime", Status.WARN, "mixed"),),                             # a WARN is not the regime blocking it
+    (REGIME, Check("liquidity", Status.BLOCK, "thin")),                   # another BLOCK too
+    (REGIME, Check("monte_carlo", Status.BLOCK, "negative")),             # another market/odds BLOCK too
+    (Check("freshness", Status.BLOCK, "stale"),),                         # blocked, but not by the regime
+])
+def test_append_sat_out_refuses_unless_the_only_block_is_the_regime(tmp_path, checks):
+    with pytest.raises(ValueError):
+        audit.append_sat_out(_sat(checks), tmp_path / "a.jsonl")
+    assert not (tmp_path / "a.jsonl").exists()
+
+
+def test_append_sat_out_keeps_warnings(tmp_path):
+    v = _sat((REGIME, Check("earnings", Status.WARN, "results soon")))
+    rec = json.loads(audit.append_sat_out(v, tmp_path / "a.jsonl").read_text())
+    assert rec["blocks"] == ["regime"] and rec["warns"] == ["earnings"]
+
+
+@pytest.mark.parametrize("price", [95.0, 102.0])  # below the trigger / ran past the entry: the desk would WAIT
+def test_append_sat_out_refuses_a_verdict_that_would_not_have_been_a_take(tmp_path, price):
+    with pytest.raises(ValueError, match="would not have been a TAKE"):
+        audit.append_sat_out(_sat(price=price), tmp_path / "a.jsonl")
+
+
+def test_append_sat_out_refuses_intraday_and_quick_verdicts(tmp_path):
+    with pytest.raises(ValueError, match="swing"):
+        audit.append_sat_out(_sat(plan=replace(P, mode=Mode.INTRADAY, entry_limit=100.5)), tmp_path / "a.jsonl")
+    with pytest.raises(ValueError, match="quick"):
+        audit.append_sat_out(replace(_sat(), first_pass=True), tmp_path / "a.jsonl")
+    assert not (tmp_path / "a.jsonl").exists()
+
+
+def test_append_sat_out_defaults_to_the_data_dir_audit(tmp_path, monkeypatch):
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    assert audit.append_sat_out(_sat()) == tmp_path / "desk_audit.jsonl"
+
+
+@pytest.mark.parametrize("regime", [None, "", "UNKNOWN", "sideways"])
+def test_append_sat_out_refuses_a_block_from_an_unknown_regime(tmp_path, regime):
+    """Missing regime data blocks swing fail-closed; that is not the desk choosing cash in a known regime."""
+    with pytest.raises(ValueError, match="unknown"):
+        audit.append_sat_out(_sat(regime=regime), tmp_path / "a.jsonl")
+    assert not (tmp_path / "a.jsonl").exists()

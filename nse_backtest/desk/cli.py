@@ -1,4 +1,5 @@
-"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings,scoreboard}. Places nothing."""
+"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings,scoreboard,shortcheck}. Places
+nothing."""
 from __future__ import annotations
 
 import argparse
@@ -11,13 +12,17 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
-from . import audit, loaders, session
+from . import audit, loaders, session, strength
 from . import calendars as cal
+from .checks import short_edge_check
+from .daily import plan_errors_line
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Mode, summary_fields
+from .models import Action, DeskVerdict, Mode, Side, mode_label, summary_fields
 from .positions import review_positions
-from .tradecard import DAILY_LOSS_NOTE, build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
+from .shortcheck import edge_line, skipped_line
+from .tradecard import DAILY_LOSS_NOTE, build_card, ev_basis_note
+from .verdict import data_broken, is_quick, safety_blocked
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -64,7 +69,7 @@ def _r(x) -> str:
 def format_verdict(v: DeskVerdict, profile, *, ticket: bool = True) -> list[str]:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     lines = [v.headline, ""]
-    lines.append(f"Plan ({p.mode.value}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
+    lines.append(f"Plan ({p.mode.value}{', short' if p.is_short else ''}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
                  f"T2 {m(p.target_2)}  R {m(p.risk_per_share)}/share  basis: {p.stop_basis}")
     lines.append(f"Sizing: qty {s.qty}, binding limit {s.binding_limit}, risk {m(s.risk_amount)}, "
                  f"notional {m(s.notional)}, costs {m(s.costs)}. {s.note}")
@@ -96,6 +101,8 @@ def format_money(card, profile) -> list[str]:
                 f"  Per share: loss at stop {m(loss)}, profit at T1 {m(p1)}, profit at T2 {m(p2)}"
                 f"  reward:risk {card.rr_t1:.2f}"]
     ev = "n/a (no odds)" if card.expected_value is None else m(card.expected_value)
+    if card.expected_value is not None and (basis := ev_basis_note(card.verdict)):
+        ev += f" {basis}"
     lines = [f"Money ({card.qty} shares{', your quantity' if card.qty_is_override else ''}):",
              f"  max loss {m(card.max_loss)} ({card.gap_note[0].lower() + card.gap_note[1:]})",
              f"  profit at T1 {m(card.profit_t1)}  profit at T2 {m(card.profit_t2)}"
@@ -148,11 +155,16 @@ def _log_override(v: DeskVerdict, card) -> None:
 
 
 def cmd_check(a, profile) -> int:
+    side = Side(a.side)
+    if side is Side.SHORT and profile.code != "NSE":
+        raise ValueError("shorts are NSE only")
+    if side is Side.SHORT and Mode(a.mode) is not Mode.INTRADAY:
+        raise ValueError("--side short needs --mode intraday (an ORB breakdown short is MIS, squared off the same day)")
     limits, warn = _limits(profile, a.json)
     if a.qty is not None and a.qty < 1:
         raise ValueError(f"qty must be a whole number of at least 1, got {a.qty}")
     v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
-                          target=a.target, on_warning=_stderr_warn)
+                          target=a.target, on_warning=_stderr_warn, desk_entry=bool(a.desk_entry), side=side)
     taken = v.action is Action.TAKE
     choose = bool(a.choose) and not taken
     refused = None
@@ -161,6 +173,14 @@ def cmd_check(a, profile) -> int:
         if why is not None:
             refused = f"--choose refused: an intraday override is only taken inside the entry window; it is {why}."
             choose = False
+    broken = data_broken(v) if choose else ()
+    if broken:  # broken inputs are not an opinion to override: check again once the data is fixed
+        refused = f"--choose refused: data is broken ({'; '.join(broken)}) — re-check before choosing."
+        choose = False
+    unsafe = safety_blocked(v) if choose else ()
+    if unsafe:  # the exchange's rules, not the desk's opinion: never overridden
+        refused = f"--choose refused: this short can't be taken ({'; '.join(unsafe)})."
+        choose = False
     card = build_card(v, profile, limits, qty=a.qty, override_confirmed=choose)
     logged = False
     if choose and card.ticket:
@@ -173,7 +193,7 @@ def cmd_check(a, profile) -> int:
         if refused:
             d["override_refused"] = refused
         _emit_json(d)
-        return 0
+        return 1 if refused else 0
     lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
     if not taken and card.reasons:
         lines += ["", f"The desk said {v.action.value} because:"] + [f"  {r}" for r in card.reasons]
@@ -189,8 +209,14 @@ def cmd_check(a, profile) -> int:
         lines += ["Override logged — it is scored under \"Your overrides\", apart from the desk's picks."]
     elif refused:
         lines += ["", refused]
+        _finish(lines)
+        return 1
     elif choose:
         lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
+    elif (broken_now := data_broken(v)):  # no override is offered on broken data
+        lines += ["", f"Data is broken ({'; '.join(broken_now)}) — re-check before choosing."]
+    elif (unsafe_now := safety_blocked(v)):  # nor on a short the exchange's rules forbid
+        lines += [""] + [f"This short can't be taken: {r}" for r in unsafe_now]
     else:
         now = " now" if v.action is Action.WAIT else ""
         lines += ["", f"The desk says {v.action.value}. Add --choose to take it{now} anyway "
@@ -213,20 +239,125 @@ def cmd_plan(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = universe(profile)[:PLAN_UNIVERSE_LIMIT]
     plan = session.run_daily_plan(profile, limits, syms, _stderr_warn)
+    failed = _plan_failed(plan)
+    errline = plan_errors_line(plan)  # a code bug on some symbols is red even when others got verdicts
     if a.json:
-        _emit_json(plan)
-        return 0
-    lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
+        for msg in (failed, errline):
+            if msg:
+                print(msg, file=sys.stderr)
+        print(json.dumps(_plan_json(plan), indent=2))
+        return 1 if failed else 0
+    if errline:
+        print(errline, file=sys.stderr)
+    lines = warn + ([errline, ""] if errline else [])
+    lines += [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
     lines += ["", "TAKE:"] + ([_format_row(v) for v in plan.take] or ["  none today — no trade is a valid answer"])
     lines += ["", "WATCH:"] + ([_format_row(v, why=True) for v in plan.watch] or ["  none"])
     for v in plan.take:
         lines += [""] + format_verdict(v, profile)
+    lines += [""] + _holding_up_lines(plan, profile)
+    if getattr(plan, "sat_out_note", None):
+        lines += ["", plan.sat_out_note]
     if plan.unavailable:
         lines += ["", "No data: " + ", ".join(plan.unavailable)]
-    lines += ["", f"Skipped {len(plan.skipped)} symbols."]
+    if a.all:
+        lines += [""] + _your_call(plan, profile, limits)
+    else:
+        if plan.others:
+            lines += ["", f"Also checked, not on today's lists: {len(plan.others)} "
+                          "(plan --all ranks them with the money)."]
+        lines += [""] + _skipped_summary(plan.skipped)
+    if failed:
+        lines = [failed, ""] + lines
+        print(failed, file=sys.stderr)
+        _finish(lines)
+        return 1
     return _finish(lines)
+
+
+def _holding_up_lines(plan, profile) -> list[str]:
+    """The "holding up" watchlist: never a trade (no action, no money)."""
+    lines = [f"HOLDING UP — ready for when the regime turns (not a trade; above their own 50-EMA, 60-day return vs "
+             f"the {profile.regime_index}):"]
+    held = tuple(getattr(plan, "holding_up", ()) or ())
+    note = getattr(plan, "holding_up_note", None)
+    if note:
+        lines.append(f"  {note}")
+    if held:
+        return lines + [f"  {s:<12} {rs:+.1f} pts" for s, rs in held]
+    return lines if note else lines + [f"  {strength.EMPTY}"]
+
+
+def _plan_json(plan) -> dict:
+    """The plan as JSON, with holding_up labelled as a watchlist (never a trade) and its reason beside it."""
+    d = to_jsonable(plan)
+    d.pop("holding_up_note", None)
+    d["holding_up"] = {"note": strength.NOT_A_TRADE,
+                       "stocks": [{"symbol": s, "vs_index_pts": rs} for s, rs in getattr(plan, "holding_up", ())],
+                       "unavailable": getattr(plan, "holding_up_note", None)}
+    return d
+
+
+def _plan_failed(plan) -> str | None:
+    """A loud message when no symbol got a verdict and every skip is an unexpected error (not a ValueError, the
+    desk's own "unusable data" signal): a code bug must never look like a quiet day."""
+    if plan.take or plan.watch or plan.others or not plan.skipped:
+        return None
+    if any(why.startswith("ValueError") for _, why in plan.skipped):
+        return None
+    return f"PLAN FAILED for every symbol: {plan.skipped[0][1]}"
+
+
+def _skipped_summary(skipped) -> list[str]:
+    """Skipped symbols grouped by reason, most common first: "2 × ValueError: … (A, B)"."""
+    if not skipped:
+        return ["Skipped 0 symbols."]
+    groups: dict[str, list[str]] = {}
+    for sym, why in skipped:
+        groups.setdefault(why, []).append(sym)
+    lines = [f"Skipped {len(skipped)} symbols:"]
+    for why, syms in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        lines.append(f"  {len(syms)} × {why} ({', '.join(syms)})")
+    return lines
+
+
+def _your_call_row(v: DeskVerdict, profile, limits) -> list[str]:
+    m, p = profile.money, v.plan
+    try:
+        card = build_card(v, profile, limits)
+        qty, loss = card.qty, ("n/a" if card.max_loss is None else m(card.max_loss))
+        ev = "n/a" if card.expected_value is None else m(card.expected_value)
+    except Exception as e:  # noqa: BLE001 - bad geometry: the row says why, the rest still print
+        qty, loss, ev = v.sizing.qty, f"unavailable ({type(e).__name__})", "n/a"
+    e = v.odds.mc_expectancy_r if v.odds is not None else None
+    blocks = ", ".join(c.name for c in v.blocks())
+    px = v.current_price
+    to_entry = (f"{(p.entry / px - 1) * 100:+.1f}%" if isinstance(px, (int, float)) and math.isfinite(px) and px > 0
+                else "n/a")
+    checked = "quick check" if is_quick(v) else "full check"
+    why = f" — blocked by: {blocks}" if blocks else ""
+    if basis := ev_basis_note(v):
+        checked += f"; exp and EV {basis}"
+    return [f"  {v.action.value:<4} {p.symbol:<12} {p.mode.value:<8} entry {m(p.entry)} ({to_entry} away)  "
+            f"stop {m(p.stop)}  T1 {m(p.target_1)}  qty {qty}  max loss {loss}  exp {_r(e)}  EV {ev}  "
+            f"[{checked}]{why}",
+            f"       -> check {p.symbol} --choose "
+            + ("--mode intraday" if p.mode is Mode.INTRADAY else "--desk-entry")]
+
+
+def _your_call(plan, profile, limits) -> list[str]:
+    """Every verdict the plan computed, ranked (session.candidate_rank), with the money and a check hint."""
+    lines = ["Your call — every candidate the desk checked, ranked by its own odds (TAKE, WAIT, SKIP blocked only "
+             "by the market or the odds, then the rest). A SKIP stays a SKIP: --choose logs it as your override; "
+             "a quick check has no live price, earnings or robustness run, so run the check before choosing.",
+             "A top TAKE that the full check demoted is not replaced by the next quick one: check that one yourself."]
+    for v in session.merge_candidates(plan, (), include_others=True):
+        lines += _your_call_row(v, profile, limits)
+    if plan.skipped:
+        lines += ["No verdict:"] + _skipped_summary(plan.skipped)[1:]
+    return lines
 
 
 def cmd_positions(a, profile) -> int:
@@ -252,7 +383,7 @@ def cmd_positions(a, profile) -> int:
 def cmd_intraday(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = ([s.strip().upper() for s in a.symbols.split(",") if s.strip()]
-            if a.symbols else universe(profile)[:15])
+            if a.symbols else universe(profile))
     verdicts, failures = session.run_intraday(profile, limits, syms, on_warning=_stderr_warn)
     if a.json:
         _emit_json({"verdicts": verdicts, "failures": failures})
@@ -308,8 +439,8 @@ def _projected_line(outcomes, s) -> str:
     """"Projected xR vs realised yR over n trades" for one (record, market, mode) group: the trades that had a
     projection, so both sums cover the same trades."""
     from .projections import projected_vs_real, resolved_without_r
-    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
-             (s.record, s.market, s.mode)]
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode, o.candidate.side) ==
+             (s.record, s.market, s.mode, s.side)]  # shorts are never pooled with longs
     _, _, pairs, n_without = projected_vs_real(group)
     n_no_r = resolved_without_r(group)
     no_r = f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R, left out" if n_no_r else ""
@@ -322,8 +453,16 @@ def _projected_line(outcomes, s) -> str:
     return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
 
 
+_mode_label = mode_label  # one label for the CLI and the page (models.mode_label)
+
+
+_NONE_YET = {"desk": "  No desk picks logged yet.", "override": "  No overrides logged yet.",
+             "sat_out": "  No sat-out trades logged yet (the desk logs one when only the market regime blocks a TAKE)."}
+
+
 def format_scoreboard(res, market_label: str) -> list[str]:
-    """Text scoreboard: disclaimer first; a "Desk picks" and a "Your overrides" section (never pooled), each with
+    """Text scoreboard: disclaimer first; "Desk picks", "Your overrides" and "Desk sat out (market regime)" sections
+    (never pooled), each with
     per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
     from .scoreboard import RECORD_LABELS
@@ -343,13 +482,13 @@ def format_scoreboard(res, market_label: str) -> list[str]:
         stats = [s for s in res.stats if s.record == record]
         lines += ["", label]
         if not stats:
-            lines.append(f"  No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+            lines.append(_NONE_YET.get(record, f"  No {record} trades logged yet."))
         for s in stats:
             win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
             ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
             dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
             cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
-            lines += [f"{s.market} {s.mode.value}: {s.verdict}",
+            lines += [f"{s.market} {_mode_label(s.mode, s.side)}: {s.verdict}",
                       f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
                       f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
                       f"  95% CI of mean realised {ci}  max drawdown {dd}",
@@ -358,7 +497,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
                       _projected_line(res.outcomes, s)]
     if res.outcomes:
         lines += ["", "Trades:",
-                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<9} {'status':<16} {'fill':>14} "
+                  f"  {'date':<10} {'record':<8} {'mkt':<4} {'symbol':<12} {'mode':<14} {'status':<16} {'fill':>14} "
                   f"{'exit':>14} {'real R':>8} {'MC R':>8}  note"]
         for o in res.outcomes:
             c = o.candidate
@@ -368,7 +507,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {_mode_label(c.mode, c.side):<14} "
                          f"{o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
@@ -392,6 +531,39 @@ def cmd_scoreboard(a, profile) -> int:
     return _finish(format_scoreboard(res, label))  # 0 even when the verdict is "Losing": it is information
 
 
+def cmd_shortcheck(a, profile) -> int:
+    """The pooled ORB-short history (eligible universe, HOSTILE days, 2x slippage), cached for the day."""
+    if profile.code != "NSE":
+        raise ValueError("ORB shorts are NSE only")
+    res = session.run_shortcheck(profile, refresh=bool(a.refresh), on_warning=_stderr_warn,
+                                 now=market_now(profile))
+    e = res.edge
+    if a.json:
+        _emit_json({"market": profile.code, "day": res.day, "n": e.n, "expectancy_r": e.expectancy_r,
+                    "proven": e.proven, "symbols": res.symbols, "cached": res.cached, "failures": res.failures,
+                    "skipped": e.skipped, "skip_reason": e.skip_reason, "pooled": e.pooled, "eligible": e.eligible})
+        return 0
+    from .checks import CheckContext
+    gate = short_edge_check(CheckContext(profile, loaders.default_limits(profile), market_now(profile),
+                                         short_edge=e))
+    syms = ("" if res.symbols is None else
+            f" over {res.symbols} eligible symbol{'' if res.symbols == 1 else 's'}")
+    exp = "n/a" if e.expectancy_r is None else f"{e.expectancy_r:+.2f}R"
+    lines = [f"Pooled ORB-short history {profile.code}{syms} (HOSTILE days only, 2× slippage)",
+             f"  trades {e.n}  expectancy {exp}  proven {'yes' if e.proven else 'no'}",
+             f"  {edge_line(e)}",
+             "  " + ("cached for " if res.cached else "computed now, cached for ") + res.day.isoformat()]
+    if e.proven:
+        lines.append("Shorts can be a desk TAKE today when every other check passes.")
+    else:
+        lines.append(f"Every short stays at most WAIT: {gate.reason}")
+    if skipped_line(e):
+        lines.append(f"  {skipped_line(e)}")
+    if res.failures:
+        lines += ["", "Not pooled:"] + [f"  {s}: {why}" for s, why in res.failures]
+    return _finish(lines)
+
+
 # ---------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -408,19 +580,29 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("symbol")
     common(c)
     c.add_argument("--mode", choices=["swing", "intraday"], default="swing")
-    c.add_argument("--entry", type=float)
+    c.add_argument("--side", choices=["long", "short"], default="long",
+                   help="short: an opening-range breakdown short (NSE F&O stocks, --mode intraday, HOSTILE days; at "
+                        "most WAIT until the pooled short history proves the edge)")
+    c.add_argument("--entry", type=float, help="your entry price (default: the last close)")
+    c.add_argument("--desk-entry", action="store_true",
+                   help="swing: use the daily plan's own entry (the breakout above the 20-day high; the close "
+                        "when already at it), as the dashboard does")
     c.add_argument("--stop", type=float)
     c.add_argument("--target", type=float)
     c.add_argument("--qty", type=int, help="your quantity instead of the desk's size (limit breaches are listed)")
     c.add_argument("--choose", action="store_true",
-                   help="take a WAIT/SKIP anyway: print the override ticket and log it as your override")
+                   help="take a WAIT/SKIP anyway: print the override ticket and log it as your override "
+                        "(refused, exit 1, while the data is broken or outside the intraday entry window)")
     c.set_defaults(fn=cmd_check)
     for name, fn, h in (("plan", cmd_plan, "today's plan"), ("positions", cmd_positions, "review open positions"),
                         ("intraday", cmd_intraday, "opening-range scan")):
         p = sub.add_parser(name, help=h)
         common(p)
         if name == "intraday":
-            p.add_argument("--symbols", help="comma separated; default first 15 of the universe")
+            p.add_argument("--symbols", help="comma separated; default the whole universe")
+        if name == "plan":
+            p.add_argument("--all", action="store_true",
+                           help="also rank every other candidate the desk checked, with the money and a check hint")
         p.set_defaults(fn=fn)
     s = sub.add_parser("settings", help="show or change per-market limits")
     common(s)
@@ -434,6 +616,10 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("--market", default="ALL", help="NSE, US or ALL (default ALL)")
     sb.add_argument("--json", action="store_true", help="print JSON instead of text")
     sb.set_defaults(fn=cmd_scoreboard)
+    sc = sub.add_parser("shortcheck", help="pooled ORB-short history: may shorts be a desk TAKE today?")
+    common(sc)
+    sc.add_argument("--refresh", action="store_true", help="recompute even when today's figure is cached")
+    sc.set_defaults(fn=cmd_shortcheck)
     return ap
 
 

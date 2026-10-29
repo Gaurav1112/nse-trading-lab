@@ -306,6 +306,10 @@ def test_cli_plan_passes_regime_and_earnings_lookup(offline_desk, capsys, monkey
     assert cli.main(["plan", "--market", "US"]) == 0
     assert seen and seen[0] in ("TRENDING", "MIXED", "HOSTILE")
     assert calls and callable(calls[0].get("earnings_lookup"))
+    from nse_backtest.desk.audit import data_dir
+    assert calls[0]["audit_path"] == data_dir() / "desk_audit.jsonl"  # H6: so the plan's regime sat-outs are logged
+    out = capsys.readouterr().out
+    assert "HOLDING UP — ready for when the regime turns (not a trade" in out
 
 
 def test_cli_settings_corrupt_warns_and_backs_up(tmp_path, capsys):
@@ -629,7 +633,7 @@ def test_r1_load_daily_adjusted_passthrough(monkeypatch):
     import nse_backtest.data as data
     seen = []
 
-    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
+    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True, **_k):
         seen.append(adjusted)
         return _daily_to("2026-10-28")
     monkeypatch.setattr(data, "fetch_nse", fake)
@@ -641,3 +645,30 @@ def test_r1_load_daily_adjusted_passthrough(monkeypatch):
     monkeypatch.setattr(data, "fetch_nse", lambda *a, adjusted=True, **k: seen.append(adjusted) or _daily_to("2026-10-29"))
     loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz), adjusted=False)
     assert seen == [False, False]  # the after-close uncached refetch stays unadjusted
+
+
+def test_h6_cli_plan_json_labels_holding_up_as_not_a_trade(offline_desk, capsys, monkeypatch):
+    import json as _json
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 2, raising=False)
+    assert cli.main(["plan", "--market", "US", "--json"]) in (0, 1)
+    d = _json.loads(capsys.readouterr().out)
+    hu = d["holding_up"]
+    assert hu["note"] == "ready for when the regime turns — not a trade"
+    assert isinstance(hu["stocks"], list) and "unavailable" in hu
+    assert all(set(x) == {"symbol", "vs_index_pts"} for x in hu["stocks"])
+
+
+def test_h6_cli_holding_up_lines_show_the_reason_or_the_empty_text():
+    from nse_backtest.desk.daily import DailyPlan
+    why = "index and stock data end on different days (index 2026-10-29, stocks 2026-10-28) — holding-up list unavailable"
+    lines = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up_note=why), US)
+    assert lines[0].startswith("HOLDING UP — ready for when the regime turns (not a trade")
+    assert lines[1] == f"  {why}"
+    empty = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), ()), US)
+    assert empty[1] == "  No stock is beating the index while above its 50-EMA today"
+    held = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up=(("AAA", 3.25),)), US)
+    assert held[1].split() == ["AAA", "+3.2", "pts"]
+    both = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up=(("AAA", 3.25),),
+                                           holding_up_note="1 stock(s) left out: their data ends on a different day"),
+                                 US)
+    assert both[1:] == ["  1 stock(s) left out: their data ends on a different day", "  AAA          +3.2 pts"]

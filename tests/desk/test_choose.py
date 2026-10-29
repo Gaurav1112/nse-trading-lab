@@ -175,16 +175,16 @@ def test_cli_wait_keeps_desk_conditional_ticket_and_choose_adds_override(desk, m
 
 
 def test_cli_skip_without_choose_has_no_ticket(desk, monkeypatch, capsys, tmp_path):
-    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC"]) == 0
     out = capsys.readouterr().out
     assert "BUY 10 ABC" not in out and "--choose" in out
-    assert "BLOCK gap — too wide" in out
+    assert "BLOCK liquidity — too thin" in out
     assert _audit_rows(tmp_path) == []
 
 
 def test_cli_choose_on_skip_prints_override_ticket_and_logs_once(desk, monkeypatch, capsys, tmp_path):
-    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC", "--choose", "--qty", "12"]) == 0
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE — the desk said SKIP" in out
@@ -226,7 +226,7 @@ def test_cli_check_json_carries_card_without_bulky_fields(desk, monkeypatch, cap
 def test_cli_choose_always_runs_a_fresh_check_and_stamps_the_override_now(desk, monkeypatch, capsys, tmp_path):
     """F1 B1: --choose never reuses an old verdict: each call checks again, and the row is stamped when chosen."""
     from datetime import datetime, timezone
-    calls = _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    calls = _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("liquidity", Status.BLOCK, "too thin"),)))
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert len(calls) == 2
@@ -244,7 +244,7 @@ def test_cli_choose_refuses_an_intraday_override_outside_the_window(desk, monkey
     from zoneinfo import ZoneInfo
     monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, *hhmm, tzinfo=ZoneInfo("Asia/Kolkata")))
     _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("window", Status.BLOCK, "x"),)))
-    assert cli.main(["check", "ABC", "--choose"]) == 0
+    assert cli.main(["check", "ABC", "--choose"]) == 1  # H3 fix: a refused --choose exits 1
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
     assert f"--choose refused: an intraday override is only taken inside the entry window; it is {why}" in out
@@ -254,6 +254,105 @@ def test_cli_choose_inside_the_window_still_logs(desk, monkeypatch, capsys, tmp_
     from datetime import datetime
     from zoneinfo import ZoneInfo
     monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
-    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("gap", Status.BLOCK, "x"),)))
+    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("liquidity", Status.BLOCK, "x"),)))
     assert cli.main(["check", "ABC", "--choose"]) == 0
     assert "YOUR OVERRIDE" in capsys.readouterr().out and len(_audit_rows(tmp_path)) == 1
+
+
+# ---------------------------------------------------------------- H3: advice vs blocks
+
+HOSTILE = Check("regime", Status.BLOCK,
+                "Market regime HOSTILE: swing longs historically lose here (held-out 2026: −1.61%/trade)")
+
+
+def test_h3_cli_choose_refuses_when_data_is_broken(desk, monkeypatch, capsys, tmp_path):
+    bad = v("ABC", Action.SKIP, checks=(Check("freshness", Status.BLOCK, "Data is stale: misses 2 sessions"),
+                                        Check("live_price", Status.BLOCK, "Price is at or below the stop"),
+                                        Check("liquidity", Status.BLOCK, "too thin")))
+    _fake(monkeypatch, bad)
+    assert cli.main(["check", "ABC", "--choose"]) != 0
+    out = capsys.readouterr().out
+    assert ("data is broken (Data is stale: misses 2 sessions; Price is at or below the stop) — re-check before "
+            "choosing") in out
+    assert "YOUR OVERRIDE" not in out and "Override logged" not in out and _audit_rows(tmp_path) == []
+    assert cli.main(["check", "ABC", "--choose", "--json"]) != 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["override_logged"] is False and "data is broken" in d["override_refused"]
+    assert _audit_rows(tmp_path) == []
+    assert cli.main(["check", "ABC"]) == 0  # without --choose it is just the verdict
+    out = capsys.readouterr().out
+    assert "Add --choose" not in out
+    assert ("Data is broken (Data is stale: misses 2 sessions; Price is at or below the stop) — re-check before "
+            "choosing") in out
+
+
+def test_h3_cli_regime_override_states_the_held_out_cost(desk, monkeypatch, capsys, tmp_path):
+    _fake(monkeypatch, replace(v("ABC", Action.SKIP, checks=(HOSTILE,)), regime="HOSTILE"))
+    assert cli.main(["check", "ABC", "--choose", "--qty", "12"]) == 0
+    out = capsys.readouterr().out
+    x = NSE.money(0.0161 * 12 * 100)
+    assert ("YOUR OVERRIDE — against the market regime (HOSTILE): the desk's held-out longs here averaged −1.61% "
+            f"per trade ≈ a loss of {x} on this position") in out
+    assert len(_audit_rows(tmp_path)) == 1
+
+
+def test_h3_candidate_rank_treats_exactly_the_market_and_odds_groups_as_advice():
+    from nse_backtest.desk.verdict import CHECK_GROUPS
+    for name, group in CHECK_GROUPS.items():  # a known regime (F2/M10: an unknown one makes the regime checks data)
+        rank = session.candidate_rank(replace(v("X", Action.SKIP, checks=(Check(name, Status.BLOCK, ""),)),
+                                              regime="HOSTILE"))
+        assert rank[0] == (2 if group in ("market", "odds") else 3), name
+    assert session.candidate_rank(v("X", Action.SKIP, checks=(Check("mystery", Status.BLOCK, ""),)))[0] == 3
+
+
+def test_h5a_merge_keeps_a_long_and_a_short_of_the_same_symbol():
+    from nse_backtest.desk.models import Side
+    long_ = v("I1", Action.WAIT, Mode.INTRADAY, e=0.4)
+    short = replace(v("I1", Action.WAIT, Mode.INTRADAY, e=None, h="short".ljust(64, "x")),
+                    plan=replace(long_.plan, side=Side.SHORT))
+    out = session.merge_candidates(None, [long_, short, short])
+    assert [(c.plan.symbol, c.plan.side) for c in out] == [("I1", Side.LONG), ("I1", Side.SHORT)]
+
+
+
+# ---- H5a fix round 1: CLI --choose refuses a short the exchange's rules forbid ----
+def _short_v(checks):
+    from nse_backtest.desk.models import Side
+    p = replace(PLAN, mode=Mode.INTRADAY, entry=100.0, stop=102.0, target_1=97.0, target_2=94.0, entry_limit=99.5,
+                side=Side.SHORT)
+    return DeskVerdict(Action.SKIP, "SKIP ABC SHORT — blocked", p, SIZING, None, checks, (), None, 99.8,
+                       "short".ljust(64, "y"), "2026-10-29T10:00:00+05:30")
+
+
+@pytest.mark.parametrize("check", [
+    Check("short_fno", Status.BLOCK, "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
+    Check("short_fno", Status.BLOCK, "could not verify F&O eligibility"),
+    Check("ban_list", Status.BLOCK, "ABC is in the F&O ban — no intraday shorts"),
+    Check("ban_list", Status.BLOCK, "F&O ban list is stale (last fetched 2026-10-28) — no intraday shorts without today's list"),
+])
+def test_h5a_fix_cli_choose_refuses_a_safety_blocked_short(desk, monkeypatch, capsys, tmp_path, check):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
+    _fake(monkeypatch, _short_v((check,)))
+    assert cli.main(["check", "ABC", "--choose"]) == 1
+    out = capsys.readouterr().out
+    assert f"--choose refused: this short can't be taken ({check.reason})." in out
+    assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
+    assert "Plan (intraday, short)" in out
+    assert cli.main(["check", "ABC"]) == 0
+    out = capsys.readouterr().out
+    assert f"This short can't be taken: {check.reason}" in out and "Add --choose" not in out
+
+
+def test_h5a_fix_cli_choose_allows_a_short_off_hostile_days(desk, monkeypatch, capsys, tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
+    # a KNOWN non-HOSTILE regime (F2/M10: an unknown regime is broken data, never overridable)
+    _fake(monkeypatch, replace(_short_v((Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only"),)),
+                               regime="TRENDING"))
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    out = capsys.readouterr().out
+    assert "YOUR OVERRIDE (SHORT) — the desk said SKIP" in out and len(_audit_rows(tmp_path)) == 1
+    assert "Odds: unavailable (not enough history for a reliable estimate)" in out  # H5b: no placeholder

@@ -80,7 +80,8 @@ def test_daily_plan_trending_orders_and_overflow(tmp_path):
     assert dp.regime == "TRENDING" and len(dp.take) == 2
     exps = [v.odds.mc_expectancy_r for v in dp.take]
     assert exps == sorted(exps, reverse=True)
-    assert any("(beyond top 2" in why for _, why in dp.skipped)
+    assert any(v.action is Action.TAKE for v in dp.others)  # H2: the overflow TAKE keeps its verdict
+    assert not dp.skipped
     assert len(audit.read_text().strip().splitlines()) >= 2
 
 
