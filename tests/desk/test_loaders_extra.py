@@ -668,3 +668,7 @@ def test_h6_cli_holding_up_lines_show_the_reason_or_the_empty_text():
     assert empty[1] == "  No stock is beating the index while above its 50-EMA today"
     held = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up=(("AAA", 3.25),)), US)
     assert held[1].split() == ["AAA", "+3.2", "pts"]
+    both = cli._holding_up_lines(DailyPlan("US", None, "", (), (), (), (), (), holding_up=(("AAA", 3.25),),
+                                           holding_up_note="1 stock(s) left out: their data ends on a different day"),
+                                 US)
+    assert both[1:] == ["  1 stock(s) left out: their data ends on a different day", "  AAA          +3.2 pts"]

@@ -101,6 +101,21 @@ def test_a_date_mismatch_is_a_reason_never_a_quiet_empty_list():
     assert held == [] and why == ("index and stock data end on different days (index 2026-10-29, stocks 2026-10-28)"
                                   " — holding-up list unavailable")
     assert strength.holding_up(fr, index) == []
-    one_stale = {"A": _trend(1.004), "OLD": _trend(1.006, end="2026-10-20")}
-    held, why = strength.holding_up_report(one_stale, _trend(1.001))
-    assert held == [] and "stocks 2026-10-20" in why  # fail closed: a mixed-date ranking is not comparable
+
+
+
+def test_one_lagging_stock_is_left_out_with_a_note_and_never_hides_the_list():
+    index = _trend(1.001)
+    fr = {"A": _trend(1.004), "B": _trend(1.005), "HALTED": _trend(1.006, end="2026-10-20")}
+    held, why = strength.holding_up_report(fr, index)
+    assert [s for s, _ in held] == ["B", "A"]  # HALTED would rank first, but its data ends on another day
+    assert why == "1 stock(s) left out: their data ends on a different day"
+    assert [s for s, _ in strength.holding_up(fr, index)] == ["B", "A"]
+
+
+def test_the_list_is_withheld_when_the_index_disagrees_with_most_stocks():
+    index = _trend(1.001, n=121, end="2026-10-29")
+    fr = {"A": _trend(1.004), "B": _trend(1.005), "C": _trend(1.006, n=121, end="2026-10-29")}
+    held, why = strength.holding_up_report(fr, index)
+    assert held == [] and why == ("index and stock data end on different days (index 2026-10-29, stocks 2026-10-28)"
+                                  " — holding-up list unavailable")

@@ -274,8 +274,10 @@ def _holding_up_lines(plan, profile) -> list[str]:
     held = tuple(getattr(plan, "holding_up", ()) or ())
     note = getattr(plan, "holding_up_note", None)
     if note:
-        return lines + [f"  {note}"]
-    return lines + ([f"  {s:<12} {rs:+.1f} pts" for s, rs in held] or [f"  {strength.EMPTY}"])
+        lines.append(f"  {note}")
+    if held:
+        return lines + [f"  {s:<12} {rs:+.1f} pts" for s, rs in held]
+    return lines if note else lines + [f"  {strength.EMPTY}"]
 
 
 def _plan_json(plan) -> dict:
