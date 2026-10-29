@@ -685,8 +685,7 @@ def test_c7_research_loads_on_the_button_caches_and_shows_unavailable(monkeypatc
     def actions(p, s):
         calls.append(s)
         raise ValueError("no corporate actions for ABC")
-    monkeypatch.setattr(loaders, "corporate_actions", actions)
-    monkeypatch.setattr(research, "nse_research", lambda s, **k: pytest.fail("not reached"))
+    monkeypatch.setattr(loaders, "corporate_actions", actions)  # F1 E2: earnings unknown too -> Unavailable
     at, _ = _choose_page(monkeypatch, tmp_path)
     _load(at)
     assert calls == []  # slow: never without the button
@@ -705,7 +704,7 @@ def test_c7_research_items_and_reasons_are_shown(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(loaders, "corporate_actions", lambda p, s: pd.DataFrame({"Dividends": [], "Stock Splits": []}))
 
-    def nse(sym, *, earnings=None, actions=None):
+    def nse(sym, profile, *, earnings=None, actions=None, actions_error=None):
         seen.update(sym=sym, earnings=earnings, actions=actions)
         return research.Research("NSE", "2026-10-29T05:00:00+00:00",
                                  (research.ResearchItem("Dividend 5 per share", None, "2026-08-01", "dividend"),
@@ -728,7 +727,7 @@ def test_c7_research_items_and_reasons_are_shown(monkeypatch, tmp_path):
 def test_c7_research_unavailable_result_reason_is_shown(monkeypatch, tmp_path):
     from nse_backtest.desk import loaders, research
     monkeypatch.setattr(loaders, "corporate_actions", lambda p, s: pd.DataFrame())
-    monkeypatch.setattr(research, "nse_research", lambda s, **k: research.Unavailable("invalid NSE symbol"))
+    monkeypatch.setattr(research, "nse_research", lambda s, p, **k: research.Unavailable("invalid NSE symbol"))
     at, _ = _choose_page(monkeypatch, tmp_path)
     _load(at)
     next(b for b in at.button if b.label == "Load news & earnings").click().run()

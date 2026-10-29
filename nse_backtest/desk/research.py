@@ -185,10 +185,15 @@ def _day(ts) -> str:
     return ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
 
 
-def nse_research(symbol: str, *, earnings=None, actions=None) -> Research | Unavailable:
+def nse_research(symbol: str, profile, *, earnings=None, actions=None, actions_error: str | None = None
+                 ) -> Research | Unavailable:
+    """NSE research from data the desk loaded. Amounts are formatted with ``profile.money()``. A corporate-actions
+    load failure (``actions_error``) is a note: it never hides the earnings date."""
     if not _nse_ok(symbol):
         return Unavailable("invalid NSE symbol")
     if earnings is None and actions is None:
+        if actions_error:
+            return Unavailable(f"dividends/splits unavailable: {actions_error}; earnings date unknown")
         return Unavailable("no earnings date or corporate-action data supplied")
     items: list[ResearchItem] = []
     notes: list[str] = []
@@ -197,14 +202,15 @@ def nse_research(symbol: str, *, earnings=None, actions=None) -> Research | Unav
     else:
         notes.append("earnings date unknown")
     if actions is None:
-        notes.append("dividends and splits not loaded")
+        notes.append(f"dividends/splits unavailable: {actions_error}" if actions_error
+                     else "dividends and splits not loaded")
     else:
         recent = []
         for ts, row in actions.iterrows():
             div = float(row.get("Dividends", 0) or 0)
             spl = float(row.get("Stock Splits", 0) or 0)
             if div > 0:
-                recent.append(ResearchItem(f"Dividend {div:g} per share", None, _day(ts), "dividend"))
+                recent.append(ResearchItem(f"Dividend {profile.money(div)} per share", None, _day(ts), "dividend"))
             if spl > 0:
                 recent.append(ResearchItem(f"Split {spl:g}-for-1", None, _day(ts), "split"))
         items += sorted(recent, key=lambda i: i.when or "", reverse=True)[:6]

@@ -136,3 +136,9 @@ def projected_vs_real(outcomes) -> tuple[list[float], list[float], list[tuple[fl
     projected = np.cumsum([p for p, _ in pairs]).tolist()
     realised = np.cumsum([o.realised_r for o in done]).tolist()
     return projected, realised, pairs, len(done) - len(pairs)
+
+
+def resolved_without_r(outcomes) -> int:
+    """Resolved trades (won, lost or time exit) without a realised R: projected_vs_real leaves them out, so callers
+    show this count instead of dropping them silently."""
+    return sum(1 for o in outcomes if o.status in _RESOLVED and o.realised_r is None)

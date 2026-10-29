@@ -153,9 +153,12 @@ def _research(profile, sym: str):
     try:
         if profile.code == "US":
             return research.us_research(sym)
-        acts = loaders.corporate_actions(profile, sym)
         earnings = loaders.next_earnings(profile, sym)[0]
-        return research.nse_research(sym, earnings=earnings, actions=acts)
+        try:
+            acts, acts_err = loaders.corporate_actions(profile, sym), None
+        except Exception as e:  # noqa: BLE001 - a note on the panel; the earnings date still shows
+            acts, acts_err = None, str(e) or type(e).__name__
+        return research.nse_research(sym, profile, earnings=earnings, actions=acts, actions_error=acts_err)
     except Exception as e:  # noqa: BLE001 - shown on the panel as the reason (escaped when shown)
         return research.Unavailable(str(e) or type(e).__name__)
 

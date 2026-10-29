@@ -155,7 +155,7 @@ change a verdict, a size or a check.
   start the app or the CLI: `export SEC_USER_AGENT="Your Name you@example.com"` (use your own name and email).
   Without it the SEC part is skipped and the panel says so.
 - **NSE**: the next earnings date and recent dividends and splits, from data the desk has already loaded. There
-  is no news feed for NSE.
+  is no news feed for NSE. If dividends and splits cannot be loaded the earnings date still shows, with a note.
 - A failed fetch shows "Research unavailable" with the reason, and pressing the button retries. Results are
   cached for 30 minutes.
 

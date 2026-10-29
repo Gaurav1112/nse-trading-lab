@@ -289,14 +289,17 @@ def _num_r(x) -> str:
 def _projected_line(outcomes, s) -> str:
     """"Projected xR vs realised yR over n trades" for one (record, market, mode) group: the trades that had a
     projection, so both sums cover the same trades."""
-    from .projections import projected_vs_real
+    from .projections import projected_vs_real, resolved_without_r
     group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
              (s.record, s.market, s.mode)]
     _, _, pairs, n_without = projected_vs_real(group)
+    n_no_r = resolved_without_r(group)
+    no_r = f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R, left out" if n_no_r else ""
     if not pairs:
-        return "  No projections to compare yet"
+        return "  No projections to compare yet" + (f" ({no_r})" if no_r else "")
     proj, real = sum(p for p, _ in pairs), sum(r for _, r in pairs)
-    extra = f" ({n_without} without a projection)" if n_without else ""
+    parts = [x for x in (f"{n_without} without a projection" if n_without else "", no_r) if x]
+    extra = f" ({'; '.join(parts)})" if parts else ""
     n = len(pairs)
     return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
 

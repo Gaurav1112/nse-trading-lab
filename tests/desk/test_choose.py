@@ -27,7 +27,7 @@ def v(sym, action=Action.TAKE, mode=Mode.SWING, e=0.3, checks=(Check("regime", S
                        None, 100.0, h or (sym + action.value + mode.value).ljust(64, "x"), "2026-10-29T10:00:00")
 
 
-# ---------------------------------------------------------------- session.merge / choose_candidates
+# ---------------------------------------------------------------- session.merge_candidates
 
 def test_merge_dedupes_by_symbol_and_mode_and_sorts_take_first_then_expectancy():
     plan = DailyPlan("NSE", None, "", (), (v("T1", e=0.1), v("T2", e=0.5)),
@@ -41,33 +41,10 @@ def test_merge_dedupes_by_symbol_and_mode_and_sorts_take_first_then_expectancy()
     assert session.merge_candidates(None, ()) == []
 
 
-def test_choose_candidates_runs_plan_and_scan_with_one_regime(monkeypatch):
-    seen = {}
-    plan = DailyPlan("NSE", None, "", (), (v("T1"),), (), (), ())
-    monkeypatch.setattr(session, "resolve_tape", lambda p, w=None: (None, None))
-
-    def fake_plan(p, limits, syms, on_warning=None, **k):
-        seen["plan"] = (list(syms), k)
-        return plan
-
-    def fake_scan(p, limits, syms, regime=None, on_warning=None):
-        seen["scan"] = (list(syms), regime)
-        return [v("I1", mode=Mode.INTRADAY)], [("BAD", "no bars")]
-    monkeypatch.setattr(session, "run_daily_plan", fake_plan)
-    monkeypatch.setattr(session, "run_intraday", fake_scan)
-    out = session.choose_candidates(NSE, Limits(capital=100_000), symbols=["T1"], intraday_symbols=["I1"])
-    assert [c.plan.symbol for c in out] == ["T1", "I1"]
-    assert seen["plan"] == (["T1"], {"regime": None, "tape": None}) and seen["scan"] == (["I1"], None)
-
-
-def test_choose_candidates_sends_every_scan_failure_to_on_warning(monkeypatch):
-    monkeypatch.setattr(session, "resolve_tape", lambda p, w=None: (None, None))
-    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: DailyPlan("NSE", None, "", (), (), (), (), ()))
-    reason = "desk said TAKE but it could not be recorded (OSError: disk full), so it is withheld"
-    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], [("AAA", reason), ("BBB", "no bars")]))
-    warnings = []
-    session.choose_candidates(NSE, Limits(capital=100_000), warnings.append, symbols=[], intraday_symbols=["AAA"])
-    assert warnings == [f"intraday AAA: {reason}", "intraday BBB: no bars"]
+def test_choose_candidates_is_gone_the_page_builds_candidates_itself():
+    """F1 E1: nothing outside tests called session.choose_candidates; the page's own path (plan + scan + the scan
+    failures as warnings, tested below) is the only one."""
+    assert not hasattr(session, "choose_candidates")
 
 
 def test_choose_tab_lists_scan_failures_under_the_table(monkeypatch, tmp_path):

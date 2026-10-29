@@ -19,7 +19,7 @@ import streamlit as st
 from components import desk_card, theme
 from nse_backtest.desk import loaders, session
 from nse_backtest.desk.charts import projected_vs_real_chart
-from nse_backtest.desk.projections import projected_vs_real
+from nse_backtest.desk.projections import projected_vs_real, resolved_without_r
 from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
@@ -436,7 +436,11 @@ def _render_projected_vs_real(outcomes, s) -> None:
     group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
              (s.record, s.market, s.mode)]
     cum_proj, cum_real, pairs, n_without = projected_vs_real(group)
+    n_no_r = resolved_without_r(group)
     st.markdown(f"**Projected vs realised R — {s.mode.value}**")
+    if n_no_r:  # never dropped silently
+        st.caption(f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R — left out of this "
+                   "comparison.")
     if not pairs:
         st.info("No projections to compare yet")
         return

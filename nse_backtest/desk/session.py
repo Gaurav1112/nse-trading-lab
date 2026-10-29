@@ -21,7 +21,6 @@ from . import scoreboard_io
 from .audit import data_dir
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
-from .markets import universe
 from .models import Action, DeskVerdict, Limits, Mode
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
@@ -232,21 +231,6 @@ def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict
         e = _expectancy(v)
         return (v.action is not Action.TAKE, e is None, -(e or 0.0))
     return sorted(out, key=order)
-
-
-def choose_candidates(profile, limits: Limits, on_warning: Warn = None, *, symbols: Iterable[str] | None = None,
-                      intraday_symbols: Iterable[str] | None = None) -> list[DeskVerdict]:
-    """The trade chooser's candidates: today's plan over ``symbols`` (default: the universe) and the intraday scan
-    over ``intraday_symbols`` (default: the first 15), with one regime for both. See ``merge_candidates``."""
-    regime_df, tape = resolve_tape(profile, on_warning)
-    regime = tape.regime if tape else None
-    plan = run_daily_plan(profile, limits, list(symbols) if symbols is not None else universe(profile), on_warning,
-                          regime=regime, tape=tape)
-    scan, failures = run_intraday(profile, limits, list(intraday_symbols) if intraday_symbols is not None
-                                  else universe(profile)[:15], regime=regime, on_warning=on_warning)
-    for sym, why in failures:  # a withheld TAKE (audit write failed) must never vanish without a trace
-        _warn(on_warning, f"intraday {sym}: {why}")
-    return merge_candidates(plan, scan)
 
 
 def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,

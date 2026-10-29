@@ -949,7 +949,6 @@ def test_c2_page_shows_the_two_records_under_separate_subheaders(monkeypatch, tm
 # ---------------------------------------------------------------- C8
 
 def test_c8_scan_logged_intraday_row_is_scored_as_a_desk_candidate(paths, monkeypatch):
-    from nse_backtest.desk.audit import append_verdict
     from nse_backtest.desk.models import Action
     from tests.desk.test_intraday import _fake_check
     from nse_backtest.desk import intraday
@@ -1029,6 +1028,18 @@ def test_c8_page_shows_chart_per_record_and_warnings_first(monkeypatch, tmp_path
     warn = next(i for i, e in enumerate(kids) if e.type == "warning" and "could not be read" in e.value)
     assert warn < first_sub
     assert any("without a projection" in c.value for c in at.caption)
+
+
+def test_f1_e4_page_caption_counts_resolved_trades_without_a_realised_r(monkeypatch, tmp_path):
+    from dataclasses import replace as _replace
+    res = _two_records_result()
+    broken = _replace(res.outcomes[0], realised_r=None)  # resolved (WON) but no realised R
+    res = _replace(res, outcomes=[broken] + list(res.outcomes[1:]))
+    monkeypatch.setattr(session, "run_scoreboard", lambda market=None, **k: res)
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_load_scoreboard").click().run()
+    assert not at.exception
+    assert any("1 resolved trade without a realised R" in c.value for c in at.caption)
 
 
 def test_c8_page_no_projections_info(monkeypatch, tmp_path):

@@ -7,7 +7,8 @@ from pathlib import Path
 import pandas as pd
 
 from nse_backtest.desk import research
-from nse_backtest.desk.research import (Research, ResearchItem, Unavailable, nse_research,
+from nse_backtest.desk.markets import NSE
+from nse_backtest.desk.research import (Research, Unavailable, nse_research,
                                         run_skill, us_research)
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_skill.py"
@@ -177,21 +178,31 @@ def test_nse_research_maps():
     idx = pd.to_datetime(["2026-05-10", "2026-06-01", "2026-07-01"])
     actions = pd.DataFrame({"Dividends": [5.0, 0.0, 0.0], "Stock Splits": [0.0, 2.0, 0.0]}, index=idx)
     from datetime import date
-    out = nse_research("INFY", earnings=date(2026, 11, 12), actions=actions)
+    out = nse_research("INFY", NSE, earnings=date(2026, 11, 12), actions=actions)
     assert out.source == "NSE"
     byk = {i.kind: i for i in out.items}
     assert byk["earnings"].when == "2026-11-12"
-    assert byk["dividend"].when == "2026-05-10" and "5" in byk["dividend"].title
+    assert byk["dividend"].when == "2026-05-10" and byk["dividend"].title == "Dividend ₹5.00 per share"  # F1 E2
     assert byk["split"].when == "2026-06-01" and "2" in byk["split"].title
     assert all(i.url is None for i in out.items)
 
 
 def test_nse_research_missing_and_invalid():
-    assert isinstance(nse_research("INFY"), Unavailable)
-    assert isinstance(nse_research("../x"), Unavailable)
+    assert isinstance(nse_research("INFY", NSE), Unavailable)
+    assert isinstance(nse_research("../x", NSE), Unavailable)
     from datetime import date
-    out = nse_research("INFY", earnings=date(2026, 11, 12))
+    out = nse_research("INFY", NSE, earnings=date(2026, 11, 12))
     assert any("dividend" in n.lower() for n in out.notes)
+
+
+def test_nse_research_corporate_actions_failure_keeps_the_earnings_date():
+    """F1 E2: a corporate-actions failure is a note, never a reason to hide the earnings date."""
+    from datetime import date
+    out = nse_research("INFY", NSE, earnings=date(2026, 11, 12), actions_error="HTTP 500 from source")
+    assert [(i.kind, i.when) for i in out.items] == [("earnings", "2026-11-12")]
+    assert "dividends/splits unavailable: HTTP 500 from source" in out.notes
+    gone = nse_research("INFY", NSE, actions_error="HTTP 500 from source")  # nothing at all to show
+    assert isinstance(gone, Unavailable) and "dividends/splits unavailable: HTTP 500 from source" in gone.reason
 
 
 ALLOW_RESEARCH_IMPORTERS: set[str] = set()  # the page lives in pages/, so none for now

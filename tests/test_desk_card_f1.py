@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytest
 from streamlit.testing.v1 import AppTest
 
 from tests.test_desk_page_smoke import (  # noqa: F401 - autouse fixtures are picked up from module globals
@@ -221,3 +220,21 @@ def test_d2_check_failed_text_is_scrubbed(monkeypatch, tmp_path):
     at.button(key="desk_check").click().run()
     err = _texts(at.error)
     assert "Check failed" in err and "abc.parquet" in err and home not in err and home not in _raw(at.error)
+
+
+
+# ---------------------------------------------------------------- E2: research keeps the earnings date
+
+def test_e2_corporate_actions_failure_still_shows_the_earnings_date(monkeypatch, tmp_path):
+    from datetime import date
+    from nse_backtest.desk import loaders
+    v = _base(monkeypatch, tmp_path)
+    at, _ = _card_page(monkeypatch, tmp_path, v)
+    monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (date(2026, 11, 12), True))
+    monkeypatch.setattr(loaders, "corporate_actions", lambda p, s: (_ for _ in ()).throw(ValueError("HTTP 500")))
+    next(b for b in at.button if b.label == "Load news & earnings").click().run()
+    assert not at.exception
+    text = _texts(at.markdown) + _texts(at.caption)
+    assert "Next earnings" in text and "2026-11-12" in text
+    assert "dividends/splits unavailable: HTTP 500" in text
+    assert "Research unavailable" not in _texts(at.warning)

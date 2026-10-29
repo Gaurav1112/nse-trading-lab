@@ -224,3 +224,21 @@ def test_outcome_money_states_the_limit_fill_slippage_for_intraday():
     m = outcome_money(build_card(v, NSE, Limits(capital=10_000)))
     assert m.limit_slippage == pytest.approx(10 * 0.5)
     assert outcome_money(card()).limit_slippage is None
+
+
+
+def test_resolved_trades_without_a_realised_r_are_counted_never_dropped():
+    """F1 E4: a resolved trade whose realised R is missing is counted and surfaced, not silently left out."""
+    from nse_backtest.desk.projections import resolved_without_r
+    outs = [outcome(0, 0.3, 1.5), outcome(1, 0.2, None, OStatus.LOST), outcome(2, None, None, OStatus.TIME),
+            outcome(3, 0.1, None, OStatus.OPEN)]
+    assert resolved_without_r(outs) == 2
+    assert resolved_without_r([]) == 0
+
+
+def test_cli_projected_line_surfaces_resolved_trades_without_r():
+    from nse_backtest.desk.cli import _projected_line
+    from nse_backtest.desk.scoreboard import summarize
+    outs = [outcome(0, 0.3, 1.5), outcome(1, 0.2, None, OStatus.LOST)]
+    (s,) = summarize([outs[0]])
+    assert _projected_line(outs, s).endswith(" over 1 trade (1 resolved trade without a realised R, left out)")

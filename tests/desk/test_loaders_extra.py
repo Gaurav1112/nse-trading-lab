@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import math
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -267,7 +266,6 @@ def test_cli_positions_corrupt_exits_2(tmp_path, capsys):
 
 def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
     from nse_backtest.desk.service import check_trade
-    from nse_backtest.desk.checks import CheckContext
     seen = {}
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
     monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
@@ -323,7 +321,6 @@ def test_cli_settings_corrupt_warns_and_backs_up(tmp_path, capsys):
 
 
 def test_plan_watch_rows_list_check_names():
-    from nse_backtest.desk.models import Action
     from nse_backtest.desk.daily import daily_plan
     from tests.desk.test_daily_positions_intraday import ctx as dctx, series as dseries
     dp = daily_plan(NSE, {"AAA": dseries()}, dseries(step=0.997), Limits(capital=100_000), dctx(), replays=300)
