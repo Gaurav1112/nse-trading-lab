@@ -18,10 +18,11 @@ from nse_backtest.desk.models import Mode, Odds, TradePlan
 from nse_backtest.desk.plan import atr_series, swing_stop
 
 
-def bar_ratios(df: pd.DataFrame, mode: Mode) -> np.ndarray:
+def bar_ratios(df: pd.DataFrame, mode: Mode, profile=None) -> np.ndarray:
     """Rows of (O, H, L, C) / previous close, shape (n, 4); non-finite rows dropped.
 
-    INTRADAY also drops each session's first bar (it contains the overnight gap).
+    INTRADAY also drops each session's first bar (it contains the overnight gap) and,
+    when ``profile`` is given, every bar at/after ``profile.flat_by`` (the desk never holds there).
     """
     prev = df["Close"].shift(1)
     ratios = pd.concat([df[c] / prev for c in ("Open", "High", "Low", "Close")], axis=1)
@@ -29,6 +30,8 @@ def bar_ratios(df: pd.DataFrame, mode: Mode) -> np.ndarray:
     if mode is Mode.INTRADAY:
         dates = pd.Series(df.index.normalize(), index=df.index)
         keep &= (dates == dates.shift(1)).to_numpy()  # same date as previous bar
+        if profile is not None:
+            keep &= np.array([t.time() < profile.flat_by for t in df.index], dtype=bool)
     arr = ratios.to_numpy(dtype=float)
     keep &= np.isfinite(arr).all(axis=1)
     return arr[keep]
@@ -37,7 +40,17 @@ def bar_ratios(df: pd.DataFrame, mode: Mode) -> np.ndarray:
 def monte_carlo(ratios, entry, stop, target, max_bars, *, cost_per_share=0.0,
                 replays=10_000, seed=19, block=5) -> tuple[float, float, float, float]:
     """Block-bootstrap the stock's own bar ratios; returns (p_target, p_stop, p_time, expectancy_r)."""
+    if not all(math.isfinite(x) for x in (entry, stop, target, cost_per_share)):
+        raise ValueError("entry, stop, target and cost_per_share must be finite")
+    if not entry > stop:
+        raise ValueError("entry must be above stop")
+    if not target > entry:
+        raise ValueError("target must be above entry")
+    if max_bars < 1:
+        raise ValueError("max_bars must be >= 1")
     ratios = np.asarray(ratios, dtype=float)
+    if not np.isfinite(ratios).all():
+        raise ValueError("ratios must be finite")
     n = len(ratios)
     if n < 2 * block:
         raise ValueError("not enough history for Monte Carlo")
@@ -112,7 +125,9 @@ def _swing_history(df, plan, cost_per_share, years):
             continue
         stop, _ = swing_stop(entry, float(atrs[i]), float(low10[i]))
         risk = entry - stop
-        if not risk > 0:
+        # Degenerate-risk guard (applied symmetrically to swing and intraday): a stop
+        # closer than 0.1 x ATR makes R meaningless and inflates R-multiples.
+        if not risk >= 0.1 * float(atrs[i]) or not risk > 0:
             i += 1
             continue
         target = entry + rr * risk
@@ -130,8 +145,11 @@ def _swing_history(df, plan, cost_per_share, years):
 
 
 def _intraday_history(df, plan, cost_per_share):
-    flat_by = get_profile(plan.market).flat_by
+    """Replay the desk's own rule: opening range = the bar at session_open; first close above
+    its high inside [no_entry_before, no_entry_after] is the entry (a breakout outside = no trade)."""
+    prof = get_profile(plan.market)
     op, hi, lo, cl = (df[c].to_numpy(dtype=float) for c in ("Open", "High", "Low", "Close"))
+    atrs = atr_series(df).to_numpy()
     dates = df.index.normalize()
     times = np.array([t.time() for t in df.index])
     latest = dates[-1]
@@ -140,25 +158,29 @@ def _intraday_history(df, plan, cost_per_share):
         if d == latest:
             continue
         pos = np.flatnonzero(dates == d)
-        pos = pos[times[pos] < flat_by]
-        if len(pos) < 3:
-            continue
-        a = pos[0]
+        pos = pos[times[pos] < prof.flat_by]
+        opens = pos[times[pos] == prof.session_open]
+        if len(opens) == 0:
+            continue  # no opening-range bar this session
+        a = opens[0]
         or_high, or_low = hi[a], lo[a]
-        k = next((p for p in pos[1:] if cl[p] > or_high), None)
+        k = next((p for p in pos[pos > a]
+                  if prof.no_entry_before <= times[p] <= prof.no_entry_after and cl[p] > or_high), None)
         if k is None:
             continue
         entry = float(cl[k])
         stop = (or_high + or_low) / 2
         risk = entry - stop
-        if not risk > 0:
+        # Same degenerate-risk guard as swing: drops zero-range opening bars (R ~ 0 explodes R-multiples).
+        if not risk > 0 or risk < 0.1 * atrs[k]:
             continue
         target = entry + plan.rr_t1 * risk
         rest = pos[pos > k]
         if len(rest) == 0:
-            continue
-        res = _walk(op, hi, lo, cl, rest[0], rest[-1], stop, target)
-        px = res[0] if res is not None else cl[rest[-1]]
+            px = entry  # accepted trade with nothing after: time exit at the breakout Close (0R minus cost)
+        else:
+            res = _walk(op, hi, lo, cl, rest[0], rest[-1], stop, target)
+            px = res[0] if res is not None else cl[rest[-1]]
         out.append(float((px - entry - cost_per_share * entry / plan.entry) / risk))
     return out
 
@@ -170,7 +192,7 @@ def setup_history(df, plan: TradePlan, *, cost_per_share=0.0, years=3) -> list[f
     return _intraday_history(df, plan, cost_per_share)
 
 
-def shuffle_drawdowns(rs, *, runs=2000, seed=19):
+def shuffle_drawdowns(rs, *, runs=2000, seed=19) -> tuple[float, float, float, float] | None:
     """Shuffle the trade order: (dd_p5, dd_p50, dd_p95, p_5_loss_streak), in R; None if < 5 trades."""
     rs = np.asarray(rs, dtype=float)
     if len(rs) < 5:
@@ -207,7 +229,7 @@ def noise_expectancies(df, plan, *, cost_per_share=0.0, runs=20, seed=19, jitter
 def odds(df, plan: TradePlan, *, cost_per_share=0.0, replays=10_000, seed=19, block=5,
          lookback=250, robustness=True) -> Odds:
     window = df.tail(lookback + 1) if plan.mode is Mode.SWING else df.tail(40 * 26)
-    ratios = bar_ratios(window, plan.mode)
+    ratios = bar_ratios(window, plan.mode, profile=get_profile(plan.market))
     p_t, p_s, p_x, mc_exp = monte_carlo(ratios, plan.entry, plan.stop, plan.target_1,
                                         plan.max_hold_bars, cost_per_share=cost_per_share,
                                         replays=replays, seed=seed, block=block)

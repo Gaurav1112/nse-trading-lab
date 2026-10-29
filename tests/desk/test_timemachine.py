@@ -100,3 +100,137 @@ def test_intraday_setup_history_breakout_hits_target():
     df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c}, index=day1.append(day2))
     p = TradePlan("X", "NSE", Mode.INTRADAY, 102.0, 100.0, 105.0, 108.0, 1.0, 20, 102.0, "x", "opening-range mid")
     assert setup_history(df, p) == [pytest.approx(1.5)]
+
+
+# ---------------------------------------------------------------- fix round 1
+from nse_backtest.desk.markets import get_profile
+from nse_backtest.desk.plan import atr_series, swing_stop
+
+
+def intraday_frame(*sessions):
+    """sessions: (date, [(HH:MM, o, h, l, c), ...]); a trailing flat session is appended (latest is excluded)."""
+    rows, idx = [], []
+    for day, bars in sessions:
+        for hhmm, o, h, l, c in bars:
+            idx.append(pd.Timestamp(f"{day} {hhmm}")); rows.append((o, h, l, c))
+    idx.append(pd.Timestamp("2026-11-30 09:15")); rows.append((100, 101, 99, 100))
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close"], index=pd.DatetimeIndex(idx))
+
+
+def iplan():
+    return TradePlan("X", "NSE", Mode.INTRADAY, 102.0, 100.0, 105.0, 108.0, 1.0, 20, 102.0, "x", "opening-range mid")
+
+
+FLAT = (100, 101, 99, 100)
+
+
+def test_intraday_breakout_after_no_entry_window_is_no_trade():
+    bars = [("09:15", 100, 101, 99, 100)]
+    t = pd.Timestamp("2026-10-27 09:30")
+    while t.time() <= pd.Timestamp("2026-10-27 14:30").time():
+        bars.append((t.strftime("%H:%M"), *FLAT)); t += pd.Timedelta(minutes=15)
+    bars.append(("14:45", 101, 104, 101, 103))  # first close above OR high is outside the window
+    bars.append(("15:00", 103, 109, 102.5, 108))  # a later bar that would hit target if the trade were taken
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == []
+
+
+def test_intraday_breakout_at_0945_with_later_bars_is_recorded():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", *FLAT), ("09:45", 101, 102.5, 100.5, 102),
+            ("10:00", 102, 106, 101.5, 105.5)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]
+
+
+def test_intraday_breakout_with_no_later_bars_is_time_exit_at_close():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 101, 102.5, 100.5, 102)]
+    rs = setup_history(intraday_frame(("2026-10-27", bars)), iplan(), cost_per_share=0.5)
+    assert rs == [pytest.approx(-0.5 / 2.0)]  # 0R minus cost, risk = 102 - 100
+
+
+def test_intraday_session_without_open_bar_is_skipped():
+    bars = [("09:30", 100, 101, 99, 100), ("09:45", 101, 102.5, 100.5, 102), ("10:00", 102, 106, 101.5, 105.5)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == []
+
+
+def test_intraday_degenerate_zero_range_open_is_skipped():
+    wide = [(f"{h:02d}:{m:02d}", *(100, 101, 99, 100)) for h, m in
+            [(9, 15), (9, 30), (9, 45), (10, 0), (10, 15), (10, 30), (10, 45), (11, 0), (11, 15), (11, 30)]]
+    bad = [("09:15", 100, 100, 100, 100), ("09:30", 100, 100.1, 100, 100.05), ("09:45", 100.05, 100.2, 100.0, 100.1)]
+    df = intraday_frame(("2026-10-26", wide), ("2026-10-27", bad))
+    assert setup_history(df, iplan()) == []
+
+
+def test_swing_risk_guard_keeps_normal_uptrend_trades():
+    # swing_stop floors risk at 1 ATR so the 0.1*ATR guard never removes a swing trade here
+    assert len(setup_history(geometric(), plan(t1=104.2, stop=97.2))) >= 20
+
+
+def test_monte_carlo_input_guards():
+    r = const_ratios(1.0, 1.012, 0.998, 1.01)
+    for args in [(100, 100, 103, 15), (100, 101, 103, 15), (100, 97, 100, 15), (100, 97, 99, 15),
+                 (100, 97, 103, 0), (float("nan"), 97, 103, 15), (100, float("nan"), 103, 15),
+                 (100, 97, float("inf"), 15)]:
+        with pytest.raises(ValueError):
+            monte_carlo(r, *args)
+    with pytest.raises(ValueError):
+        monte_carlo(r, 100, 97, 103, 15, cost_per_share=float("nan"))
+
+
+def test_monte_carlo_gap_through_target_fills_at_open():
+    pt, _, _, exp = monte_carlo(const_ratios(1.1, 1.12, 1.09, 1.1), 100, 97, 103, 15)
+    assert pt == 1.0 and exp == pytest.approx(10 / 3)
+
+
+def test_intraday_ratios_drop_bars_at_or_after_flat_by():
+    def session(day):
+        return pd.date_range(f"{day} 09:15", f"{day} 15:15", freq="15min")
+    idx = session("2026-10-27").append(session("2026-10-28"))
+    df = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0}, index=idx)
+    assert bar_ratios(df, Mode.INTRADAY).shape == (48, 4)
+    assert bar_ratios(df, Mode.INTRADAY, profile=get_profile("NSE")).shape == (46, 4)
+
+
+# swing regression: trade fires at bar 200 of an uptrend; bars after it are rewritten by hand
+def swing_case(n, hold):
+    df = geometric(n=n)
+    entry = float(df["Close"].iloc[200])
+    stop, _ = swing_stop(entry, float(atr_series(df).iloc[200]), float(df["Low"].rolling(10).min().iloc[200]))
+    risk = entry - stop
+    p = plan(entry=100.0, stop=97.0, t1=104.5, hold=hold)  # rr_t1 = 1.5
+    return df, entry, stop, risk, entry + 1.5 * risk, p
+
+
+def set_bar(df, i, o, h, l, c):
+    df.iloc[i, [df.columns.get_loc(k) for k in ("Open", "High", "Low", "Close")]] = [o, h, l, c]
+
+
+def test_swing_stop_wins_when_bar_touches_both():
+    df, entry, stop, risk, target, p = swing_case(202, 5)
+    set_bar(df, 201, entry, target + 1, stop - 1, entry)
+    assert setup_history(df, p) == [pytest.approx(-1.0)]
+
+
+def test_swing_gap_through_stop_fills_at_open():
+    df, entry, stop, risk, target, p = swing_case(202, 5)
+    set_bar(df, 201, stop - risk, stop - risk, stop - 2 * risk, stop - risk)
+    assert setup_history(df, p) == [pytest.approx(-2.0)]
+
+
+def test_swing_time_exit_at_close_of_last_hold_bar():
+    df, entry, stop, risk, target, p = swing_case(205, 3)
+    for i in (201, 202):
+        set_bar(df, i, entry, entry, entry, entry)
+    set_bar(df, 203, entry + 0.3 * risk, entry + 0.3 * risk, entry + 0.3 * risk, entry + 0.3 * risk)
+    assert setup_history(df, p) == [pytest.approx(0.3)]
+
+
+def test_swing_unresolved_final_trade_is_discarded():
+    df, entry, stop, risk, target, p = swing_case(204, 5)
+    for i in (201, 202, 203):
+        set_bar(df, i, entry, entry, entry, entry)
+    assert setup_history(df, p) == []
+
+
+def test_noise_expectancies_deterministic_under_seed():
+    from nse_backtest.desk.timemachine import noise_expectancies
+    a = noise_expectancies(geometric(), plan(t1=104.2, stop=97.2), runs=5, seed=3)
+    assert a and a == noise_expectancies(geometric(), plan(t1=104.2, stop=97.2), runs=5, seed=3)
