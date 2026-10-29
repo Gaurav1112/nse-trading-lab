@@ -275,3 +275,12 @@ def test_i3_intraday_tab_keeps_a_fresh_ticket(monkeypatch, tmp_path):
     at, _ = _intraday_tab(monkeypatch, tmp_path, _at(_intraday(_base(monkeypatch, tmp_path)), T, 3))
     assert "BUY" in " | ".join(c.value for c in at.tabs[4].code)
     assert not any(b.label == "Re-check" for b in at.tabs[4].button)
+
+
+def test_i4_card_labels_expected_value_and_account_projection(monkeypatch, tmp_path):
+    _clock(monkeypatch, T)
+    v = _at(_intraday(_base(monkeypatch, tmp_path), current=None), T, 1)
+    v = replace(v, current_price=v.plan.entry - 0.01)  # below the trigger: the stop-limit ticket
+    at, _ = _card_page(monkeypatch, tmp_path, v)
+    caps = _texts(at.caption)
+    assert caps.count("assumes a fill at the trigger; up to") >= 2  # under expected value and the account chart

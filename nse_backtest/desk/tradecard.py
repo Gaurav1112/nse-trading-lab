@@ -45,6 +45,9 @@ class TradeCard:
     reasons: tuple[str, ...]
     per_share: tuple[float, float, float]  # (max loss at qty 1, profit at T1, profit at T2) at qty 1
     unavailable_reason: str = ""
+    # Intraday: expected value, outcomes and the account projection assume a fill at the trigger; this says how
+    # much worse the ticket's fill can be. "" for swing (a LIMIT never fills above entry) and without shares.
+    fill_note: str = ""
 
 
 def _check_qty(qty) -> int:
@@ -70,6 +73,17 @@ def _breaches(limits: Limits, risk_pct: float, deployed_pct: float, max_loss_pct
         out.append(f"max loss {_over(max_loss_pct, limits.daily_loss_limit_pct)}% of capital exceeds the daily "
                    f"loss limit ({limits.daily_loss_limit_pct:.1f}%)")
     return tuple(out)
+
+
+def _fill_note(v: DeskVerdict, profile: MarketProfile, n: int) -> str:
+    plan = v.plan
+    if plan.mode is not Mode.INTRADAY or n < 1:
+        return ""
+    lim, cp, m = worst_entry(plan, profile), v.current_price, profile.money
+    if isinstance(cp, (int, float)) and plan.entry <= cp <= lim:  # the ticket is a plain LIMIT, filled at ~cp
+        return (f"assumes a fill at the trigger; the ticket is a limit at the current price {m(cp)}, so about "
+                f"{m(n * (cp - plan.entry))} less")
+    return f"assumes a fill at the trigger; up to {m(n * (lim - plan.entry))} less at the limit"
 
 
 def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: int | None = None,
@@ -118,6 +132,7 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     shown = taken or override_confirmed
     return TradeCard(
         **common, sizing=sizing, cost=cost, max_loss=max_loss, max_loss_at_trigger=max_loss_at_trigger,
+        fill_note=_fill_note(v, profile, n),
         profit_t1=n * (plan.target_1 - plan.entry) - cost,
         profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
         expected_value=ev, notional=notional,

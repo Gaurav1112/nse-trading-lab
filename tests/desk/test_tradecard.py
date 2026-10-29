@@ -245,3 +245,27 @@ def test_headline_card_and_sizer_share_the_sizers_spread(market, mode, spread):
     assert prof.money(s.risk_amount) in v.headline
     assert not any(b.startswith("risk per trade") for b in build_card(v, prof, lim, qty=s.qty).breaches)
     assert any(b.startswith("risk per trade") for b in build_card(v, prof, lim, qty=s.qty + 1).breaches)
+
+
+# ---------------------------------------------------------------- round 2, I4: trigger-fill labels
+
+def test_i4_fill_note_for_stop_limit_and_plain_limit_tickets():
+    p = _probe_plan(Mode.INTRADAY)  # entry 1000, limit 1002.50
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    below = build_card(decide(p, s, None, OK, NSE, 999.5, _NOW), NSE, lim)  # stop-limit ticket (WAIT)
+    assert below.fill_note == (f"assumes a fill at the trigger; up to {NSE.money(s.qty * 2.5)} less at the limit")
+    at = build_card(decide(p, s, None, OK, NSE, 1001.0, _NOW), NSE, lim)  # plain LIMIT at the current price
+    assert at.fill_note == (f"assumes a fill at the trigger; the ticket is a limit at the current price "
+                            f"{NSE.money(1001.0)}, so about {NSE.money(s.qty * 1.0)} less")
+    assert build_card(verdict(), NSE, LIMITS).fill_note == ""  # swing: a LIMIT never fills above entry
+
+
+def test_i4_cli_money_block_labels_expected_value():
+    from nse_backtest.desk.cli import format_money
+    p = _probe_plan(Mode.INTRADAY)
+    lim = Limits(capital=100_000)
+    s = size_position(p, lim, NSE)
+    v = replace(decide(p, s, None, OK, NSE, 999.5, _NOW), odds=ODDS)
+    text = "\n".join(format_money(build_card(v, NSE, lim), NSE))
+    assert "expected value" in text and "assumes a fill at the trigger; up to" in text

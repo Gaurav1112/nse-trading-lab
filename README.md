@@ -96,6 +96,9 @@ to open its trade card:
     and the card says so.
   - Profit at T1 (T2) = quantity × (target − entry) − round-trip costs with the exit at that target.
   - Expected value = Monte Carlo expectancy in R × quantity × (entry − stop). It is blank when there are no odds.
+    Intraday, it and the account projection assume a fill at the trigger; the card says how much less a fill
+    at the limit can make (or, when the ticket is a plain limit because the price is already above the trigger,
+    about quantity × (current price − entry) less).
   - If the desk sized 0 shares (for example the stop is too wide for your risk limit) there is no total to
     show, so the card gives the per-share loss and profit at T1 and T2 and asks for a quantity.
 - **Breaches**: a quantity you type in that goes past your risk-per-trade, position-size or daily-loss limit is

@@ -98,7 +98,8 @@ def format_money(card, profile) -> list[str]:
     lines = [f"Money ({card.qty} shares{', your quantity' if card.qty_is_override else ''}):",
              f"  max loss {m(card.max_loss)} ({card.gap_note[0].lower() + card.gap_note[1:]})",
              f"  profit at T1 {m(card.profit_t1)}  profit at T2 {m(card.profit_t2)}",
-             f"  reward:risk {card.rr_t1:.2f}  expected value {ev}",
+             f"  reward:risk {card.rr_t1:.2f}  expected value {ev}"
+             + (f" ({card.fill_note})" if card.fill_note and card.expected_value is not None else ""),
              f"  notional {m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital), "
              f"at risk {card.pct_capital_at_risk:.1f}% of capital, costs {m(card.cost)}"]
     if card.entry_limit is not None and card.max_loss_at_trigger is not None:
