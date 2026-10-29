@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install pywebpush
-        run: pip install pywebpush py-vapid requests
+        run: pip install "pywebpush>=1.14.0,<3" "py-vapid>=1.9.0,<2" "requests>=2.31,<3"  # same ranges as requirements.txt
       - name: Setup SSH for signals repo
         env:
           DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
