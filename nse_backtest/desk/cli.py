@@ -10,15 +10,10 @@ from dataclasses import replace
 from datetime import date, datetime
 from enum import Enum
 
-from nse_backtest import tape_monitor
-
-from . import loaders
-from .daily import daily_plan, market_stats
-from .intraday import orb_scan
+from . import loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Limits, Mode
 from .positions import review_positions
-from .service import check_trade
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -93,9 +88,13 @@ def _finish(lines: list[str]) -> int:
     return 0
 
 
+def _stderr_warn(msg: str) -> None:
+    print(f"warning: {msg}", file=sys.stderr)
+
+
 def _limits(profile, as_json: bool = False):
     """(limits, warning lines). A corrupt settings file falls back to defaults, loudly."""
-    limits, fell_back = loaders.load_limits_with_status(profile)
+    limits, fell_back = session.limits_with_status(profile)
     if not fell_back:
         return limits, []
     msg = f"WARNING: settings file unreadable — using default capital {profile.money(limits.capital)}"
@@ -105,48 +104,12 @@ def _limits(profile, as_json: bool = False):
     return limits, [msg, ""]
 
 
-# ---------------------------------------------------------------- data assembly
-
-def _regime_of(regime_df) -> str | None:
-    try:
-        tape = tape_monitor.assess_tape(regime_df)
-        return tape.regime if tape else None
-    except Exception as e:  # noqa: BLE001 - unknown regime is handled fail-closed downstream
-        print(f"warning: regime unavailable: {e}", file=sys.stderr)
-        return None
-
-
-def _regime(profile) -> str | None:
-    return _regime_of(loaders.load_regime(profile))
-
-
-def _ctx_for(profile, limits, symbol_df=None, regime=None):
-    return loaders.build_context(profile, limits, symbol_df=symbol_df, regime=regime)
-
-
-def _frames(profile, symbols) -> dict:
-    out = {}
-    for sym in symbols:
-        try:
-            out[sym] = loaders.load_daily(profile, sym)
-        except Exception as e:  # noqa: BLE001 - reported as unavailable, never dropped silently
-            print(f"warning: no data for {sym}: {e}", file=sys.stderr)
-            out[sym] = None
-    return out
-
-
 # ---------------------------------------------------------------- commands
 
 def cmd_check(a, profile) -> int:
-    sym = a.symbol.strip().upper()
     limits, warn = _limits(profile, a.json)
-    mode = Mode(a.mode)
-    daily = loaders.load_daily(profile, sym)
-    df = loaders.load_intraday(profile, sym) if mode is Mode.INTRADAY else daily
-    ctx = _ctx_for(profile, limits, daily, _regime(profile))
-    nxt, checked = loaders.next_earnings(profile, sym)
-    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked)
-    v = check_trade(df, sym, profile, mode, limits, ctx, entry=a.entry, stop=a.stop, target=a.target)
+    v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
+                          target=a.target, on_warning=_stderr_warn)
     if a.json:
         _emit_json(v)
         return 0
@@ -167,11 +130,7 @@ def _format_row(v: DeskVerdict, profile, *, why: bool = False) -> str:
 def cmd_plan(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = universe(profile)[:PLAN_UNIVERSE_LIMIT]
-    frames = _frames(profile, syms)
-    regime_df = loaders.load_regime(profile)
-    ctx = loaders.build_context(profile, limits, regime=_regime_of(regime_df))
-    plan = daily_plan(profile, frames, regime_df, limits, ctx,
-                      earnings_lookup=lambda s: loaders.next_earnings(profile, s))
+    plan = session.run_daily_plan(profile, limits, syms, _stderr_warn)
     if a.json:
         _emit_json(plan)
         return 0
@@ -190,7 +149,7 @@ def cmd_plan(a, profile) -> int:
 
 def cmd_positions(a, profile) -> int:
     positions = loaders.market_positions(profile)
-    frames = _frames(profile, sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")}))
+    frames = session.load_frames(profile, sorted({str(p["symbol"]) for p in positions if p.get("symbol") and not p.get("closed")}), _stderr_warn)
     actions = review_positions(positions, {k: v for k, v in frames.items() if v is not None}, profile)
     if a.json:
         _emit_json(actions)
@@ -209,21 +168,7 @@ def cmd_intraday(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = ([s.strip().upper() for s in a.symbols.split(",") if s.strip()]
             if a.symbols else universe(profile)[:15])
-    frames15, load_failures, per_symbol = {}, [], {}
-    ctx = _ctx_for(profile, limits, regime=_regime(profile))
-    for s in syms:
-        try:
-            frames15[s] = loaders.load_intraday(profile, s)
-        except Exception as e:  # noqa: BLE001
-            load_failures.append((s, str(e)))
-            continue
-        try:  # daily bars give the liquidity (turnover) and gap checks something to read
-            turnover, gap = market_stats(loaders.load_daily(profile, s))
-            per_symbol[s] = replace(ctx, turnover_20d=turnover, today_gap_pct=gap)
-        except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
-            print(f"warning: no daily data for {s}: {e}", file=sys.stderr)
-    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol)
-    failures = load_failures + list(failures)
+    verdicts, failures = session.run_intraday(profile, limits, syms, on_warning=_stderr_warn)
     if a.json:
         _emit_json({"verdicts": verdicts, "failures": failures})
         return 0

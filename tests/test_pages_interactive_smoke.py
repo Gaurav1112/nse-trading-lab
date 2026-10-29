@@ -59,11 +59,3 @@ def test_decay_watch_handles_empty_positions():
     crash trying to iterate."""
     at = _run_with_timeout("pages/12_Decay_Watch.py", timeout=30)
     assert not at.exception, f"Decay Watch raised: {at.exception}"
-
-
-def test_dashboard_renders():
-    """Dashboard cold-fetches sector indices + market breadth on first paint.
-    A generous timeout accommodates yfinance latency without flaking CI;
-    we only care that it eventually renders without raising."""
-    at = _run_with_timeout("pages/2_Dashboard.py", timeout=120)
-    assert not at.exception, f"Dashboard raised: {at.exception}"

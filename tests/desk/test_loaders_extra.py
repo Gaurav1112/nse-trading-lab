@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nse_backtest.desk import cli, loaders
+from nse_backtest.desk import cli, loaders, session
 from nse_backtest.desk.markets import NSE, US
 from nse_backtest.desk.models import Limits
 from tests.desk.test_cli_loaders import series
@@ -274,7 +274,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
         v = check_trade(series(), "AAA", profile, __import__("nse_backtest.desk.models", fromlist=["Mode"]).Mode.SWING,
                         limits, ctx, robustness=False, replays=200, audit=False)
         return [v], []
-    monkeypatch.setattr(cli, "orb_scan", fake_scan)
+    monkeypatch.setattr(session, "orb_scan", fake_scan)
     assert cli.main(["intraday", "--symbols", "AAA"]) == 0
     out = capsys.readouterr().out
     assert "Checks:" in out and ("PASS" in out or "WARN" in out)
@@ -298,8 +298,8 @@ def test_cli_plan_passes_regime_and_earnings_lookup(offline_desk, capsys, monkey
     seen = _record_assess(monkeypatch)
     monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 2, raising=False)
     calls = []
-    real = cli.daily_plan
-    monkeypatch.setattr(cli, "daily_plan", lambda *a, **k: calls.append(k) or real(*a, **k))
+    real = session.daily_plan
+    monkeypatch.setattr(session, "daily_plan", lambda *a, **k: calls.append(k) or real(*a, **k))
     assert cli.main(["plan", "--market", "US"]) == 0
     assert seen and seen[0] in ("TRENDING", "MIXED", "HOSTILE")
     assert calls and callable(calls[0].get("earnings_lookup"))

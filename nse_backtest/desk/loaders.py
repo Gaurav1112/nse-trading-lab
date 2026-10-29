@@ -60,7 +60,9 @@ def load_regime(profile: MarketProfile) -> pd.DataFrame | None:
     try:
         from nse_backtest.data import fetch_nse
         start = (date.today() - timedelta(days=800)).isoformat()
-        df = fetch_nse(profile.regime_index, start, exchange=profile.exchange)
+        # index symbols (^NSEI, ^GSPC) take no exchange suffix: '^NSEI.NS' does not exist on Yahoo
+        exchange = "" if profile.regime_index.startswith("^") else profile.exchange
+        df = fetch_nse(profile.regime_index, start, exchange=exchange)
         return df if df is not None and len(df) else None
     except Exception as e:  # noqa: BLE001 - regime unknown is handled fail-closed downstream
         log.warning("regime data unavailable for %s: %s", profile.regime_index, e)
