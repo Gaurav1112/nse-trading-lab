@@ -292,7 +292,8 @@ def _projected_line(outcomes, s) -> str:
         return "  No projections to compare yet"
     proj, real = sum(p for p, _ in pairs), sum(r for _, r in pairs)
     extra = f" ({n_without} without a projection)" if n_without else ""
-    return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {len(pairs)} trades{extra}"
+    n = len(pairs)
+    return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
 
 
 def format_scoreboard(res, market_label: str) -> list[str]:
@@ -303,6 +304,10 @@ def format_scoreboard(res, market_label: str) -> list[str]:
     lines = [SCOREBOARD_DISCLAIMER, SCOREBOARD_COVERAGE]
     if getattr(res, "note", None):
         lines.append(res.note)
+    if res.rejects:
+        n = len(res.rejects)
+        lines += [f"Rejected {n} audit line{'s' if n != 1 else ''}:"]
+        lines += [f"  line {ln}: {why}" for ln, why in res.rejects]
     if not res.outcomes and res.rejects:
         lines.append(f"No valid TAKE verdicts for {market_label} ({len(res.rejects)} unreadable — see below)")
     elif not res.outcomes:
@@ -342,10 +347,6 @@ def format_scoreboard(res, market_label: str) -> list[str]:
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):
             lines.append("  (R in brackets = open trade marked to the last close; not counted in the stats)")
-    if res.rejects:
-        n = len(res.rejects)
-        lines += ["", f"Rejected {n} audit line{'s' if n != 1 else ''}:"]
-        lines += [f"  line {ln}: {why}" for ln, why in res.rejects]
     if res.cache_note:
         lines += ["", f"Cache: {res.cache_note}"]
     return lines

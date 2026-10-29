@@ -242,8 +242,10 @@ def choose_candidates(profile, limits: Limits, on_warning: Warn = None, *, symbo
     regime = tape.regime if tape else None
     plan = run_daily_plan(profile, limits, list(symbols) if symbols is not None else universe(profile), on_warning,
                           regime=regime, tape=tape)
-    scan, _failures = run_intraday(profile, limits, list(intraday_symbols) if intraday_symbols is not None
-                                   else universe(profile)[:15], regime=regime, on_warning=on_warning)
+    scan, failures = run_intraday(profile, limits, list(intraday_symbols) if intraday_symbols is not None
+                                  else universe(profile)[:15], regime=regime, on_warning=on_warning)
+    for sym, why in failures:  # a withheld TAKE (audit write failed) must never vanish without a trace
+        _warn(on_warning, f"intraday {sym}: {why}")
     return merge_candidates(plan, scan)
 
 

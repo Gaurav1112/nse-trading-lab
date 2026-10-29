@@ -60,6 +60,28 @@ def test_choose_candidates_runs_plan_and_scan_with_one_regime(monkeypatch):
     assert seen["plan"] == (["T1"], {"regime": None, "tape": None}) and seen["scan"] == (["I1"], None)
 
 
+def test_choose_candidates_sends_every_scan_failure_to_on_warning(monkeypatch):
+    monkeypatch.setattr(session, "resolve_tape", lambda p, w=None: (None, None))
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: DailyPlan("NSE", None, "", (), (), (), (), ()))
+    reason = "desk said TAKE but it could not be recorded (OSError: disk full), so it is withheld"
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], [("AAA", reason), ("BBB", "no bars")]))
+    warnings = []
+    session.choose_candidates(NSE, Limits(capital=100_000), warnings.append, symbols=[], intraday_symbols=["AAA"])
+    assert warnings == [f"intraday AAA: {reason}", "intraday BBB: no bars"]
+
+
+def test_choose_tab_lists_scan_failures_under_the_table(monkeypatch, tmp_path):
+    from tests.desk.test_scoreboard_io import _page
+    reason = "desk said TAKE but it could not be recorded (OSError: disk full), so it is withheld"
+    plan = DailyPlan("NSE", None, "", (), (v("T1"),), (), (), ())
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], [("AAA", reason)]))
+    at = _page(monkeypatch, tmp_path).run()
+    at.button(key="desk_choose_load").click().run()
+    assert not at.exception
+    assert any("AAA" in w.value and reason in w.value for w in at.warning)
+
+
 # ---------------------------------------------------------------- loaders.corporate_actions
 
 class _T:

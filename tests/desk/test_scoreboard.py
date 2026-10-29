@@ -843,8 +843,10 @@ def test_load_candidates_take_is_desk_override_is_override_others_ignored():
 
 
 def test_load_candidates_dedupe_is_per_record():
-    rows = [_row("TAKE", "t"), _row("OVERRIDE", "t", desk_action="WAIT"),  # same ticket, same instant: two records, two candidates
-            _row("OVERRIDE", "o2", created="2026-10-27T11:00:00+05:30", desk_action="WAIT")]  # same session, same record: deduped
+    rows = [_row("TAKE", "t"),
+            _row("OVERRIDE", "t", desk_action="WAIT"),  # same ticket, same instant: two records, two candidates
+            # same session, same record: deduped
+            _row("OVERRIDE", "o2", created="2026-10-27T11:00:00+05:30", desk_action="WAIT")]
     cands, _ = load_candidates(rows)
     assert sorted(c.record for c in cands) == ["desk", "override"]
     desk, over = sorted(cands, key=lambda c: c.record)

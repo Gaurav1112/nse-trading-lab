@@ -553,9 +553,15 @@ def _candidate_row(v: DeskVerdict) -> dict:
             "Why": "" if v.action is Action.TAKE else (blocks or v.headline)}
 
 
+def _warn_scan_failures(istate, have_scan: bool) -> None:
+    """Scan symbols that gave no verdict (no bars, or a TAKE withheld because it could not be logged)."""
+    for sym, why in (istate["ok"][1] if have_scan else ()):
+        st.warning(f"Intraday {sym}: {why}")
+
+
 def _skipped_row(sym: str, why: str) -> dict:
-    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Entry": "—", "Stop": "—", "T1": "—", "T2": "—",
-            "Qty": "—", "Max loss": "—", "Profit T1": "—", "Win odds": "—", "Why": why}
+    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Entry": "—", "Stop": "—", "T1": "—",
+            "T2": "—", "Qty": "—", "Max loss": "—", "Profit T1": "—", "Win odds": "—", "Why": why}
 
 
 def _load_candidates(have_plan: bool, have_scan: bool) -> None:
@@ -631,8 +637,10 @@ with tab_choose:
             rows, labels = [], []
         if not rows:
             st.info("No candidates today — no trade is a valid answer.")
+            _warn_scan_failures(istate, have_scan)
         else:
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            _warn_scan_failures(istate, have_scan)
             pick = st.selectbox("Open a trade card", labels, key="desk_choose_pick")
             i = labels.index(pick) if pick in labels else 0
             with st.container(border=True):

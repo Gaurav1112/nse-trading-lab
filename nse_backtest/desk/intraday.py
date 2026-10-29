@@ -28,14 +28,19 @@ def orb_scan(profile, frames15: dict[str, pd.DataFrame], limits: Limits, ctx_bas
         try:
             v = check_trade(df, sym, profile, Mode.INTRADAY, limits, (ctx_by_symbol or {}).get(sym, ctx_base),
                             robustness=False, replays=replays, audit=False, quote=(quotes or {}).get(sym))
-            if audit_path is not None and v.action is Action.TAKE:
-                append_verdict(v, audit_path)
         except ValueError as e:
             failures.append((sym, str(e)))
             continue
         except OSError as e:  # an audit read/write problem for one symbol: that symbol fails, the rest still return
             failures.append((sym, f"{type(e).__name__}: {e}"))
             continue
+        if audit_path is not None and v.action is Action.TAKE:
+            try:
+                append_verdict(v, audit_path)
+            except OSError as e:
+                failures.append((sym, f"desk said TAKE but it could not be recorded ({type(e).__name__}: {e}), "
+                                      "so it is withheld — fix the audit log and rescan"))
+                continue
         verdicts.append(v)
 
     def key(v: DeskVerdict):

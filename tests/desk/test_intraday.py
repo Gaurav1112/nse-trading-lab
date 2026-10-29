@@ -81,7 +81,7 @@ def test_orb_scan_oserror_for_one_symbol_is_a_failure_others_still_return(tmp_pa
     verdicts, failures = intraday.orb_scan(NSE, {s: pd.DataFrame() for s in ("AAA", "BAD", "CCC")},
                                            Limits(capital=100_000), ctx(), audit_path=path)
     assert [v.plan.symbol for v in verdicts] == ["AAA", "CCC"]
-    assert len(failures) == 1 and failures[0][0] == "BAD" and "audit disk full" in failures[0][1]
+    assert failures == [("BAD", "OSError: audit disk full")]  # not a TAKE write: text unchanged
 
 
 def test_orb_scan_oserror_while_logging_a_take_is_that_symbols_failure(tmp_path, monkeypatch):
@@ -95,4 +95,5 @@ def test_orb_scan_oserror_while_logging_a_take_is_that_symbols_failure(tmp_path,
     verdicts, failures = intraday.orb_scan(NSE, {"AAA": pd.DataFrame(), "CCC": pd.DataFrame()},
                                            Limits(capital=100_000), ctx(), audit_path=tmp_path / "a.jsonl")
     assert calls == ["AAA"] and [v.plan.symbol for v in verdicts] == ["CCC"]
-    assert failures[0][0] == "AAA" and "read-only filesystem" in failures[0][1]
+    assert failures == [("AAA", "desk said TAKE but it could not be recorded (OSError: read-only filesystem), "
+                                "so it is withheld — fix the audit log and rescan")]
