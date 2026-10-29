@@ -16,14 +16,16 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from . import calendars as cal
 from .costs import round_trip_cost
 from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 1  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
+SCOREBOARD_VERSION = 2  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
+MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
 
 
@@ -213,11 +215,41 @@ def _all_finite(*arrs) -> bool:
     return all(bool(np.isfinite(a).all()) for a in arrs)
 
 
+NO_CALENDAR = "(holiday calendar not available)"
+
+
+def _missing_session(market: str, dates: list[date]) -> date | None:
+    """The first trading session missing between consecutive bar dates (None when the dates are consecutive
+    trading sessions). Uncovered years: every weekday is a session."""
+    profile = get_profile(market)
+    for a, b in zip(dates, dates[1:]):
+        if cal.trading_days_between(profile, a, b) > 0:
+            return cal.next_trading_day(profile, a)
+    return None
+
+
+def _with_calendar_note(o: Outcome, first: date, last: date) -> Outcome:
+    """Say so on the outcome when any date it relied on lies in a year without a holiday calendar."""
+    if cal.first_uncovered_year(get_profile(o.candidate.market), first, last) is None:
+        return o
+    from dataclasses import replace
+    return replace(o, note=f"{o.note} {NO_CALENDAR}" if o.note else NO_CALENDAR)
+
+
 def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
                   session_closed_today: bool = False) -> Outcome:
     """CNC LIMIT at entry for one session. Fill bar: filled iff Low <= entry at min(Open, entry); only the stop
     can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close.
-    Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial."""
+    Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial.
+    The bars from the fill session through the last bar used must be consecutive trading sessions: a missing
+    session (where the stop could have been hit) makes the trade UNAVAILABLE, never a guess."""
+    o, last_used = _resolve_swing(c, daily, fill_session=fill_session, now=now,
+                                  session_closed_today=session_closed_today)
+    return _with_calendar_note(o, fill_session, max(fill_session, last_used or fill_session))
+
+
+def _resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
+                   session_closed_today: bool) -> tuple[Outcome, date | None]:
     tz = ZoneInfo(get_profile(c.market).tz)
     today = now.astimezone(tz).date()
     if not session_closed_today:
@@ -226,29 +258,36 @@ def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now:
     hits = np.flatnonzero(dates == pd.Timestamp(fill_session))
     if len(hits) == 0:
         if fill_session > today or (fill_session == today and not session_closed_today):
-            return _outcome(c, Status.OPEN, "waiting for the fill session to close")
-        return _outcome(c, Status.UNAVAILABLE, "no bar for fill session")
+            return _outcome(c, Status.OPEN, "waiting for the fill session to close"), None
+        return _outcome(c, Status.UNAVAILABLE, "no bar for fill session"), None
     i = int(hits[0])
     op, hi, lo, cl = (daily[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
     if not _all_finite(op[i:i + c.max_hold_bars + 1], hi[i:i + c.max_hold_bars + 1],
                        lo[i:i + c.max_hold_bars + 1], cl[i:i + c.max_hold_bars + 1]):
-        return _outcome(c, Status.UNAVAILABLE, "bad price data")
+        return _outcome(c, Status.UNAVAILABLE, "bad price data"), None
     if not lo[i] <= c.entry:
-        return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session")
+        return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session"), None
     fill = min(op[i], c.entry)
     fill_at = daily.index[i]
     if lo[i] <= c.stop:  # target on the fill bar is ignored (intrabar order unknown)
-        return _finish(c, fill, fill_at, min(op[i], c.stop), fill_at, 0, "stop touched on the fill bar")
+        return _finish(c, fill, fill_at, min(op[i], c.stop), fill_at, 0, "stop touched on the fill bar"), None
     last = min(i + c.max_hold_bars, len(daily) - 1)
     res = _walk(op, hi, lo, cl, i + 1, last, c.stop, c.target_1) if last > i else None
     if res is not None:
         px, j = res
-        return _finish(c, fill, fill_at, px, daily.index[j], j - i, "")
-    if i + c.max_hold_bars <= len(daily) - 1:
+        o = _finish(c, fill, fill_at, px, daily.index[j], j - i, "")
+    elif i + c.max_hold_bars <= len(daily) - 1:
         j = i + c.max_hold_bars
-        return _finish(c, fill, fill_at, cl[j], daily.index[j], c.max_hold_bars, "time exit")
-    return _outcome(c, Status.OPEN, "holding", fill=float(fill), fill_at=str(fill_at),
-                    mtm=_mtm(c, fill, cl[last]), held=last - i)
+        o = _finish(c, fill, fill_at, cl[j], daily.index[j], c.max_hold_bars, "time exit")
+    else:
+        j = last
+        o = _outcome(c, Status.OPEN, "holding", fill=float(fill), fill_at=str(fill_at),
+                     mtm=_mtm(c, fill, cl[last]), held=last - i)
+    used = [d.date() for d in dates[i:j + 1]]
+    missing = _missing_session(c.market, used)
+    if missing is not None:
+        return _outcome(c, Status.UNAVAILABLE, f"missing daily bar for {missing.isoformat()}"), used[-1]
+    return o, used[-1]
 
 
 def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
@@ -316,12 +355,17 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
 # ---------------------------------------------------------------- statistics
 
 def _verdict(n: int, mean_pred_mc: float | None, ci_low: float, ci_high: float, mean_r: float,
-             n_pred: int = 0) -> str:
+             n_pred: int = 0, unavailable: int = 0) -> str:
+    """First rule that applies: too few trades, Losing (bad news is never hidden), too many trades that could
+    not be replayed, odds missing, Worse, Matching, else Inconclusive."""
     eps = 1e-9
     if n < MIN_TRADES:
         return f"Not enough trades yet ({n}/{MIN_TRADES}) — keep paper-trading"
     if ci_high < 0:
         return "Losing — do not trade this with real money"
+    if unavailable > MAX_UNAVAILABLE_SHARE * (n + unavailable):
+        return (f"Inconclusive — {unavailable} trades could not be replayed; "
+                "fix the data before trusting this")
     if n_pred < MIN_PRED_COVERAGE * n or mean_pred_mc is None:
         return f"Inconclusive — keep paper-trading (odds missing for {n - n_pred} of {n} trades)"
     if ci_high < mean_pred_mc - eps:
@@ -360,7 +404,8 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
     return ScoreStats(market, mode, n, wins, 100.0 * wins / n, mean_r, mean_pred_mc, _mean(hist), _mean(gaps),
                       ci_low, ci_high, dd, tuple(float(x) for x in cum), count(Status.NOT_FILLED),
                       count(Status.OPEN), count(Status.UNAVAILABLE),
-                      _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r, len(mc)), len(mc) / n)
+                      _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r, len(mc), count(Status.UNAVAILABLE)),
+                      len(mc) / n)
 
 
 def summarize(outcomes: Iterable[Outcome], *, seed: int = 19, resamples: int = 2000) -> list[ScoreStats]:

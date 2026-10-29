@@ -350,3 +350,99 @@ def test_intraday_first_bar_one_slot_late_unavailable():
 def test_intraday_complete_session_resolves():
     bars = _session({"09:45": (99.5, 100.1, 99, 99.5)})
     assert resolve_intraday(_ic(), bars, flat_by=time(15, 15), now=NOW).status is Status.TIME
+
+
+# ---------------------------------------------------------------- review round R1 (scoreboard honesty)
+
+def _unavail(i):
+    from nse_backtest.desk.scoreboard import unavailable
+    return unavailable(_outs([1.0])[0].candidate.__class__(
+        datetime(2026, 6, 1, tzinfo=IST) + pd.Timedelta(days=i).to_pytimedelta(), "NSE", "S", Mode.SWING,
+        100, 98, 103, 15, 0, 10, 0.3, None, f"u{i}"), "could not replay (KeyError): 'Low'")
+
+
+def test_verdict_counts_unavailable_trades():
+    # probe_sb: 30 winners and 40 trades that could not be replayed must never read as Matching
+    rng = np.random.default_rng(1)
+    outs = _outs(list(0.5 + 0.1 * rng.standard_normal(30)), mc=0.3) + [_unavail(i) for i in range(40)]
+    s = summarize(outs)[0]
+    assert s.n == 30 and s.unavailable == 40
+    assert s.verdict == "Inconclusive — 40 trades could not be replayed; fix the data before trusting this"
+
+
+def test_verdict_unavailable_gate_threshold():
+    winners = _outs([0.30] * 36, mc=0.30)
+    assert summarize(winners + [_unavail(i) for i in range(4)])[0].verdict.startswith("Matching")  # 4/40 = 10%
+    s = summarize(winners + [_unavail(i) for i in range(5)])[0]  # 5/41 > 10%
+    assert s.verdict.startswith("Inconclusive — 5 trades could not be replayed")
+
+
+def test_verdict_losing_beats_unavailable_gate():
+    s = summarize(_outs([-1.0, -0.5] * 20) + [_unavail(i) for i in range(40)])[0]
+    assert s.verdict == "Losing — do not trade this with real money"
+
+
+def test_verdict_unavailable_gate_before_coverage_gate_and_small_n_first():
+    s = summarize(_outs([0.30] * 40) + [_unavail(i) for i in range(10)])[0]
+    assert s.verdict.startswith("Inconclusive — 10 trades could not be replayed")
+    s = summarize(_outs([0.30] * 10, mc=0.3) + [_unavail(i) for i in range(10)])[0]
+    assert s.verdict.startswith("Not enough trades yet (10/30)")
+
+
+# ---- swing bar gaps: a missing session is never walked over
+GAP_CREATED = datetime(2026, 9, 1, 18, 0, tzinfo=IST)
+
+
+def _gap_frame():
+    days = pd.bdate_range("2026-09-02", periods=8)
+    rows = {"Open": [101, 100, 99, 97, 104, 106, 108, 109], "High": [102, 101, 100, 98, 106, 108, 111, 112],
+            "Low": [99.5, 99, 98, 93, 103, 105, 107, 108], "Close": [100, 99, 98, 94, 105, 107, 110, 111]}
+    return pd.DataFrame(rows, index=days), days
+
+
+def _gap_cand():
+    return Candidate(GAP_CREATED, "NSE", "FAKE", Mode.SWING, 100.0, 95.0, 110.0, 15, 0.1, 10, 0.3, None, "h|x")
+
+
+def test_swing_missing_stop_bar_is_unavailable():
+    full, days = _gap_frame()
+    assert resolve_swing(_gap_cand(), full, fill_session=date(2026, 9, 2), now=NOW).status is Status.LOST
+    o = resolve_swing(_gap_cand(), full.drop(days[3]), fill_session=date(2026, 9, 2), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.realised_r is None
+    assert o.note == "missing daily bar for 2026-09-07"
+
+
+def test_swing_gap_after_exit_is_harmless_and_holiday_is_not_a_gap():
+    full, days = _gap_frame()
+    o = resolve_swing(_gap_cand(), full.drop(days[6]), fill_session=date(2026, 9, 2), now=NOW)
+    assert o.status is Status.LOST and o.note == ""  # exit on the 7th, the gap is after it
+    # 2026-10-20 is an NSE holiday: Mon 19 -> Wed 21 is consecutive
+    idx = pd.DatetimeIndex(["2026-10-19", "2026-10-21"])
+    df = pd.DataFrame([(101, 101.5, 99.5, 100.5), (100.5, 103.2, 100.1, 103)], index=idx,
+                      columns=["Open", "High", "Low", "Close"])
+    c = cand(created=datetime(2026, 10, 16, 18, 0, tzinfo=IST))
+    assert resolve_swing(c, df, fill_session=date(2026, 10, 19), now=NOW).status is Status.WON
+
+
+def test_swing_gap_while_open_is_unavailable():
+    df = daily([(101, 101.5, 99.5, 100.5), (100.5, 102, 99.5, 101), (100.5, 102, 99.5, 101)])
+    df = df.drop(df.index[1])
+    o = resolve_swing(cand(hold=5), df, fill_session=FILL, now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note == "missing daily bar for 2026-10-28"
+
+
+def test_swing_uncovered_year_notes_say_so():
+    c = cand(created=datetime(2027, 3, 1, 18, 0, tzinfo=IST))
+    df = daily([(101, 101.5, 99.5, 100.5), (100.5, 103.2, 100.1, 103)], start="2027-03-02")
+    o = resolve_swing(c, df, fill_session=date(2027, 3, 2), now=datetime(2027, 4, 1, 12, 0, tzinfo=IST))
+    assert o.status is Status.WON and o.note == "(holiday calendar not available)"
+    gap = df.drop(df.index[1:2])
+    gap = pd.concat([gap, daily([(100.5, 103.2, 100.1, 103)], start="2027-03-04")])
+    o = resolve_swing(c, gap, fill_session=date(2027, 3, 2), now=datetime(2027, 4, 1, 12, 0, tzinfo=IST))
+    assert o.status is Status.UNAVAILABLE
+    assert o.note == "missing daily bar for 2027-03-03 (holiday calendar not available)"
+
+
+def test_scoreboard_version_bumped_for_r1_rules():
+    from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
+    assert SCOREBOARD_VERSION == 2  # gap, price-scale and fill rules changed: version-1 caches are not served
