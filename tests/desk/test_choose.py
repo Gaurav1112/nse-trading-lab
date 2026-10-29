@@ -352,4 +352,4 @@ def test_h5a_fix_cli_choose_allows_a_short_off_hostile_days(desk, monkeypatch, c
     assert cli.main(["check", "ABC", "--choose"]) == 0
     out = capsys.readouterr().out
     assert "YOUR OVERRIDE (SHORT) — the desk said SKIP" in out and len(_audit_rows(tmp_path)) == 1
-    assert "Odds: unavailable — short odds model arrives in the next update" in out
+    assert "Odds: unavailable (not enough history for a reliable estimate)" in out  # H5b: no placeholder

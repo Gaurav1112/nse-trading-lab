@@ -322,3 +322,91 @@ def test_short_context_carries_the_cached_edge_or_why_not(offline_short, tmp_pat
     (tmp_path / "desk_shortcheck.json").write_text("{broken")
     c = session._with_fno(ctx, NSE, None)
     assert c.short_edge is None and "unreadable" in c.short_edge_why
+
+
+# ---------------------------------------------------------------- CLI: shortcheck and check --side short
+from nse_backtest.desk import cli  # noqa: E402
+
+
+@pytest.fixture
+def cli_now(monkeypatch):
+    monkeypatch.setattr(cli, "market_now", lambda p: NOW)
+
+
+def test_cli_shortcheck_prints_and_caches(offline_short, cli_now, capsys, tmp_path):
+    assert cli.main(["shortcheck"]) == 0
+    out = capsys.readouterr().out
+    assert "Pooled ORB-short history NSE" in out
+    assert "trades 200" in out and "expectancy +" in out and "proven yes" in out
+    assert "2 eligible symbols" in out and "computed now, cached for 2026-10-30" in out
+    assert (tmp_path / "desk_shortcheck.json").exists()
+    assert cli.main(["shortcheck", "--market", "NSE"]) == 0
+    assert "cached for 2026-10-30" in capsys.readouterr().out and offline_short == ["AAA", "BBB"]
+    assert cli.main(["shortcheck", "--refresh"]) == 0
+    assert offline_short == ["AAA", "BBB"] * 2
+
+
+def test_cli_shortcheck_json(offline_short, cli_now, capsys):
+    assert cli.main(["shortcheck", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["n"] == 200 and d["proven"] is True and d["day"] == "2026-10-30" and d["cached"] is False
+    assert d["expectancy_r"] == pytest.approx(1.5 - short_cost_fn(NSE, 2.0)(99.0, 97.5))
+
+
+def test_cli_shortcheck_not_proven_says_why(offline_short, cli_now, capsys, monkeypatch):
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: frozenset({"AAA"}))
+    assert cli.main(["shortcheck"]) == 0
+    out = capsys.readouterr().out
+    assert "trades 100" in out and "proven no" in out
+    assert "Every short stays at most WAIT: edge not proven on the desk's own history yet (100 trades, +" in out
+
+
+def test_cli_shortcheck_errors(offline_short, cli_now, capsys, monkeypatch):
+    assert cli.main(["shortcheck", "--market", "US"]) == 2
+    assert "NSE only" in capsys.readouterr().err
+    monkeypatch.setattr(loaders, "fno_underlyings", lambda p, now=None: None)
+    assert cli.main(["shortcheck"]) == 2
+    assert "could not verify F&O eligibility" in capsys.readouterr().err
+
+
+def _fake_short_verdict():
+    from nse_backtest.desk.checks import CheckContext
+    from nse_backtest.desk.models import Limits, Mode, Side
+    from nse_backtest.desk.service import check_trade
+    from tests.desk.test_verdict_service import _breakdown_frame, _pin_ctx
+    df, _ = _breakdown_frame()
+    c = _pin_ctx(now=datetime(2026, 10, 29, 9, 55, tzinfo=ZoneInfo("Asia/Kolkata")), regime="HOSTILE",
+                 fno=frozenset({"ABC"}), short_edge=ShortEdge.from_trades(143, 0.0512))
+    assert isinstance(c, CheckContext)
+    return check_trade(df, "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000), c, side=Side.SHORT, audit=False,
+                       replays=1000, robustness=False)
+
+
+def test_cli_check_side_short_runs_a_short_check(offline_short, cli_now, capsys, monkeypatch):
+    from nse_backtest.desk.models import Mode, Side
+    v = _fake_short_verdict()
+    asked = []
+    monkeypatch.setattr(session, "run_check", lambda p, sym, mode, limits, **k: asked.append((mode, k)) or v)
+    assert cli.main(["check", "ABC", "--mode", "intraday", "--side", "short"]) == 0
+    out = capsys.readouterr().out
+    assert asked[0][0] is Mode.INTRADAY and asked[0][1]["side"] is Side.SHORT
+    assert "Plan (intraday, short)" in out and "short odds arrive" not in out
+    assert "Odds (1000 replays): P(target)" in out
+    assert "edge not proven on the desk's own history yet (143 trades, +0.05R)" in out
+    assert cli.main(["check", "ABC", "--mode", "intraday"]) == 0
+    assert asked[1][1]["side"] is Side.LONG
+
+
+def test_cli_check_side_short_is_nse_intraday_only(offline_short, cli_now, capsys):
+    assert cli.main(["check", "ABC", "--side", "short"]) == 2
+    assert "--side short needs --mode intraday" in capsys.readouterr().err
+    assert cli.main(["check", "AAPL", "--market", "US", "--mode", "intraday", "--side", "short"]) == 2
+    assert "shorts are NSE only" in capsys.readouterr().err
+
+
+def test_cli_short_without_odds_says_unavailable_plainly(capsys):
+    from dataclasses import replace as _replace
+    v = _replace(_fake_short_verdict(), odds=None)
+    text = "\n".join(cli.format_verdict(v, NSE))
+    assert "Odds: unavailable (not enough history for a reliable estimate)" in text
+    assert "next update" not in text

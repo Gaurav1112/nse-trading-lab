@@ -1,4 +1,5 @@
-"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings,scoreboard}. Places nothing."""
+"""Command line: python -m nse_backtest.desk {check,plan,positions,intraday,settings,scoreboard,shortcheck}. Places
+nothing."""
 from __future__ import annotations
 
 import argparse
@@ -14,9 +15,11 @@ from zoneinfo import ZoneInfo
 from . import audit, loaders, session
 from . import calendars as cal
 from .markets import get_profile, universe
-from .models import Action, DeskVerdict, Mode, summary_fields
+from .models import Action, DeskVerdict, Mode, Side, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
+from .checks import short_edge_check
+from .shortcheck import edge_line
 from .tradecard import DAILY_LOSS_NOTE, build_card
 from .verdict import data_broken, is_quick, safety_blocked
 
@@ -69,9 +72,7 @@ def format_verdict(v: DeskVerdict, profile, *, ticket: bool = True) -> list[str]
                  f"T2 {m(p.target_2)}  R {m(p.risk_per_share)}/share  basis: {p.stop_basis}")
     lines.append(f"Sizing: qty {s.qty}, binding limit {s.binding_limit}, risk {m(s.risk_amount)}, "
                  f"notional {m(s.notional)}, costs {m(s.costs)}. {s.note}")
-    if o is None and p.is_short:  # H5b replaces this with the short odds
-        lines.append("Odds: unavailable — short odds model arrives in the next update")
-    elif o is None:
+    if o is None:
         lines.append("Odds: unavailable (not enough history for a reliable estimate)")
     else:
         lines.append(f"Odds ({o.replays} replays): P(target) {_pct(o.p_target)}  P(stop) {_pct(o.p_stop)}  "
@@ -151,11 +152,16 @@ def _log_override(v: DeskVerdict, card) -> None:
 
 
 def cmd_check(a, profile) -> int:
+    side = Side(a.side)
+    if side is Side.SHORT and profile.code != "NSE":
+        raise ValueError("shorts are NSE only")
+    if side is Side.SHORT and Mode(a.mode) is not Mode.INTRADAY:
+        raise ValueError("--side short needs --mode intraday (an ORB breakdown short is MIS, squared off the same day)")
     limits, warn = _limits(profile, a.json)
     if a.qty is not None and a.qty < 1:
         raise ValueError(f"qty must be a whole number of at least 1, got {a.qty}")
     v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
-                          target=a.target, on_warning=_stderr_warn, desk_entry=bool(a.desk_entry))
+                          target=a.target, on_warning=_stderr_warn, desk_entry=bool(a.desk_entry), side=side)
     taken = v.action is Action.TAKE
     choose = bool(a.choose) and not taken
     refused = None
@@ -481,6 +487,36 @@ def cmd_scoreboard(a, profile) -> int:
     return _finish(format_scoreboard(res, label))  # 0 even when the verdict is "Losing": it is information
 
 
+def cmd_shortcheck(a, profile) -> int:
+    """The pooled ORB-short history (eligible universe, HOSTILE days, 2x slippage), cached for the day."""
+    if profile.code != "NSE":
+        raise ValueError("ORB shorts are NSE only")
+    res = session.run_shortcheck(profile, refresh=bool(a.refresh), on_warning=_stderr_warn,
+                                 now=market_now(profile))
+    e = res.edge
+    if a.json:
+        _emit_json({"market": profile.code, "day": res.day, "n": e.n, "expectancy_r": e.expectancy_r,
+                    "proven": e.proven, "symbols": res.symbols, "cached": res.cached, "failures": res.failures})
+        return 0
+    from .checks import CheckContext
+    gate = short_edge_check(CheckContext(profile, loaders.default_limits(profile), market_now(profile),
+                                         short_edge=e))
+    syms = ("" if res.symbols is None else
+            f" over {res.symbols} eligible symbol{'' if res.symbols == 1 else 's'}")
+    exp = "n/a" if e.expectancy_r is None else f"{e.expectancy_r:+.2f}R"
+    lines = [f"Pooled ORB-short history {profile.code}{syms} (HOSTILE days only, 2× slippage)",
+             f"  trades {e.n}  expectancy {exp}  proven {'yes' if e.proven else 'no'}",
+             f"  {edge_line(e)}",
+             "  " + ("cached for " if res.cached else "computed now, cached for ") + res.day.isoformat()]
+    if e.proven:
+        lines.append("Shorts can be a desk TAKE today when every other check passes.")
+    else:
+        lines.append(f"Every short stays at most WAIT: {gate.reason}")
+    if res.failures:
+        lines += ["", "Not pooled:"] + [f"  {s}: {why}" for s, why in res.failures]
+    return _finish(lines)
+
+
 # ---------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -497,6 +533,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("symbol")
     common(c)
     c.add_argument("--mode", choices=["swing", "intraday"], default="swing")
+    c.add_argument("--side", choices=["long", "short"], default="long",
+                   help="short: an opening-range breakdown short (NSE F&O stocks, --mode intraday, HOSTILE days; at "
+                        "most WAIT until the pooled short history proves the edge)")
     c.add_argument("--entry", type=float, help="your entry price (default: the last close)")
     c.add_argument("--desk-entry", action="store_true",
                    help="swing: use the daily plan's own entry (the breakout above the 20-day high; the close "
@@ -530,6 +569,10 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("--market", default="ALL", help="NSE, US or ALL (default ALL)")
     sb.add_argument("--json", action="store_true", help="print JSON instead of text")
     sb.set_defaults(fn=cmd_scoreboard)
+    sc = sub.add_parser("shortcheck", help="pooled ORB-short history: may shorts be a desk TAKE today?")
+    common(sc)
+    sc.add_argument("--refresh", action="store_true", help="recompute even when today's figure is cached")
+    sc.set_defaults(fn=cmd_shortcheck)
     return ap
 
 
