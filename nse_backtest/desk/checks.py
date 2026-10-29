@@ -99,6 +99,10 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 _QUOTE_MAX_AGE_MIN = 20
 
 
+def _days(n: int) -> str:
+    return "day" if n == 1 else "days"
+
+
 def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext,
                current_price: float | None = None) -> list[Check]:
     """`current_price` is the price the verdict uses (live quote, else the plan's last close)."""
@@ -140,7 +144,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     except ZeroDivisionError:
         rr = float("nan")
     d = 2
-    if abs(rr - lim.min_rr) < 0.005:  # widen until the two numbers visibly differ
+    if abs(rr - lim.min_rr) < 1e-9:
+        pass  # equal: two decimals on both sides
+    elif abs(rr - lim.min_rr) < 0.005:  # widen until the two numbers visibly differ
         d = 3
         while d < 9 and f"{rr:.{d}f}" == f"{lim.min_rr:.{d}f}":
             d += 1
@@ -229,9 +235,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         if age < 0:
             out.append(_ck("freshness", W, "Last bar is in the future — check the clock/data"))
         elif age > 3:
-            out.append(_ck("freshness", B, f"Data is stale: last daily bar is {age} days old (limit 3)"))
+            out.append(_ck("freshness", B, f"Data is stale: last daily bar is {age} {_days(age)} old (limit 3)"))
         else:
-            out.append(_ck("freshness", P, f"Last daily bar is {age} days old (limit 3)"))
+            out.append(_ck("freshness", P, f"Last daily bar is {age} {_days(age)} old (limit 3)"))
     else:
         age_min = (now - bar).total_seconds() / 60
         if age_min < -5:
@@ -284,9 +290,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     if turn is None:
         out.append(_ck("liquidity", W, "Liquidity unavailable: 20-day turnover could not be computed"))
     elif turn < prof.min_turnover:
-        out.append(_ck("liquidity", B, f"20-day turnover {prof.money(turn)} is below the minimum {prof.money(prof.min_turnover)}"))
+        out.append(_ck("liquidity", B, f"20-day turnover {prof.money_compact(turn)} is below the minimum {prof.money_compact(prof.min_turnover)}"))
     else:
-        out.append(_ck("liquidity", P, f"20-day turnover {prof.money(turn)} meets the minimum {prof.money(prof.min_turnover)}"))
+        out.append(_ck("liquidity", P, f"20-day turnover {prof.money_compact(turn)} meets the minimum {prof.money_compact(prof.min_turnover)}"))
 
     # 12 earnings
     ne = ctx.next_earnings
@@ -310,7 +316,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
             if days < 0:
                 out.append(_ck("earnings", W, f"Earnings date looks stale: {ne} is in the past"))
             elif days <= window:
-                out.append(_ck("earnings", W, f"Earnings on {ne} are {days} days away, inside the {window}-day hold window"))
+                out.append(_ck("earnings", W, f"Earnings on {ne} are {days} {_days(days)} away, inside the {window}-day hold window"))
             else:
                 out.append(_ck("earnings", P, f"Next earnings on {ne} are outside the {window}-day hold window"))
         elif ne == now.date():

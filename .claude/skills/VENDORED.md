@@ -18,6 +18,8 @@
   now requires `re.fullmatch(r"\d{1,10}", args.cik)` and exits 2 otherwise. Local change; reapply it if you re-vendor.
 - N8: both `SKILL.md` files said "Nothing places an order except `/trader-broker` ...", pointing at a skill
   that is not vendored. **Changed here** to "This repo never places orders; there is no broker skill."
+  The `trader-news` input table also said "trader-broker records fills there"; reworded to "you record
+  fills there yourself".
   Local change; reapply it if you re-vendor.
 - N3: feeds are parsed with `xml.etree.ElementTree`. Acceptable here (trusted hosts, no DTD
   resolution); noted for completeness.

@@ -528,3 +528,35 @@ def test_lr_us_variants_use_et_dates():
     cs = run_checks(plan(market="US"), SIZE, ODDS, ctx(profile=US, price_is_live=True, quote_as_of=datetime(2026, 10, 29, 11, 0, tzinfo=ET),
                     now=datetime(2026, 10, 29, 11, 5, tzinfo=ET)), current_price=100.0)
     assert [c for c in cs if c.name == "live_price"][0].status is Status.PASS
+
+
+# ---- Last round: readable reasons ----
+def _reason(name, p=None, **kw):
+    return [c for c in run_checks(p or plan(), SIZE, ODDS, ctx(**kw)) if c.name == name][0].reason
+
+
+def test_lr_reward_risk_equal_shows_two_decimals_both_sides():
+    assert _reason("reward_risk", plan(t1=103.0), limits=Limits(capital=100_000, min_rr=1.5)) == \
+        "Reward:risk 1:1.50 meets minimum 1:1.50"
+
+
+def test_lr_reward_risk_widens_only_when_values_differ_but_print_equal():
+    r = _reason("reward_risk", plan(t1=103.0001), limits=Limits(capital=100_000, min_rr=1.5))
+    assert r == "Reward:risk 1:1.5001 meets minimum 1:1.5000"
+
+
+def test_lr_freshness_pluralises_days():
+    one = _reason("freshness", plan(last_bar="2026-10-28T00:00:00"))
+    assert "1 day old" in one and "1 days" not in one
+    assert "2 days old" in _reason("freshness", plan(last_bar="2026-10-27T00:00:00"))
+    assert "0 days old" in _reason("freshness", plan(last_bar="2026-10-29T00:00:00"))
+
+
+def test_lr_liquidity_compact_money_per_market():
+    assert NSE.money_compact(17_727_000_000) == "₹1,772.7 Cr"
+    assert NSE.money_compact(5e7) == "₹5.0 Cr"
+    assert US.money_compact(1_234_500_000) == "$1,234.5M"
+    assert US.money_compact(2e7) == "$20.0M"
+    assert _reason("liquidity", turnover_20d=17_727_000_000) == "20-day turnover ₹1,772.7 Cr meets the minimum ₹5.0 Cr"
+    assert "$1,234.5M" in _reason("liquidity", profile=US, turnover_20d=1_234_500_000)
+    assert _reason("liquidity", profile=US, turnover_20d=1e6) == "20-day turnover $1.0M is below the minimum $20.0M"

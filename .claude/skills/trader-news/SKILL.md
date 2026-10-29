@@ -35,7 +35,7 @@ python3 "${CLAUDE_SKILL_DIR}/news.py" --no-sec --json
 | --- | --- |
 | `--tickers`, else `trader/watchlist.json` | the scanner's hits (trader-scanner) |
 | `trader/plan.json` | the trade you are planning (trader-exit) |
-| `trader/portfolio.json` | what you hold (trader-broker records fills there) |
+| `trader/portfolio.json` | what you hold (you record fills there yourself) |
 | Yahoo Finance headline RSS | `https://feeds.finance.yahoo.com/rss/2.0/headline?s=TSLA&region=US&lang=en-US` |
 | Yahoo Finance chart endpoint | the last price against yesterday's close (unofficial, can lag) |
 | SEC EDGAR company Atom feed | 8-K by default (`--forms 8-K,10-Q` for more); needs `sec_user_agent` in `trader/config.json` or `SEC_USER_AGENT`, else filings are skipped with a note |

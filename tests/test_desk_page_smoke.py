@@ -170,7 +170,8 @@ def test_intraday_scan_cache_key_has_date(monkeypatch, tmp_path):
     monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], []))
     at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
     at.button(key="desk_scan").click().run()
-    assert str(("intraday", "NSE", _market_today())) in at.session_state.filtered_state  # A11: market-tz date
+    keys = [k for k in at.session_state.filtered_state if k.startswith("('intraday', 'NSE', '" + _market_today())]
+    assert len(keys) == 1 and len(eval(keys[0])) == 4  # noqa  # market-tz date and the limits hash
 
 
 # ---------------------------------------------------------------- fix round 2

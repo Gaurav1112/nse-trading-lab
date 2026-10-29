@@ -55,7 +55,10 @@ def _default_fetcher(url: str) -> str:
         final = urlparse(resp.geturl())
         if final.scheme != "https" or final.hostname != _ALLOWED_HOST:
             raise ValueError(f"ban list fetch ended off NSE ({final.scheme}://{final.hostname})")
-        return resp.read(_MAX_BYTES).decode("utf-8")
+        body = resp.read(_MAX_BYTES + 1)
+        if len(body) > _MAX_BYTES:
+            raise ValueError(f"ban list response too large (over {_MAX_BYTES} bytes): refusing a truncated list")
+        return body.decode("utf-8")
 
 
 def _atomic_write(path: Path, text: str) -> None:

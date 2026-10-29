@@ -98,6 +98,10 @@ Missing or failed data is never a PASS: it becomes a WARN or a BLOCK.
 | 16 | `robustness` | — | over 25% of candle-noise replays lose, or the test was not run |
 | 17 | `pdt` | US intraday with the PDT guard on: 3+ day trades in the last 5 weekdays | the day-trade count is unknown |
 
+Besides the BLOCK conditions in the table, the desk also fails closed (BLOCK) when the last bar's time cannot
+be read, when the clock has no timezone, when the Monte Carlo expectancy is not a finite number, or when the
+live price is not a valid number.
+
 ### The Time Machine
 
 The odds come from the stock's own bars, not from a model. A block-bootstrap Monte Carlo replays the exact

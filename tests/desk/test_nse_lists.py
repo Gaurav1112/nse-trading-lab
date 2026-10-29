@@ -91,7 +91,7 @@ def test_b2_default_fetcher_bounds_the_read(monkeypatch):
     from nse_backtest.desk import nse_lists
     r = _Resp(SAMPLE.encode(), "https://nsearchives.nseindia.com/content/fo/fo_secban.csv")
     _patch_urlopen(monkeypatch, r)
-    assert nse_lists._default_fetcher(nse_lists.FNO_BAN_URL) == SAMPLE and r.asked == 1_000_000
+    assert nse_lists._default_fetcher(nse_lists.FNO_BAN_URL) == SAMPLE and r.asked == 1_000_001  # reads MAX+1 to detect truncation
 
 
 @pytest.mark.parametrize("final", ["http://nsearchives.nseindia.com/content/fo/fo_secban.csv",
@@ -116,3 +116,22 @@ def test_b2_cache_write_uses_unique_temp_and_leaves_none(tmp_path, monkeypatch):
     fetch_fno_ban(tmp_path, date(2026, 10, 29), fetcher=lambda u: SAMPLE)
     assert len(made) == 2 and all(k["dir"] == tmp_path for k in made)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["fo_secban.csv", "fo_secban.date"]
+
+
+# ---- Last round: bounded read raises on truncation ----
+def test_lr_default_fetcher_raises_when_body_exceeds_cap(monkeypatch):
+    import urllib.request
+    from nse_backtest.desk import nse_lists
+
+    class R:
+        def __init__(self, n): self.n = n
+        def geturl(self): return nse_lists.FNO_BAN_URL
+        def read(self, k=-1): return b"x" * (self.n if k < 0 else min(k, self.n))
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10: R(nse_lists._MAX_BYTES + 500))
+    with pytest.raises(ValueError, match="too large"):
+        nse_lists._default_fetcher(nse_lists.FNO_BAN_URL)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10: R(nse_lists._MAX_BYTES))
+    assert len(nse_lists._default_fetcher(nse_lists.FNO_BAN_URL)) == nse_lists._MAX_BYTES

@@ -31,6 +31,14 @@ class MarketProfile:
     def money(self, x: float) -> str:
         return f"{'-' if x < 0 else ''}{self.currency}{abs(x):,.2f}"
 
+    def money_compact(self, x: float) -> str:
+        """Large amounts the way each market reads them: crore for NSE, millions for US."""
+        sign = "-" if x < 0 else ""
+        v = abs(x)
+        if self.code == "NSE":
+            return f"{sign}{self.currency}{v / 1e7:,.1f} Cr"
+        return f"{sign}{self.currency}{v / 1e6:,.1f}M"
+
 
 NSE = MarketProfile("NSE", "₹", "Asia/Kolkata", time(9, 15), time(15, 30), time(9, 30),
                     time(14, 30), time(15, 15), "^NSEI", "NS", 5e7, True)

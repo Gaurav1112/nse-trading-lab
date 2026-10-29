@@ -366,7 +366,7 @@ with tab_pos:
 with tab_intra:
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni[:15], key=f"desk_intra_syms_{market}")
-    scan_key = ("intraday", market, _today(profile))
+    scan_key = ("intraday", market, _today(profile), _limits_key(limits))
     if st.button("Scan", key="desk_scan"):
         if not picked:
             st.error("Pick at least one symbol.")
