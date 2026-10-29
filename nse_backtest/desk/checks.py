@@ -121,6 +121,8 @@ def _swing_freshness(prof: MarketProfile, bar_day: date, now: datetime) -> Check
         if age > 3:
             return _ck("freshness", B, f"Data is stale: last daily bar is {age} {_days(age)} old (limit 3){sfx}")
         return _ck("freshness", W, f"Last daily bar is {age} {_days(age)} old (limit 3){sfx}")
+    if bar_day == today and cal.is_trading_day(prof, today) and now.time() < cal.session_close_for(prof, today):
+        return _ck("freshness", W, f"Last daily bar {bar_day} is today's unfinished session")
     missed = cal.trading_days_between(prof, bar_day, today)
     if bar_day < today and cal.is_trading_day(prof, today) and now.time() >= cal.session_close_for(prof, today):
         missed += 1  # today's session has closed and its bar is missing

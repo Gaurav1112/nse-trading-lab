@@ -653,3 +653,13 @@ def test_s2_live_price_early_close_session_ends_at_1pm():
     now = datetime(2026, 11, 27, 14, 0, tzinfo=et)
     c = _lpq(100.0, datetime(2026, 11, 27, 12, 59, tzinfo=et), now, US)
     assert c.status is Status.PASS and "(market closed)" in c.reason
+
+
+def test_s2_fix1_bar_dated_today_while_session_open_warns():
+    c = _fresh("2026-10-29T00:00:00", datetime(2026, 10, 29, 11, 0, tzinfo=IST))
+    assert (c.status, c.reason) == (Status.WARN, "Last daily bar 2026-10-29 is today's unfinished session")
+    et = ZoneInfo("America/New_York")
+    c = _fresh("2026-11-27T00:00:00", datetime(2026, 11, 27, 12, 30, tzinfo=et), US)
+    assert (c.status, c.reason) == (Status.WARN, "Last daily bar 2026-11-27 is today's unfinished session")
+    c = _fresh("2026-11-27T00:00:00", datetime(2026, 11, 27, 13, 30, tzinfo=et), US)
+    assert (c.status, c.reason) == (Status.PASS, "Last daily bar 2026-11-27 is the latest completed session")

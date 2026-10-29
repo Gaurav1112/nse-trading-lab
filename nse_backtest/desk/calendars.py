@@ -10,7 +10,9 @@ Data verified 2026-10-29 against primary sources:
 - NYSE holidays and 1:00 pm ET early closes 2026-2027: https://www.nyse.com/markets/hours-calendars
 
 Muhurat trading (NSE, Sunday 2026-11-08, 14:20-15:30 IST) is NOT supported: that Sunday is treated as a
-non-trading day like any other weekend.
+non-trading day like any other weekend. `loaders.load_daily` drops daily bars dated on any non-trading day of a
+covered year (such as a Muhurat bar from yfinance), so a one-hour session never counts as the latest close.
+Bars in uncovered years are left alone.
 
 Outside the covered years a market is assumed to trade on every weekday. That assumption is uncertain, so
 callers must check `covered()` and turn PASS into WARN with "holiday calendar not available for {year}".

@@ -70,6 +70,12 @@ def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: date
         df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange,
                        use_cache=False)
     df = _clean_bars(df, f"daily bars for {symbol}")
+    # a bar on a non-trading day of a covered year (e.g. a one-hour Muhurat Sunday) is never a real close
+    off = [cal.covered(profile, d) and not cal.is_trading_day(profile, d) for d in pd.DatetimeIndex(df.index).date]
+    if any(off):
+        df = df[[not x for x in off]]
+        if len(df) == 0:
+            raise ValueError(f"daily bars for {symbol}: no bars on trading days")
     if pd.Timestamp(df.index[-1]).date() == today and now.time() < close:
         df = df.iloc[:-1]  # partial bar: plans are built on completed bars
         if len(df) == 0:
@@ -347,7 +353,12 @@ def day_trades_5d(journal: list[dict], today: date, profile: MarketProfile | Non
     """US round trips opened and closed on the same day within the last 5 trading days.
     None when a row that could be one has no readable entry or exit date (count unknowable)."""
     from .markets import US
-    window, n = _last_trading_days(profile or US, today), 0
+    try:
+        window = _last_trading_days(profile or US, today)
+    except RuntimeError as e:  # calendar walk hit its bound: count unknowable, pdt WARNs
+        log.warning("PDT window unavailable: %s", e)
+        return None
+    n = 0
     for r in journal:
         if str(r.get("market") or "NSE").upper() != "US":
             continue

@@ -44,7 +44,8 @@ _REGIME_MAX_MISSED_SESSIONS = 2  # the index may lag one session behind the stoc
 def _regime_stale(regime_df, profile, now: datetime | None = None) -> str | None:
     """Warning text when the regime index's last bar is too old for market-today, else None.
 
-    Covered years: stale once 2 or more trading sessions lie strictly between the last bar and today.
+    Covered years: stale once 2 or more finished trading sessions are missing after the last bar (sessions
+    strictly between the last bar and today, plus today's once it has closed).
     Years without a holiday calendar keep the 3-calendar-day rule.
     """
     try:
@@ -52,13 +53,20 @@ def _regime_stale(regime_df, profile, now: datetime | None = None) -> str | None
     except Exception:  # noqa: BLE001 - unreadable dates: treat as stale
         return "Regime index data is stale (last bar unknown)"
     tz = ZoneInfo(profile.tz)
-    today = (now.astimezone(tz) if now is not None and now.tzinfo is not None else now or datetime.now(tz)).date()
+    if now is not None and now.tzinfo is not None:
+        now = now.astimezone(tz)
+    today = (now or datetime.now(tz)).date()
     if last >= today:
         return None
     if cal.first_uncovered_year(profile, last, today) is not None:
         stale = (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS)
     else:
-        stale = cal.trading_days_between(profile, last, today) >= _REGIME_MAX_MISSED_SESSIONS
+        missed = cal.trading_days_between(profile, last, today)
+        if now is None:
+            now = datetime.now(tz)
+        if cal.is_trading_day(profile, today) and now.time() >= cal.session_close_for(profile, today):
+            missed += 1  # today's session has finished too (last < today here)
+        stale = missed >= _REGIME_MAX_MISSED_SESSIONS
     return f"Regime index data is stale (last bar {last})" if stale else None
 
 

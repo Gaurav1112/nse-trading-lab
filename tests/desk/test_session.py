@@ -137,3 +137,13 @@ def test_s2_regime_stale_uncovered_year_keeps_3_day_rule():
     now = datetime(2027, 1, 7, 10, 0, tzinfo=ZoneInfo(NSE.tz))
     assert session._regime_stale(_regime_ending("2027-01-04"), NSE, now=now) is None
     assert session._regime_stale(_regime_ending("2027-01-01"), NSE, now=now) is not None
+
+
+def test_s2_fix1_regime_stale_counts_todays_finished_session():
+    now = datetime(2026, 10, 29, 16, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2026-10-27"), NSE, now=now) == \
+        "Regime index data is stale (last bar 2026-10-27)"
+    assert session._regime_stale(_regime_ending("2026-10-28"), NSE, now=now) is None
+    # session still open: only the 28th has finished, one lag allowed
+    assert session._regime_stale(_regime_ending("2026-10-27"), NSE,
+                                 now=datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo(NSE.tz))) is None

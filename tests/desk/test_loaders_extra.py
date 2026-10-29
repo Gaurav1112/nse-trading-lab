@@ -399,7 +399,8 @@ def test_a4_load_daily_dedupes_duplicated_last_row(monkeypatch):
     _patch_fetch(monkeypatch, f)
     now = datetime(2026, 10, 29, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz))
     out = loaders.load_daily(NSE, "INFY", now=now)
-    assert not out.index.has_duplicates and len(out) == 30 and out["Close"].iloc[-1] == 555.0
+    # S2: the weekday-only fixture holds two NSE holidays (2026-10-02, 2026-10-20); load_daily drops them
+    assert not out.index.has_duplicates and len(out) == 28 and out["Close"].iloc[-1] == 555.0
 
 
 def test_a5_load_daily_end_includes_today_and_drops_partial_bar(monkeypatch):
@@ -597,3 +598,25 @@ def test_s2_pdt_window_is_last_5_trading_days(tmp_path):
     _journal(tmp_path, rows)
     now = datetime(2026, 11, 27, 11, 0, tzinfo=loaders.ZoneInfo(US.tz))
     assert loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=now).day_trades_5d == 1
+
+
+def test_s2_fix1_load_daily_drops_bars_on_non_trading_days_in_covered_years(monkeypatch):
+    f = _daily_to("2026-11-06")
+    muhurat = f.iloc[[-1]].copy()
+    muhurat.index = pd.DatetimeIndex([pd.Timestamp("2026-11-08")])
+    _patch_fetch(monkeypatch, pd.concat([f, muhurat]))
+    out = loaders.load_daily(NSE, "INFY", now=datetime(2026, 11, 9, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz)))
+    assert date(2026, 11, 8) not in set(out.index.date) and out.index[-1].date() == date(2026, 11, 6)
+    assert date(2026, 10, 20) not in set(out.index.date)  # Dussehra row from a weekday-only fixture
+    _patch_fetch(monkeypatch, _daily_to("2027-01-26"))  # NSE 2027 uncovered: Republic Day 2027 row is kept
+    out = loaders.load_daily(NSE, "INFY", now=datetime(2027, 1, 27, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz)))
+    assert out.index[-1].date() == date(2027, 1, 26)
+
+
+def test_s2_fix1_pdt_walk_failure_is_unknown_not_a_crash(tmp_path, monkeypatch):
+    def broken(profile, d):
+        raise RuntimeError("calendar data is broken")
+    monkeypatch.setattr(loaders.cal, "previous_trading_day", broken)
+    _journal(tmp_path, [])
+    ctx = loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW)
+    assert ctx.day_trades_5d is None
