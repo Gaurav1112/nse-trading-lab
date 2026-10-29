@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from enum import Enum
-from typing import Iterable
+from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -22,6 +22,7 @@ from .models import Mode
 from .timemachine import _walk
 
 MIN_TRADES = 30
+MIN_PRED_COVERAGE = 0.8
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
 
 
@@ -84,6 +85,7 @@ class ScoreStats:
     open: int
     unavailable: int
     verdict: str
+    pred_coverage: float | None = None   # share of resolved trades carrying an MC prediction
 
 
 # ---------------------------------------------------------------- candidates
@@ -122,18 +124,34 @@ def _parse_row(row: dict) -> Candidate:
     hold = int(hold) if hold is not None else DEFAULT_MAX_HOLD[mode]
     if hold < 1:
         raise ValueError("max_hold_bars < 1")
-    cps = _opt(row, "cost_per_share")
-    if cps is None:
+    if mode is Mode.INTRADAY and created.astimezone(ZoneInfo(profile.tz)).time() >= profile.flat_by:
+        raise ValueError("created after flat-by")
+    raw_cps = row.get("cost_per_share")
+    if raw_cps is not None:
+        cps = float(raw_cps)
+        if not math.isfinite(cps) or cps < 0:
+            raise ValueError(f"invalid cost_per_share {raw_cps}")
+    else:
         q = max(qty, 1)
         cps = round_trip_cost(profile, mode, entry, t1, q) / q
+        if not math.isfinite(cps) or cps < 0:
+            raise ValueError("invalid computed cost_per_share")
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
                      f"{row['input_hash']}|{created.isoformat()}")
 
 
-def load_candidates(rows: Iterable[dict]) -> tuple[list[Candidate], list[tuple[dict, str]]]:
+def default_session_of(market: str, created_at: datetime) -> date:
+    """Market-local calendar date of created_at (the session key used for dedupe unless the caller overrides)."""
+    return created_at.astimezone(ZoneInfo(get_profile(market).tz)).date()
+
+
+def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime], date] | None = None
+                    ) -> tuple[list[Candidate], list[tuple[dict, str]]]:
     """TAKE rows only (others are silently not candidates). Malformed TAKE rows come back with a reason.
-    Deduped by (market, symbol, mode, market-tz trading date of created_at), keeping the earliest."""
+    Deduped by (market, symbol, mode, session the order belongs to), keeping the earliest; the session defaults
+    to the market-local date of created_at, or is session_of(market, created_at) when given."""
+    session_of = session_of or default_session_of
     good: list[Candidate] = []
     rejects: list[tuple[dict, str]] = []
     for row in rows:
@@ -145,7 +163,7 @@ def load_candidates(rows: Iterable[dict]) -> tuple[list[Candidate], list[tuple[d
             rejects.append((row, str(e)))
     best: dict[tuple, Candidate] = {}
     for c in sorted(good, key=lambda c: c.created_at):
-        d = c.created_at.astimezone(ZoneInfo(get_profile(c.market).tz)).date()
+        d = session_of(c.market, c.created_at)
         best.setdefault((c.market, c.symbol, c.mode, d), c)
     return sorted(best.values(), key=lambda c: c.created_at), rejects
 
@@ -176,19 +194,30 @@ def _finish(c: Candidate, fill: float, fill_at, px: float, exit_at, held: int, n
                     r=_r(c, fill, px), held=held)
 
 
-def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime) -> Outcome:
+def _all_finite(*arrs) -> bool:
+    return all(bool(np.isfinite(a).all()) for a in arrs)
+
+
+def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
+                  session_closed_today: bool = False) -> Outcome:
     """CNC LIMIT at entry for one session. Fill bar: filled iff Low <= entry at min(Open, entry); only the stop
-    can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close."""
+    can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close.
+    Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial."""
     tz = ZoneInfo(get_profile(c.market).tz)
     today = now.astimezone(tz).date()
+    if not session_closed_today:
+        daily = daily[daily.index.normalize() < pd.Timestamp(today)]
     dates = daily.index.normalize()
     hits = np.flatnonzero(dates == pd.Timestamp(fill_session))
     if len(hits) == 0:
-        if fill_session >= today:
-            return _outcome(c, Status.OPEN, "waiting for the fill session")
+        if fill_session > today or (fill_session == today and not session_closed_today):
+            return _outcome(c, Status.OPEN, "waiting for the fill session to close")
         return _outcome(c, Status.UNAVAILABLE, "no bar for fill session")
     i = int(hits[0])
     op, hi, lo, cl = (daily[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    if not _all_finite(op[i:i + c.max_hold_bars + 1], hi[i:i + c.max_hold_bars + 1],
+                       lo[i:i + c.max_hold_bars + 1], cl[i:i + c.max_hold_bars + 1]):
+        return _outcome(c, Status.UNAVAILABLE, "bad price data")
     if not lo[i] <= c.entry:
         return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session")
     fill = min(op[i], c.entry)
@@ -223,10 +252,17 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
             return _outcome(c, Status.OPEN, "session still running")
         return _outcome(c, Status.UNAVAILABLE, "no intraday bars for the session")
     op, hi, lo, cl = (sess[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    if not _all_finite(op, hi, lo, cl):
+        return _outcome(c, Status.UNAVAILABLE, "bad price data")
+    last_start = sess.index[-1]
+    incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
+    incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
     k = next((p for p in range(len(sess)) if hi[p] >= c.entry), None)
     if k is None:
         if not session_over:
             return _outcome(c, Status.OPEN, "limit not reached yet")
+        if incomplete:
+            return _outcome(c, Status.UNAVAILABLE, incomplete_note)
         return _outcome(c, Status.NOT_FILLED, "limit not reached before flat-by")
     fill = max(op[k], c.entry)
     fill_at = sess.index[k]
@@ -238,6 +274,8 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
         px, j = res
         return _finish(c, fill, fill_at, px, sess.index[j], j - k, "")
     if session_over:
+        if incomplete:
+            return _outcome(c, Status.UNAVAILABLE, incomplete_note)
         return _finish(c, fill, fill_at, cl[n - 1], sess.index[n - 1], n - 1 - k, "time exit at flat-by")
     return _outcome(c, Status.OPEN, "holding", fill=float(fill), fill_at=str(fill_at),
                     mtm=_mtm(c, fill, cl[n - 1]), held=n - 1 - k)
@@ -245,17 +283,19 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
 
 # ---------------------------------------------------------------- statistics
 
-def _verdict(n: int, mean_pred_mc: float | None, ci_low: float, ci_high: float, mean_r: float) -> str:
+def _verdict(n: int, mean_pred_mc: float | None, ci_low: float, ci_high: float, mean_r: float,
+             n_pred: int = 0) -> str:
     eps = 1e-9
     if n < MIN_TRADES:
         return f"Not enough trades yet ({n}/{MIN_TRADES}) — keep paper-trading"
     if ci_high < 0:
         return "Losing — do not trade this with real money"
-    if mean_pred_mc is not None:
-        if ci_high < mean_pred_mc - eps:
-            return "Worse than the desk's odds — do not size up"
-        if ci_low > 0 and mean_r >= mean_pred_mc - 0.15:
-            return "Matching the odds — real money at small size (≤0.5% risk)"
+    if n_pred < MIN_PRED_COVERAGE * n or mean_pred_mc is None:
+        return f"Inconclusive — keep paper-trading (odds missing for {n - n_pred} of {n} trades)"
+    if ci_high < mean_pred_mc - eps:
+        return "Worse than the desk's odds — do not size up"
+    if ci_low > 0 and mean_r >= mean_pred_mc - 0.15:
+        return "Matching the odds — real money at small size (≤0.5% risk)"
     return "Inconclusive — keep paper-trading"
 
 
@@ -276,7 +316,7 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
     if n == 0:
         return ScoreStats(market, mode, 0, 0, None, None, mean_pred_mc, _mean(hist), _mean(gaps), None, None,
                           None, (), count(Status.NOT_FILLED), count(Status.OPEN), count(Status.UNAVAILABLE),
-                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0))
+                          _verdict(0, mean_pred_mc, 0.0, 0.0, 0.0), None)
     rng = np.random.default_rng(seed)
     means = rng.choice(rs, size=(resamples, n), replace=True).mean(axis=1)
     ci_low, ci_high = (float(x) for x in np.percentile(means, [2.5, 97.5]))
@@ -288,7 +328,7 @@ def _stats(market: str, mode: Mode, outs: list[Outcome], seed: int, resamples: i
     return ScoreStats(market, mode, n, wins, 100.0 * wins / n, mean_r, mean_pred_mc, _mean(hist), _mean(gaps),
                       ci_low, ci_high, dd, tuple(float(x) for x in cum), count(Status.NOT_FILLED),
                       count(Status.OPEN), count(Status.UNAVAILABLE),
-                      _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r))
+                      _verdict(n, mean_pred_mc, ci_low, ci_high, mean_r, len(mc)), len(mc) / n)
 
 
 def summarize(outcomes: Iterable[Outcome], *, seed: int = 19, resamples: int = 2000) -> list[ScoreStats]:

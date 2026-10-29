@@ -8,7 +8,7 @@ import pytest
 
 from nse_backtest.desk.models import Mode
 from nse_backtest.desk.scoreboard import (
-    Candidate, Outcome, Status, load_candidates, resolve_intraday, resolve_swing, summarize,
+    Candidate, Outcome, Status, default_session_of, load_candidates, resolve_intraday, resolve_swing, summarize,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -106,7 +106,7 @@ def test_intraday_time_exit_ignores_bars_at_flat_by():
 
 def test_intraday_not_filled_and_open():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _bars([("09:45", 99, 99.9, 98.9, 99.5)])
+    bars = _bars([("09:45", 99, 99.9, 98.9, 99.5), ("15:00", 99, 99.9, 98.9, 99.5)])
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.NOT_FILLED
     live = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
@@ -178,3 +178,126 @@ def test_audit_writes_enriched_fields(tmp_path):
               "current_price", "stop_basis"):
         assert k in rec
     assert rec["cost_per_share"] == 0.37 and rec["max_hold_bars"] == 15 and rec["stop_basis"] == "user"
+
+
+# ---------------------------------------------------------------- fix round 1
+
+def test_swing_partial_today_bar_not_used_for_time_exit():
+    c = cand(hold=1)
+    now = datetime(2026, 10, 28, 11, 0, tzinfo=IST)
+    df = daily([(101, 101.5, 99.5, 100.5), (100.5, 102.6, 100.1, 102.5)])  # 28th is a partial bar
+    o = resolve_swing(c, df, fill_session=FILL, now=now)
+    assert o.status is Status.OPEN
+    o = resolve_swing(c, df, fill_session=FILL, now=now, session_closed_today=True)
+    assert o.status is Status.TIME and o.exit_price == 102.5
+
+
+def test_swing_partial_fill_session_today_waits():
+    now = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
+    df = daily([(101, 101.5, 100.4, 101)])
+    o = resolve_swing(cand(), df, fill_session=FILL, now=now)
+    assert o.status is Status.OPEN and "close" in o.note
+    o = resolve_swing(cand(), df, fill_session=FILL, now=now, session_closed_today=True)
+    assert o.status is Status.NOT_FILLED
+
+
+def test_swing_partial_touch_today_not_used():
+    now = datetime(2026, 10, 28, 11, 0, tzinfo=IST)
+    df = daily([(101, 101.5, 99.5, 100.5), (100.5, 103.5, 100.1, 103)])
+    assert resolve_swing(cand(), df, fill_session=FILL, now=now).status is Status.OPEN
+    assert resolve_swing(cand(), df, fill_session=FILL, now=now, session_closed_today=True).status is Status.WON
+
+
+def test_intraday_incomplete_session_bars_unavailable():
+    c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
+    bars = _bars([("09:45", 99, 99.9, 98.9, 99.5), ("10:45", 99, 99.9, 98.9, 99.5)])
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note == "incomplete session bars (last bar 10:45)"
+    bars = _bars([("09:45", 99.5, 100.1, 99, 99.5), ("10:45", 99.5, 100, 99, 100.5)])  # filled, would time-exit
+    assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.UNAVAILABLE
+
+
+def test_load_candidates_session_of():
+    base = dict(action="TAKE", market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103,
+                qty=10, input_hash="h")
+    rows = [dict(base, created_at="2026-10-26T18:00:00+05:30", input_hash="a"),
+            dict(base, created_at="2026-10-27T09:20:00+05:30", input_hash="b")]
+    assert len(load_candidates(rows)[0]) == 2
+    tue = lambda m, t: date(2026, 10, 27)  # noqa: E731
+    cands, _ = load_candidates(rows, session_of=tue)
+    assert len(cands) == 1 and cands[0].key.startswith("a|")
+    assert default_session_of("NSE", datetime(2026, 10, 26, 22, 0, tzinfo=ZoneInfo("UTC"))) == date(2026, 10, 27)
+
+
+@pytest.mark.parametrize("bad", [(110, 112, 99.5, 100), (101, float("nan"), 99.5, 100)])
+def test_swing_nan_fill_bar_unavailable(bad):
+    df = daily([bad if bad[0] == 110 else (101, 101.5, float("nan"), 100)])
+    df.iloc[0, 0] = float("nan") if bad[0] == 110 else df.iloc[0, 0]
+    assert resolve_swing(cand(), df, fill_session=FILL, now=NOW).status is Status.UNAVAILABLE
+
+
+def test_swing_nan_walked_bar_unavailable():
+    df = daily([(101, 101.5, 99.5, 100.5), (100.5, float("inf"), 100.1, 103)])
+    o = resolve_swing(cand(), df, fill_session=FILL, now=NOW)
+    assert o.status is Status.UNAVAILABLE and o.note == "bad price data"
+
+
+def test_intraday_nan_unavailable():
+    c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
+    bars = _bars([("09:45", 99.5, 100.1, 99, 99.5), ("10:00", 99.5, float("nan"), 99, 100.5),
+                  ("15:00", 100.5, 101, 100, 101)])
+    assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.UNAVAILABLE
+
+
+@pytest.mark.parametrize("cps", [-0.1, float("nan"), float("inf")])
+def test_load_candidates_rejects_bad_cost(cps):
+    row = dict(action="TAKE", market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-10-26T10:00:00+05:30", cost_per_share=cps)
+    cands, rejects = load_candidates([row])
+    assert not cands and "cost_per_share" in rejects[0][1]
+
+
+def test_load_candidates_rejects_intraday_after_flat_by():
+    row = dict(action="TAKE", market="NSE", symbol="ABC", mode="intraday", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-10-27T15:15:00+05:30")
+    cands, rejects = load_candidates([row])
+    assert not cands and rejects[0][1] == "created after flat-by"
+
+
+def test_prediction_coverage_gate():
+    outs = _outs([0.30] * 40, mc=0.30)
+    full = summarize(outs)[0]
+    assert full.pred_coverage == 1.0 and full.verdict.startswith("Matching")
+    from dataclasses import replace
+    half = [replace(o, candidate=replace(o.candidate, mc_expectancy_r=None)) if i % 2 else o
+            for i, o in enumerate(outs)]
+    s = summarize(half)[0]
+    assert s.pred_coverage == 0.5
+    assert s.verdict == "Inconclusive — keep paper-trading (odds missing for 20 of 40 trades)"
+    none = summarize(_outs([0.30] * 40))[0]
+    assert none.verdict == "Inconclusive — keep paper-trading (odds missing for 40 of 40 trades)"
+    assert summarize(_outs([1.0] * 5))[0].pred_coverage == 0.0
+
+
+def test_swing_open_below_stop_exits_at_open():
+    o = resolve_swing(cand(), daily([(97, 99, 96, 98)]), fill_session=FILL, now=NOW)
+    assert o.status is Status.LOST and o.fill_price == 97 and o.exit_price == 97
+    assert o.realised_r == pytest.approx(0.0)
+
+
+def test_intraday_stop_on_fill_bar_lost_at_stop():
+    c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
+    bars = _bars([("09:45", 99.5, 100.5, 97.5, 99), ("15:00", 99, 99.5, 98.5, 99)])
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.LOST and o.exit_price == 98 and o.realised_r == pytest.approx(-1.0 - 0.0)
+
+
+def test_win_pct_excludes_cost_eaten_wins():
+    outs = _outs([1.0, -0.05, 0.0, -1.0])
+    s = summarize(outs)[0]
+    assert s.wins == 1 and s.win_pct == pytest.approx(25.0)
+    # a WON-status trade whose costs exceed the reward has realised R <= 0 and is not a win
+    c = cand(cps=3.5)
+    o = resolve_swing(c, daily([(101, 101.5, 99.5, 100.5), (100.5, 103.2, 100.1, 103)]), fill_session=FILL, now=NOW)
+    assert o.status is Status.WON and o.realised_r < 0
+    assert summarize([o])[0].wins == 0
