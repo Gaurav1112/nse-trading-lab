@@ -415,9 +415,9 @@ def test_page_scoreboard_tab_renders_verdict(monkeypatch, tmp_path):
     assert not at.exception and calls == ["NSE"]
     assert any("Not enough trades yet" in i.value for i in at.info)
     assert any(DISCLAIMER in c.value for c in at.caption)
-    order = [type(e).__name__ for e in at.tabs[4].children.values()]
+    order = [type(e).__name__ for e in at.tabs[5].children.values()]
     assert order.index("Info") < order.index("Dataframe")  # verdict banner before the stats table
-    assert order[0] == "Caption" and DISCLAIMER in list(at.tabs[4].children.values())[0].value
+    assert order[0] == "Caption" and DISCLAIMER in list(at.tabs[5].children.values())[0].value
 
 
 def test_page_scoreboard_error_is_shown(monkeypatch, tmp_path):
@@ -808,7 +808,7 @@ def test_r1_page_shows_warnings_rejects_and_coverage(monkeypatch, tmp_path):
     at = _page(monkeypatch, tmp_path).run()
     at.button(key="desk_load_scoreboard").click().run()
     assert not at.exception
-    tab = at.tabs[4]
+    tab = at.tabs[5]
     warnings = [w.value for w in tab.warning]
     assert any("feed down" in w for w in warnings)
     assert any(w == "1 audit line could not be read" for w in warnings)
@@ -936,7 +936,7 @@ def test_c2_page_shows_the_two_records_under_separate_subheaders(monkeypatch, tm
     at = _page(monkeypatch, tmp_path).run()
     at.button(key="desk_load_scoreboard").click().run()
     assert not at.exception
-    tab = at.tabs[4]
+    tab = at.tabs[5]
     assert [h.value for h in tab.subheader] == ["Desk picks", "Your overrides"]
     kids = [(type(e).__name__, e.value if type(e).__name__ in ("Subheader", "Info", "Error") else None)
             for e in tab.children.values()]

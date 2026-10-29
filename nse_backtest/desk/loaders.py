@@ -235,6 +235,28 @@ def next_earnings(profile: MarketProfile, symbol: str) -> tuple[date | None, boo
         return None, False
 
 
+def corporate_actions(profile: MarketProfile, symbol: str) -> pd.DataFrame:
+    """Dividends and splits of the last 2 years (yfinance ``Ticker.actions``), index naive in market time.
+    An empty frame means none; any failure raises ValueError (the research panel shows it as unavailable)."""
+    from nse_backtest.data import _validate_symbol
+    _validate_symbol(symbol)  # ValueError before any network call
+    try:
+        import yfinance
+        df = yfinance.Ticker(profile.yf_symbol(symbol)).actions
+    except Exception as e:  # noqa: BLE001 - one readable reason for the panel
+        raise ValueError(f"corporate actions unavailable for {symbol}: {e or type(e).__name__}") from e
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError(f"corporate actions unavailable for {symbol}: no data")
+    if df.empty:
+        return df
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert(profile.tz).tz_localize(None)
+    df = df.set_axis(idx)
+    cutoff = _market_now(profile).replace(tzinfo=None) - timedelta(days=730)
+    return df[df.index >= pd.Timestamp(cutoff)]
+
+
 # ---------------------------------------------------------------- user state (read-only)
 
 class UserDataError(ValueError):

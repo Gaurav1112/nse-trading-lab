@@ -6,7 +6,7 @@ are missing: no curve is ever made up.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -20,7 +20,8 @@ _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 
 @dataclass(frozen=True)
 class OutcomeMoney:
-    pnl: tuple[float, ...]  # money per Monte Carlo replay, net of costs
+    # money per Monte Carlo replay, net of costs; up to 10,000 values, so kept out of --json / text output
+    pnl: tuple[float, ...] = field(metadata={"serialize": False})
     p5: float
     p25: float
     median: float

@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-from components import theme
+from components import desk_card, theme
 from nse_backtest.desk import loaders, session
 from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
@@ -24,6 +24,7 @@ from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.positions import review_positions
+from nse_backtest.desk.tradecard import build_card
 
 st.set_page_config(page_title="Desk | Trading Lab", page_icon="🧭", layout="wide")
 st.markdown(theme.inject_css(), unsafe_allow_html=True)
@@ -98,7 +99,7 @@ def _check_summary(v: DeskVerdict) -> str:
     return f"<span style='color:{color};font-weight:700'>{parts[0]} &nbsp;({' · '.join(names)})</span>"
 
 
-def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None) -> None:
+def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, show_ticket: bool = True) -> None:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     color = ACTION_COLOR.get(v.action.value, "#888888")
     st.markdown(f"<div style='font-size:2.6rem;font-weight:800;color:{color};line-height:1.1'>"
@@ -156,10 +157,15 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None) -> 
             lambda x: f"color:{STATUS_COLOR.get(x, 'inherit')};font-weight:700", subset=["Status"]),
             hide_index=True, width="stretch")
 
-    if v.ticket:
+    if show_ticket and v.ticket:
         st.markdown("**Ticket** (type it in yourself — the desk places nothing)")
         st.code("\n".join(v.ticket), language="text")
     st.caption(DISCLAIMER)
+
+
+def _render_card(v: DeskVerdict, profile, limits, key: str, *, header: bool = True) -> None:
+    """The trade card (components/desk_card.py): money, levels, your-call ticket, charts, projections, research."""
+    desk_card.render_card(v, profile, limits, key, today=_today(profile), header=header)
 
 
 # ---------------------------------------------------------------- sidebar
@@ -233,8 +239,11 @@ st.markdown("**What would change it**")
 st.markdown("\n".join(f"- {c}" for c in flips) if flips else "- Regime is already TRENDING")
 regime_name = tape.regime if tape else None
 
-tab_plan, tab_check, tab_pos, tab_intra, tab_score = st.tabs(
-    ["Today's Plan", "Check a Trade", "My Positions", "Intraday", "Scoreboard"])
+tab_choose, tab_plan, tab_check, tab_pos, tab_intra, tab_score = st.tabs(
+    ["Choose a Trade", "Today's Plan", "Check a Trade", "My Positions", "Intraday", "Scoreboard"])
+# Today's Plan and the Intraday scan are cached under these keys; Choose a Trade reuses them.
+PLAN_KEY = ("plan", market, _today(profile), _limits_key(limits))
+SCAN_KEY = ("intraday", market, _today(profile), _limits_key(limits))
 
 
 # ---------------------------------------------------------------- Today's Plan
@@ -250,7 +259,7 @@ def _positions_line(market: str) -> str:
 
 with tab_plan:
     st.markdown(f"**{_positions_line(market)}**")
-    plan_key = ("plan", market, _today(profile), _limits_key(limits))
+    plan_key = PLAN_KEY
     if st.button("Build today's plan", key="desk_build_plan"):
         with st.spinner("Scanning the universe — this can take a few minutes the first time..."):
             state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile),
@@ -323,7 +332,9 @@ with tab_check:
             st.error(cstate["error"])
         else:
             with st.container(border=True):
-                render_verdict(cstate["ok"], profile, "check", at=cstate["at"])
+                render_verdict(cstate["ok"], profile, "check", at=cstate["at"], show_ticket=False)
+                st.markdown("---")
+                _render_card(cstate["ok"], profile, limits, "check", header=False)
 
 
 # ---------------------------------------------------------------- My Positions
@@ -369,7 +380,7 @@ with tab_pos:
 with tab_intra:
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni[:15], key=f"desk_intra_syms_{market}")
-    scan_key = ("intraday", market, _today(profile), _limits_key(limits))
+    scan_key = SCAN_KEY
     if st.button("Scan", key="desk_scan"):
         if not picked:
             st.error("Pick at least one symbol.")
@@ -496,4 +507,120 @@ with tab_score:
             _render_scoreboard(sstate["ok"], profile, sstate.get("warnings", ()))
         except Exception as e:  # noqa: BLE001 - never a blank tab
             st.error(f"Could not show the scoreboard: {type(e).__name__}: {e}")
+    st.caption(DISCLAIMER)
+
+
+
+# ---------------------------------------------------------------- Choose a Trade
+# Rendered last (tabs can be filled in any order) so it sees a plan or scan built on its own tab in this run.
+
+def _dash(x) -> str:
+    return "—" if x is None else profile.money(x)
+
+
+def _candidate_row(v: DeskVerdict) -> dict:
+    p = v.plan
+    try:
+        card = build_card(v, profile, limits)
+    except Exception:  # noqa: BLE001 - bad geometry: the card itself says why
+        card = None
+    blocks = ", ".join(c.name for c in v.blocks())
+    return {"Symbol": p.symbol, "Mode": p.mode.value, "Desk says": v.action.value,
+            "Entry": profile.money(p.entry), "Stop": profile.money(p.stop), "T1": profile.money(p.target_1),
+            "T2": profile.money(p.target_2), "Qty": str(card.qty if card else v.sizing.qty),
+            "Max loss": _dash(card.max_loss if card else None), "Profit T1": _dash(card.profit_t1 if card else None),
+            "Win odds": _pct(v.odds.p_target) if v.odds is not None else "n/a",
+            "Why": "" if v.action is Action.TAKE else (blocks or v.headline)}
+
+
+def _skipped_row(sym: str, why: str) -> dict:
+    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Entry": "—", "Stop": "—", "T1": "—", "T2": "—",
+            "Qty": "—", "Max loss": "—", "Profit T1": "—", "Win odds": "—", "Why": why}
+
+
+def _load_candidates(have_plan: bool, have_scan: bool) -> None:
+    refresh = have_plan and have_scan  # both there: the button rebuilds both
+    with st.spinner("Building today's plan and the intraday scan — this can take a few minutes..."):
+        if refresh or not have_plan:
+            state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile),
+                             regime=regime_name, tape=tape)
+            if "ok" in state:
+                state["at"] = _now_hhmm(profile)
+            st.session_state[PLAN_KEY] = state
+        if refresh or not have_scan:
+            syms = st.session_state.get(f"desk_intra_syms_{market}") or universe(profile)[:15]
+            state = _attempt("Intraday scan failed", session.run_intraday, profile, limits, syms, regime=regime_name)
+            if "ok" in state:
+                state["at"] = _now_hhmm(profile)
+            st.session_state[SCAN_KEY] = state
+
+
+def _render_skipped(sym: str, why: str) -> None:
+    st.error(f"The desk skipped {sym} in today's plan: {why}")
+    ck = ("choose_check", market, _today(profile), _limits_key(limits), sym)
+    if st.button("Check it", key="desk_choose_checkit"):
+        with st.spinner(f"Checking {sym}..."):
+            try:
+                st.session_state[ck] = {"ok": session.run_check(profile, sym, Mode.SWING, limits, regime=regime_name),
+                                        "at": _now_hhmm(profile)}
+            except Exception as e:  # noqa: BLE001
+                st.session_state[ck] = {"error": f"Check failed: {e or type(e).__name__}"}
+    cst = st.session_state.get(ck)
+    if cst is None:
+        st.caption("Press Check it to run the full desk check and open the trade card.")
+    elif "error" in cst:
+        st.error(cst["error"])
+    else:
+        st.caption(f"Checked at {cst['at']} (market time)")
+        _render_choice(cst["ok"])
+
+
+def _render_choice(v: DeskVerdict) -> None:
+    _render_card(v, profile, limits, "choose")
+    with st.expander("Odds and checks behind the verdict"):
+        render_verdict(v, profile, "choose_detail", show_ticket=False)
+
+
+with tab_choose:
+    st.caption("Every candidate from today's plan and the intraday scan, with the money at stake. The desk's "
+               "TAKE / WAIT / SKIP is advice: you choose.")
+    pstate, istate = st.session_state.get(PLAN_KEY), st.session_state.get(SCAN_KEY)
+    have_plan, have_scan = bool(pstate and "ok" in pstate), bool(istate and "ok" in istate)
+    if st.button("Load candidates", key="desk_choose_load"):
+        _load_candidates(have_plan, have_scan)
+        st.rerun()  # every tab shows the new plan / scan
+    for state in (pstate, istate):
+        if state and "error" in state:
+            st.error(state["error"])
+    if not have_plan and not have_scan:
+        st.info("Press Load candidates to build today's plan and the intraday scan "
+                "(or build them on their own tabs). No trade is a valid answer.")
+    else:
+        missing = [n for n, ok in (("today's plan", have_plan), ("the intraday scan", have_scan)) if not ok]
+        if missing:
+            st.caption(f"Not loaded yet: {' and '.join(missing)} — press Load candidates to add it.")
+        try:
+            plan_now = pstate["ok"] if have_plan else None
+            verdicts = session.merge_candidates(plan_now, istate["ok"][0] if have_scan else ())
+            skipped = tuple(plan_now.skipped) if plan_now is not None else ()
+            rows = [_candidate_row(v) for v in verdicts] + [_skipped_row(s, w) for s, w in skipped]
+            labels = ([f"{v.action.value} {v.plan.symbol} · {v.plan.mode.value}" for v in verdicts]
+                      + [f"SKIP {s} · swing (not checked)" for s, _ in skipped])
+        except Exception as e:  # noqa: BLE001 - never a blank tab
+            st.error(f"Could not list the candidates: {type(e).__name__}: {e}")
+            rows, labels = [], []
+        if not rows:
+            st.info("No candidates today — no trade is a valid answer.")
+        else:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            pick = st.selectbox("Open a trade card", labels, key="desk_choose_pick")
+            i = labels.index(pick) if pick in labels else 0
+            with st.container(border=True):
+                try:
+                    if i < len(verdicts):
+                        _render_choice(verdicts[i])
+                    else:
+                        _render_skipped(*skipped[i - len(verdicts)])
+                except Exception as e:  # noqa: BLE001 - never a blank tab
+                    st.error(f"Could not show the trade card: {type(e).__name__}: {e}")
     st.caption(DISCLAIMER)

@@ -11,10 +11,11 @@ from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
-from . import loaders, session
+from . import audit, loaders, session
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
+from .tradecard import build_card
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
@@ -59,7 +60,7 @@ def _r(x) -> str:
     return "n/a" if x is None else f"{x:+.2f}R"
 
 
-def format_verdict(v: DeskVerdict, profile) -> list[str]:
+def format_verdict(v: DeskVerdict, profile, *, ticket: bool = True) -> list[str]:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     lines = [v.headline, ""]
     lines.append(f"Plan ({p.mode.value}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
@@ -80,8 +81,28 @@ def format_verdict(v: DeskVerdict, profile) -> list[str]:
             lines.append(f"Candle-noise expectancy range: {_r(o.noise_expectancy_min)} to {_r(o.noise_expectancy_max)}")
     lines += ["", "Checks:"]
     lines += [f"  {c.status.value} {c.name} — {c.reason}" for c in v.checks]
-    if v.ticket:
+    if ticket and v.ticket:
         lines += ["", "Ticket (type it in yourself):"] + [f"  {t}" for t in v.ticket]
+    return lines
+
+
+def format_money(card, profile) -> list[str]:
+    """The card's money block: max loss, profit at T1/T2, reward:risk, expected value and any limit breaches."""
+    m = profile.money
+    if card.qty == 0:
+        loss, p1, p2 = card.per_share
+        return [f"Money: unavailable — {card.unavailable_reason} (--qty N).",
+                f"  Per share: loss at stop {m(loss)}, profit at T1 {m(p1)}, profit at T2 {m(p2)}"
+                f"  reward:risk {card.rr_t1:.2f}"]
+    ev = "n/a (no odds)" if card.expected_value is None else m(card.expected_value)
+    lines = [f"Money ({card.qty} shares{', your quantity' if card.qty_is_override else ''}):",
+             f"  max loss {m(card.max_loss)} ({card.gap_note[0].lower() + card.gap_note[1:]})",
+             f"  profit at T1 {m(card.profit_t1)}  profit at T2 {m(card.profit_t2)}",
+             f"  reward:risk {card.rr_t1:.2f}  expected value {ev}",
+             f"  notional {m(card.notional)} ({card.pct_capital_deployed:.1f}% of capital), "
+             f"at risk {card.pct_capital_at_risk:.1f}% of capital, costs {m(card.cost)}"]
+    if card.breaches:
+        lines += ["  Breaks your limits:"] + [f"    - {b}" for b in card.breaches]
     return lines
 
 
@@ -108,14 +129,46 @@ def _limits(profile, as_json: bool = False):
 
 # ---------------------------------------------------------------- commands
 
+def _log_override(v: DeskVerdict, card) -> None:
+    """The owner's override row, with the quantity they chose."""
+    audit.append_override(replace(v, sizing=card.sizing))
+
+
 def cmd_check(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
+    if a.qty is not None and a.qty < 1:
+        raise ValueError(f"qty must be a whole number of at least 1, got {a.qty}")
     v = session.run_check(profile, a.symbol, Mode(a.mode), limits, entry=a.entry, stop=a.stop,
                           target=a.target, on_warning=_stderr_warn)
+    taken = v.action is Action.TAKE
+    choose = bool(a.choose) and not taken
+    card = build_card(v, profile, limits, qty=a.qty, override_confirmed=choose)
+    logged = False
+    if choose and card.ticket:
+        _log_override(v, card)
+        logged = True
     if a.json:
-        _emit_json(v)
+        d = to_jsonable(v)
+        d["card"] = {k: val for k, val in to_jsonable(card).items() if k != "verdict"}
+        d["override_logged"] = logged
+        _emit_json(d)
         return 0
-    return _finish(warn + format_verdict(v, profile))
+    lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
+    if not taken and card.reasons:
+        lines += ["", f"The desk said {v.action.value} because:"] + [f"  {r}" for r in card.reasons]
+    if taken:
+        lines += ["", "Ticket (type it in yourself):"] + [f"  {t}" for t in card.ticket]
+        if a.choose:
+            lines += ["", "--choose ignored: the desk already says TAKE."]
+    elif card.ticket:
+        lines += ["", f"{card.ticket_header} (type it in yourself):"] + [f"  {t}" for t in card.ticket]
+        lines += ["Override logged — it is scored under \"Your overrides\", apart from the desk's picks."]
+    elif choose:
+        lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
+    else:
+        lines += ["", f"No ticket: the desk says {v.action.value}. Add --choose to take it anyway "
+                      "(logged as your override)."]
+    return _finish(lines)
 
 
 def _format_row(v: DeskVerdict, *, why: bool = False) -> str:
@@ -308,6 +361,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--entry", type=float)
     c.add_argument("--stop", type=float)
     c.add_argument("--target", type=float)
+    c.add_argument("--qty", type=int, help="your quantity instead of the desk's size (limit breaches are listed)")
+    c.add_argument("--choose", action="store_true",
+                   help="take a WAIT/SKIP anyway: print the override ticket and log it as your override")
     c.set_defaults(fn=cmd_check)
     for name, fn, h in (("plan", cmd_plan, "today's plan"), ("positions", cmd_positions, "review open positions"),
                         ("intraday", cmd_intraday, "opening-range scan")):

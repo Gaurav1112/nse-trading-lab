@@ -21,7 +21,8 @@ from . import scoreboard_io
 from .audit import data_dir
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
-from .models import DeskVerdict, Limits, Mode
+from .markets import universe
+from .models import Action, DeskVerdict, Limits, Mode
 from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 
@@ -208,6 +209,42 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes,
                                   audit_path=data_dir() / scoreboard_io.AUDIT_FILE)  # scan TAKEs are scored
     return verdicts, load_failures + list(failures)
+
+
+def _expectancy(v: DeskVerdict) -> float | None:
+    e = v.odds.mc_expectancy_r if v.odds is not None else None
+    return e if isinstance(e, (int, float)) and e == e and abs(e) != float("inf") else None
+
+
+def merge_candidates(plan: DailyPlan | None, scan_verdicts: Iterable[DeskVerdict] = ()) -> list[DeskVerdict]:
+    """Every verdict from the daily plan (TAKE and WATCH) and the intraday scan, one per (symbol, mode) (the first
+    seen wins), TAKE first, then by Monte Carlo expectancy (highest first; no odds last). The plan's skipped
+    symbols are (symbol, reason) only and are left to the caller."""
+    seen: set = set()
+    out: list[DeskVerdict] = []
+    for v in [*((plan.take + plan.watch) if plan is not None else ()), *scan_verdicts]:
+        k = (v.plan.symbol, v.plan.mode)
+        if k not in seen:
+            seen.add(k)
+            out.append(v)
+
+    def order(v: DeskVerdict):
+        e = _expectancy(v)
+        return (v.action is not Action.TAKE, e is None, -(e or 0.0))
+    return sorted(out, key=order)
+
+
+def choose_candidates(profile, limits: Limits, on_warning: Warn = None, *, symbols: Iterable[str] | None = None,
+                      intraday_symbols: Iterable[str] | None = None) -> list[DeskVerdict]:
+    """The trade chooser's candidates: today's plan over ``symbols`` (default: the universe) and the intraday scan
+    over ``intraday_symbols`` (default: the first 15), with one regime for both. See ``merge_candidates``."""
+    regime_df, tape = resolve_tape(profile, on_warning)
+    regime = tape.regime if tape else None
+    plan = run_daily_plan(profile, limits, list(symbols) if symbols is not None else universe(profile), on_warning,
+                          regime=regime, tape=tape)
+    scan, _failures = run_intraday(profile, limits, list(intraday_symbols) if intraday_symbols is not None
+                                   else universe(profile)[:15], regime=regime, on_warning=on_warning)
+    return merge_candidates(plan, scan)
 
 
 def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,
