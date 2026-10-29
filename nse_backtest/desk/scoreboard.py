@@ -22,7 +22,7 @@ above the limit while the ticket is typed it may not fill at all (about 1% of tr
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Callable, Iterable
@@ -38,7 +38,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 12  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 13  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -470,9 +470,30 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     return float(fill), fill_at, ambiguous
 
 
+def _from_quote(c: Candidate) -> Candidate:
+    """The candidate replayed from max(created_at, quote_as_of): the order cannot exist before the quote the ticket
+    was based on. The logged row (its created_at, key and session) is unchanged on the returned Outcome."""
+    if c.quote_as_of is not None and c.quote_as_of > c.created_at:
+        return replace(c, created_at=c.quote_as_of)
+    return c
+
+
+def _as_logged(c: Candidate, o: Outcome) -> Outcome:
+    return o if o.candidate is c else replace(o, candidate=c)
+
+
 def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
                   session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
                   intraday_note: str = "") -> Outcome:
+    """See _resolve_swing_at; replayed from max(created_at, quote_as_of)."""
+    return _as_logged(c, _resolve_swing_at(_from_quote(c), daily, fill_session=fill_session, now=now,
+                                           session_closed_today=session_closed_today, bars15=bars15,
+                                           intraday_note=intraday_note))
+
+
+def _resolve_swing_at(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
+                      session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
+                      intraday_note: str = "") -> Outcome:
     """CNC LIMIT at entry for one session. Fill bar: filled iff Low <= entry at min(Open, entry); only the stop
     can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close.
     Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial.
@@ -654,6 +675,11 @@ def _exits_after_fill(c: Candidate, k: int, fill: float, fill_at: str, op, hi, l
 
 
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
+    """See _resolve_intraday_at; replayed from max(created_at, quote_as_of)."""
+    return _as_logged(c, _resolve_intraday_at(_from_quote(c), bars15, flat_by=flat_by, now=now))
+
+
+def _resolve_intraday_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
     """A row logged at or above the trigger printed a LIMIT ticket: see limit_model and _limit_fill. Otherwise:
     BUY stop-limit (trigger = entry, limit = entry_limit, as the ticket prints it) over created_at's session, from
     the bar containing created_at to flat_by (that bar under the ambiguous-fill rule and its cap, see

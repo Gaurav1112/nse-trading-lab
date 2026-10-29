@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 12  # F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 13  # F1 r9b (13): start at the quote; F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -1443,3 +1443,40 @@ def test_r9_audit_rows_carry_quote_as_of_into_the_candidate():
     assert c.quote_as_of == datetime(2026, 10, 27, 10, 9, 30, tzinfo=IST)
     (old,), _ = load_candidates([{k: v for k, v in row.items() if k != "quote_as_of"}])
     assert old.quote_as_of is None
+
+
+# ---------------------------------------------------------------- F1 round 9b: a replay starts no earlier than the quote
+
+def test_r9b_a_late_quote_moves_the_start_of_the_replay():
+    """TAKE stamped 10:07, quote seen at 10:17: the order cannot exist before 10:17, so the 10:15 bar is the one the
+    TAKE was logged in (ambiguous), never a confirmed later fill."""
+    above = {f"{t:%H:%M}": (101.0, 103.2, 100.9, 103.0) for t in pd.date_range("2026-10-27 10:30", "2026-10-27 15:00",
+                                                                                freq="15min")}
+    over = {"10:00": (100.7, 100.9, 100.6, 100.8), "10:15": (100.6, 100.7, 100.45, 100.6), **above}
+    late = _r3(100.6, over, quote_live=True, quote_as_of=datetime(2026, 10, 27, 10, 17, tzinfo=IST))
+    assert late.status is Status.NOT_FILLED and late.note == AMBIG
+    assert late.candidate.created_at == datetime(2026, 10, 27, 10, 7, tzinfo=IST)  # the logged row is unchanged
+    at_take = _r3(100.6, {**over, "10:00": (100.6, 100.7, 100.55, 100.6)}, quote_live=True)  # quote at the TAKE
+    assert at_take.status is Status.WON and at_take.fill_at == "2026-10-27 10:15:00"
+
+
+@pytest.mark.parametrize("cp,over", [
+    (100.2, {"10:00": (100.1, 100.4, 100.0, 100.2), "10:15": (100.3, 103.2, 100.1, 103)}),
+    (99.8, {"10:00": (99.7, 100.3, 97.5, 99.8)}),
+    (100.6, {"10:00": (100.6, 100.7, 100.4, 100.6), "10:15": (100.7, 103.0, 100.6, 102.8)}),
+])
+def test_r9b_a_quote_before_the_take_changes_nothing(cp, over):
+    early = _r3(cp, over, quote_live=True, quote_as_of=datetime(2026, 10, 27, 10, 2, tzinfo=IST))
+    same = _r3(cp, over, quote_live=True)  # quote_as_of = created_at
+    assert (early.status, early.fill_price, early.fill_at, early.exit_price, early.realised_r, early.note) == \
+        (same.status, same.fill_price, same.fill_at, same.exit_price, same.realised_r, same.note)
+
+
+def test_r9b_swing_fill_day_starts_at_the_quote():
+    from dataclasses import replace as _replace
+    c = _replace(_mid_cand(datetime(2026, 10, 26, 14, 20, tzinfo=IST)), current_price=100.0, quote_live=True,
+                 quote_as_of=datetime(2026, 10, 26, 14, 50, tzinfo=IST))
+    o = resolve_swing(c, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True,
+                      bars15=_fill_day({"14:30": (99.9, 100.2, 99.8, 100.0), "14:45": (100.0, 100.2, 99.9, 100.1)}))
+    assert o.fill_at is None or not o.fill_at.startswith("2026-10-26 14:30")  # nothing before the quote counts
+    assert o.candidate.created_at == datetime(2026, 10, 26, 14, 20, tzinfo=IST)
