@@ -1063,3 +1063,34 @@ def test_c8_page_empty_text(monkeypatch, tmp_path):
     at.button(key="desk_load_scoreboard").click().run()
     assert any("No desk picks or overrides logged yet for NSE — run plan, check or the intraday scan, "
                "or choose a trade" in i.value for i in at.info)
+
+
+# ---------------------------------------------------------------- F1 round 9: bool fields hit the cache
+
+@pytest.mark.parametrize("live", [True, False])
+def test_r9_rows_with_quote_live_are_served_from_the_cache(paths, live):
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    write_audit(paths[0], [row(created, mode="intraday", current_price=99.2, quote_live=live,
+                               quote_as_of=created.isoformat())])
+    first = run(paths, intraday=Loader({"ABC": _intraday_win_bars()}))
+    assert first.outcomes[0].status in (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
+    li = boom_loader()
+    res = run(paths, intraday=li, now=datetime(2027, 1, 10, 12, 0, tzinfo=IST))  # day +75: past the 60-day refetch
+    assert li.calls == [] and res.outcomes[0].status is first.outcomes[0].status, res.outcomes[0].note
+
+
+def test_r9_a_cached_bool_never_matches_another_value():
+    from dataclasses import replace as _replace
+    from nse_backtest.desk.scoreboard import load_candidates
+    from nse_backtest.desk.scoreboard_io import _candidate_record, _matches
+    created = datetime(2026, 10, 27, 9, 50, tzinfo=IST)
+    (c,), _ = load_candidates([row(created, mode="intraday", current_price=99.2, quote_live=True)])
+    entry = {"candidate": _candidate_record(c)}
+    assert _matches(c, entry)
+    assert not _matches(_replace(c, quote_live=False), entry)
+    assert not _matches(_replace(c, quote_live=None), entry)
+    entry["candidate"]["quote_live"] = 1  # a number is not a bool
+    assert not _matches(c, entry)
+    entry["candidate"]["quote_live"] = True
+    entry["candidate"]["qty"] = True  # a bool is never a number
+    assert not _matches(c, entry)

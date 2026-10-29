@@ -231,10 +231,21 @@ def _well_formed(entry) -> bool:
     return all(k in cand for k in _CANDIDATE_FIELDS) and out.get("status") in {s.value for s in FINAL}
 
 
+_BOOL_FIELDS = frozenset({"quote_live"})  # bool-valued candidate fields (True/False/None)
+
+
+def _same(k: str, cached, current) -> bool:
+    """A bool field matches only the same bool (or None == None); any other field never matches a bool, since
+    True == 1 in Python."""
+    if k in _BOOL_FIELDS:
+        return type(cached) is type(current) and cached == current
+    return type(cached) is not bool and cached == current
+
+
 def _matches(c: Candidate, entry: dict) -> bool:
     """True when the entry was resolved for exactly this ticket."""
     cand, current = entry["candidate"], _candidate_record(c)
-    return all(type(cand.get(k)) is not bool and cand.get(k) == current[k] for k in _CANDIDATE_FIELDS)
+    return all(_same(k, cand.get(k), current[k]) for k in _CANDIDATE_FIELDS)
 
 
 def _outcome_from(c: Candidate, entry: dict) -> Outcome | None:
