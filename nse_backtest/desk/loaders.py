@@ -304,6 +304,46 @@ def save_limits(profile: MarketProfile, limits: Limits) -> None:
 
 # ---------------------------------------------------------------- context
 
+_ENTRY_KEYS = ("entry_date", "open_date")
+_EXIT_KEYS = ("closed_date", "exit_date")
+
+
+def _day(row: dict, keys) -> date | None:
+    raw = next((row[k] for k in keys if row.get(k)), None)
+    try:
+        return date.fromisoformat(str(raw)[:10]) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def _last_weekdays(today: date, n: int = 5) -> set[date]:
+    out, d = set(), today
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.add(d)
+        d -= timedelta(days=1)
+    return out
+
+
+def day_trades_5d(journal: list[dict], today: date) -> int | None:
+    """US round trips opened and closed on the same day within the last 5 weekdays.
+    None when a row that could be one has no readable entry or exit date (count unknowable)."""
+    window, n = _last_weekdays(today), 0
+    for r in journal:
+        if str(r.get("market") or "NSE").upper() != "US":
+            continue
+        exit_d = _day(r, _EXIT_KEYS)
+        if exit_d is None:
+            return None
+        if exit_d not in window:
+            continue
+        entry_d = _day(r, _ENTRY_KEYS)
+        if entry_d is None:
+            return None
+        n += entry_d == exit_d
+    return n
+
+
 def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | None = None,
                   symbol_df: pd.DataFrame | None = None, regime: str | None = None) -> CheckContext:
     """CheckContext. `regime` is the tape regime; None/unknown is assessed as HOSTILE (most
@@ -344,6 +384,9 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
         from .daily import turnover_20d
         turnover = turnover_20d(symbol_df)
     # today's gap needs a live day-open: set by the caller from a quote, else None (gap WARNs)
+    trades_5d = day_trades_5d(journal, now.date()) if profile.code == "US" and journal_readable else (
+        0 if journal_readable else None)
     return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
                         governor_can_trade=can_trade, governor_reasons=reasons, ban=ban, regime=regime,
-                        turnover_20d=turnover, today_gap_pct=None, journal_readable=journal_readable)
+                        turnover_20d=turnover, today_gap_pct=None, day_trades_5d=trades_5d,
+                        journal_readable=journal_readable)

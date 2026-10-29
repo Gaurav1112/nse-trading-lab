@@ -143,7 +143,8 @@ def test_intraday_breakout_at_0945_with_later_bars_is_recorded():
 def test_intraday_breakout_with_no_later_bars_is_time_exit_at_close():
     bars = [("09:15", 100, 101, 99, 100), ("09:30", 101, 102.5, 100.5, 102)]
     rs = setup_history(intraday_frame(("2026-10-27", bars)), iplan(), cost_per_share=0.5)
-    assert rs == [pytest.approx(-0.5 / 2.0)]  # 0R minus cost, risk = 102 - 100
+    # A9: filled at the OR high 101 (stop 100, R = 1), time exit at the breakout bar's close 102
+    assert rs == [pytest.approx((102 - 101 - 0.5 * 101 / 102) / 1.0)]
 
 
 def test_intraday_session_without_open_bar_is_skipped():
@@ -234,3 +235,21 @@ def test_noise_expectancies_deterministic_under_seed():
     from nse_backtest.desk.timemachine import noise_expectancies
     a = noise_expectancies(geometric(), plan(t1=104.2, stop=97.2), runs=5, seed=3)
     assert a and a == noise_expectancies(geometric(), plan(t1=104.2, stop=97.2), runs=5, seed=3)
+
+
+# ---------------------------------------------------------------- final fix wave A9
+def test_a9_breakout_is_first_window_bar_whose_high_clears_or_high():
+    # 09:30 trades through the OR high 101 but closes below it: the live stop-buy fills anyway
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 100.5, 101.6, 100.4, 100.8), ("09:45", 101, 103, 100.9, 102.8)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]  # T = 101 + 1.5
+
+
+def test_a9_gap_above_or_high_fills_at_open():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 102, 102.2, 101.8, 102.1), ("09:45", 102.1, 106, 102, 105)]
+    # fill 102, stop 100, R = 2, target 105
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(1.5)]
+
+
+def test_a9_breakout_bar_touching_stop_is_a_stop_out():
+    bars = [("09:15", 100, 101, 99, 100), ("09:30", 100.5, 103, 99.8, 102.9), ("09:45", 103, 106, 102.9, 105)]
+    assert setup_history(intraday_frame(("2026-10-27", bars)), iplan()) == [pytest.approx(-1.0)]

@@ -458,3 +458,32 @@ def test_a6_load_regime_failure_reaches_on_warning(monkeypatch):
     assert session.resolve_regime(NSE, warns.append) is None
     assert warns and "yfinance failed after 3 attempts" in warns[0]
 
+
+
+# ------------------------------------------------------------------ final fix wave A10
+def _journal(tmp_path, rows):
+    (tmp_path / "trade_journal.json").write_text(json.dumps(rows))
+
+
+US_NOW = datetime(2026, 10, 29, 11, 0, tzinfo=loaders.ZoneInfo(US.tz))  # Thursday
+
+
+def test_a10_pdt_counts_same_day_round_trips_in_last_5_weekdays(tmp_path):
+    rows = [
+        {"market": "US", "symbol": "A", "entry_date": "2026-10-29T09:40", "closed_date": "2026-10-29T10:10", "pnl": 1},
+        {"market": "US", "symbol": "B", "open_date": "2026-10-23", "exit_date": "2026-10-23", "pnl": 1},  # Fri, in window
+        {"market": "US", "symbol": "C", "entry_date": "2026-10-22", "closed_date": "2026-10-22", "pnl": 1},  # Thu last week: out
+        {"market": "US", "symbol": "D", "entry_date": "2026-10-27", "closed_date": "2026-10-28", "pnl": 1},  # swing: not a day trade
+        {"market": "NSE", "symbol": "E", "entry_date": "2026-10-29", "closed_date": "2026-10-29", "pnl": 1},
+    ]
+    _journal(tmp_path, rows)
+    ctx = loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW)
+    assert ctx.day_trades_5d == 2
+
+
+def test_a10_pdt_unknowable_without_entry_dates(tmp_path):
+    _journal(tmp_path, [{"market": "US", "symbol": "A", "closed_date": "2026-10-28", "pnl": 1}])
+    ctx = loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW)
+    assert ctx.day_trades_5d is None
+    _journal(tmp_path, [])
+    assert loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW).day_trades_5d == 0

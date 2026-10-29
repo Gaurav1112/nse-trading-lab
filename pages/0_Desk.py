@@ -5,9 +5,12 @@ error and the rest of the page keeps working.
 """
 from __future__ import annotations
 
+import hashlib
 import html
+import json
 import math
-from datetime import date, datetime
+from dataclasses import asdict
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -38,8 +41,20 @@ def _r(x) -> str:
     return "n/a" if x is None else f"{x:+.2f}R"
 
 
-def _today() -> str:
-    return date.today().isoformat()
+def _market_now(profile) -> datetime:
+    try:
+        return datetime.now(ZoneInfo(profile.tz))
+    except Exception:  # noqa: BLE001 - a bad tz name must not hide a result
+        return datetime.now()
+
+
+def _today(profile) -> str:
+    """Market-today (profile tz), so caches roll over at the market's midnight, not the laptop's."""
+    return _market_now(profile).date().isoformat()
+
+
+def _limits_key(limits) -> str:
+    return hashlib.sha256(json.dumps(asdict(limits), sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
 def _safe(label: str, fn, *args, **kw):
@@ -53,10 +68,8 @@ def _safe(label: str, fn, *args, **kw):
 
 
 def _now_hhmm(profile) -> str:
-    try:
-        return datetime.now(ZoneInfo(profile.tz)).strftime("%H:%M")
-    except Exception:  # noqa: BLE001 - a bad tz name must not hide a result
-        return datetime.now().strftime("%H:%M")
+    """Market date and time, e.g. '2026-10-29 10:05'."""
+    return _market_now(profile).strftime("%Y-%m-%d %H:%M")
 
 
 def _attempt(label: str, fn, *args, **kw) -> dict:
@@ -190,7 +203,7 @@ with st.sidebar:
 def _regime_state(profile):
     """(regime_df, tape, error). Cached per market and day only when the tape was classified;
     a failed, stale or unclassifiable regime is retried on the next run."""
-    key = ("regime", profile.code, _today())
+    key = ("regime", profile.code, _today(profile))
     if key in st.session_state:
         return st.session_state[key]
     warns: list[str] = []
@@ -224,7 +237,7 @@ tab_plan, tab_check, tab_pos, tab_intra = st.tabs(["Today's Plan", "Check a Trad
 # ---------------------------------------------------------------- Today's Plan
 
 with tab_plan:
-    plan_key = ("plan", market, _today())
+    plan_key = ("plan", market, _today(profile), _limits_key(limits))
     if st.button("Build today's plan", key="desk_build_plan"):
         with st.spinner("Scanning the universe — this can take a few minutes the first time..."):
             state = _attempt("Could not build the plan", session.run_daily_plan, profile, limits, universe(profile),
@@ -278,7 +291,8 @@ with tab_check:
     entry = e1.number_input("Entry (0 = auto)", min_value=0.0, value=0.0, key="desk_entry")
     stop = e2.number_input("Stop (0 = auto)", min_value=0.0, value=0.0, key="desk_stop")
     target = e3.number_input("Target (0 = auto)", min_value=0.0, value=0.0, key="desk_target")
-    result_key = ("check", market, symbol.strip().upper(), mode, entry, stop, target)
+    result_key = ("check", market, _today(profile), _limits_key(limits), symbol.strip().upper(), mode,
+                  entry, stop, target)
     if st.button("Check this trade", key="desk_check"):
         with st.spinner("Checking..."):
             try:
@@ -341,7 +355,7 @@ with tab_pos:
 with tab_intra:
     uni = universe(profile)
     picked = st.multiselect("Symbols", uni, default=uni[:15], key=f"desk_intra_syms_{market}")
-    scan_key = ("intraday", market, _today())
+    scan_key = ("intraday", market, _today(profile))
     if st.button("Scan", key="desk_scan"):
         if not picked:
             st.error("Pick at least one symbol.")

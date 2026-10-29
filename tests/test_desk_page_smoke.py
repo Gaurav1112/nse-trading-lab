@@ -158,14 +158,19 @@ def test_check_result_not_shown_for_edited_inputs(monkeypatch, tmp_path):
     assert not any("Plan" == m.value.strip("*") for m in at.markdown)
 
 
+def _market_today(tz="Asia/Kolkata"):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(tz)).date().isoformat()
+
+
 def test_intraday_scan_cache_key_has_date(monkeypatch, tmp_path):
-    from datetime import date
     from nse_backtest.desk import session
     _patch_ok(monkeypatch, tmp_path)
     monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], []))
     at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
     at.button(key="desk_scan").click().run()
-    assert str(("intraday", "NSE", date.today().isoformat())) in at.session_state.filtered_state
+    assert str(("intraday", "NSE", _market_today())) in at.session_state.filtered_state  # A11: market-tz date
 
 
 # ---------------------------------------------------------------- fix round 2
@@ -343,3 +348,22 @@ def test_a7_plan_uses_header_regime_and_tape(monkeypatch, tmp_path):
     at.button(key="desk_build_plan").click().run()
     assert seen.get("regime") == "TRENDING" and seen.get("tape") is not None
     assert seen["tape"].regime == "TRENDING"
+
+
+# ---------------------------------------------------------------- final fix wave A11
+
+def test_a11_check_cache_key_has_market_date_and_limits(monkeypatch, tmp_path):
+    loaders = _patch_ok(monkeypatch, tmp_path)
+    from nse_backtest.desk.models import Limits
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.button(key="desk_check").click().run()
+    assert any("Plan" == m.value.strip("*") for m in at.markdown)
+    keys = [k for k in at.session_state.filtered_state if k.startswith("('check'")]
+    assert keys and all(_market_today() in k for k in keys)
+    cap = next(c.value for c in at.caption if "Checked at" in c.value)
+    assert _market_today() in cap
+    # the limits changed (e.g. saved elsewhere): the old verdict must not be shown for the new limits
+    monkeypatch.setattr(loaders, "load_limits_with_status", lambda p: (Limits(capital=55_555), False))
+    at.run()
+    assert not any("Plan" == m.value.strip("*") for m in at.markdown)

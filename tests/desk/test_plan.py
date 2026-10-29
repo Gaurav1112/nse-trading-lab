@@ -56,7 +56,9 @@ def test_intraday_opening_range_plan():
                        "Volume": 1e5}, index=idx)
     p = build_plan(df, "X", Mode.INTRADAY, NSE)
     assert p.entry == 102 and p.stop == pytest.approx(100.5) and p.stop_basis == "opening-range mid"
-    assert p.target_1 == pytest.approx(103.5) and p.target_2 == pytest.approx(105.0)
+    # A8: T1 = entry + 1.5R (meets the default min_rr), T2 = entry + 3R
+    assert p.target_1 == pytest.approx(104.25) and p.target_2 == pytest.approx(106.5)
+    assert p.rr_t1 == pytest.approx(1.5)
     # last bar 10:30 -> flat by 15:15 = 19 bars of 15 min
     assert p.max_hold_bars == 19
 

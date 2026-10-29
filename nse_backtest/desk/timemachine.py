@@ -145,8 +145,12 @@ def _swing_history(df, plan, cost_per_share, years):
 
 
 def _intraday_history(df, plan, cost_per_share):
-    """Replay the desk's own rule: opening range = the bar at session_open; first close above
-    its high inside [no_entry_before, no_entry_after] is the entry (a breakout outside = no trade)."""
+    """Replay the desk's live rule. Opening range = the bar at session_open. The breakout is the first
+    bar inside [no_entry_before, no_entry_after] whose High clears the OR high (a breakout outside the
+    window = no trade); it fills at max(bar Open, OR high), like the live stop-buy at the OR high.
+    Stop = OR mid, target = entry + rr_t1 x R. On the breakout bar only the stop counts (its Low at or
+    below the stop is a stop-out: we cannot know it reached target first); then later bars are walked.
+    No later bars = time exit at the breakout bar's Close."""
     prof = get_profile(plan.market)
     op, hi, lo, cl = (df[c].to_numpy(dtype=float) for c in ("Open", "High", "Low", "Close"))
     atrs = atr_series(df).to_numpy()
@@ -165,10 +169,10 @@ def _intraday_history(df, plan, cost_per_share):
         a = opens[0]
         or_high, or_low = hi[a], lo[a]
         k = next((p for p in pos[pos > a]
-                  if prof.no_entry_before <= times[p] <= prof.no_entry_after and cl[p] > or_high), None)
+                  if prof.no_entry_before <= times[p] <= prof.no_entry_after and hi[p] > or_high), None)
         if k is None:
             continue
-        entry = float(cl[k])
+        entry = float(max(op[k], or_high))
         stop = (or_high + or_low) / 2
         risk = entry - stop
         # Same degenerate-risk guard as swing: drops zero-range opening bars (R ~ 0 explodes R-multiples).
@@ -176,8 +180,10 @@ def _intraday_history(df, plan, cost_per_share):
             continue
         target = entry + plan.rr_t1 * risk
         rest = pos[pos > k]
-        if len(rest) == 0:
-            px = entry  # accepted trade with nothing after: time exit at the breakout Close (0R minus cost)
+        if lo[k] <= stop:
+            px = stop  # stop wins on the breakout bar itself
+        elif len(rest) == 0:
+            px = cl[k]  # accepted trade with nothing after: time exit at the breakout bar's Close
         else:
             res = _walk(op, hi, lo, cl, rest[0], rest[-1], stop, target)
             px = res[0] if res is not None else cl[rest[-1]]

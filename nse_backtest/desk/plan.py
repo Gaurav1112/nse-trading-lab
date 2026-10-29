@@ -85,7 +85,7 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
             s, basis = stop, "user"
         else:
             s, basis = (float(orb["High"]) + float(orb["Low"])) / 2, "opening-range mid"
-        r_mult2, r1 = 2.0, 1.0
+        r_mult2, r1 = 3.0, 1.5  # T1 at 1.5R so an auto plan meets the default min_rr
         flat_dt = datetime.combine(last_ts.date(), profile.flat_by)
         hold = max(1, int((flat_dt - last_ts.to_pydatetime().replace(tzinfo=None)) / _BAR))
     r = e - s

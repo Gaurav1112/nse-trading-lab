@@ -474,3 +474,17 @@ def test_a5_live_price_fresh_passes_and_missing_time_warns():
     assert _lp(100.0, quote_as_of=NOW).status is Status.PASS
     assert _lp(100.0, quote_as_of=None).status is Status.WARN
     assert _lp(float("nan"), quote_as_of=NOW).status is Status.BLOCK
+
+
+# ---- Final fix wave A10: PDT count unknown WARNs ----
+def _pdt(**kw):
+    lim = Limits(capital=100_000, pdt_guard=True)
+    et = datetime(2026, 10, 29, 10, 30, tzinfo=ZoneInfo("America/New_York"))
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T10:15:00", market="US")
+    return _c("pdt", p=p, profile=US, now=et, ban=None, limits=lim, **kw)
+
+
+def test_a10_pdt_unknown_count_warns():
+    c = _pdt(day_trades_5d=None)
+    assert c.status is Status.WARN and c.reason == "Day-trade count not tracked — confirm with your broker"
+    assert _pdt(day_trades_5d=2).status is Status.PASS and _pdt(day_trades_5d=3).status is Status.BLOCK

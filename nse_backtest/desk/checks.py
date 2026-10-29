@@ -27,7 +27,7 @@ class CheckContext:
     earnings_checked: bool = False
     turnover_20d: float | None = None
     today_gap_pct: float | None = None
-    day_trades_5d: int = 0
+    day_trades_5d: int | None = 0  # None = count unknowable from the journal
     journal_readable: bool = True
     quote_as_of: datetime | None = None  # tz-aware time of the live quote
     price_is_live: bool = False  # True only when the current price came from a live quote
@@ -365,10 +365,14 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("robustness", P, f"Only {nf:.0%} of noisy replays lose money (limit 25%)"))
 
     # 17 pdt
-    if prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and ctx.day_trades_5d >= 3:
-        out.append(_ck("pdt", B, f"Pattern day trader guard: {ctx.day_trades_5d} day trades in the last 5 days (limit 3)"))
-    elif prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and not ctx.journal_readable:
+    guarded = prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard
+    dt = _num(ctx.day_trades_5d)
+    if guarded and dt is not None and dt >= 3:
+        out.append(_ck("pdt", B, f"Pattern day trader guard: {dt:.0f} day trades in the last 5 days (limit 3)"))
+    elif guarded and not ctx.journal_readable:
         out.append(_ck("pdt", W, "Could not read the trade journal — day-trade count not verified"))
+    elif guarded and dt is None:
+        out.append(_ck("pdt", W, "Day-trade count not tracked — confirm with your broker"))
     else:
         out.append(_ck("pdt", P, "Pattern day trader guard does not apply or is within limits"))
 
