@@ -17,6 +17,20 @@ def _no_live_quote(monkeypatch):
         monkeypatch.setattr(loaders, "live_quote", lambda p, s: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Desk tests never touch the network: stub the scorer's earnings lookup and fail any socket connect."""
+    import socket
+    from nse_backtest.features import earnings_guard
+    monkeypatch.setattr(earnings_guard, "_next_earnings_date", lambda symbol: None)
+
+    def _blocked(*args, **kwargs):
+        raise OSError("network access is blocked in desk tests")
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
 @pytest.fixture
 def offline_desk(tmp_path, monkeypatch):
     """Isolated data dir and no network: daily bars, regime, earnings and the ban list are stubbed."""
