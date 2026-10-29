@@ -27,10 +27,19 @@ def parse_fno_ban(text: str) -> frozenset[str]:
     if "ban" not in first.lower():
         raise ValueError("unexpected ban list format")
     out = set()
+    seen_header = False
     for ln in lines:
+        if not ln.strip():
+            continue
+        if not seen_header:
+            seen_header = True
+            continue
         m = _ROW.match(ln)
-        if m:
-            out.add(m.group(1))
+        if not m:
+            raise ValueError(f"unexpected ban list row: {ln!r}")
+        out.add(m.group(1))
+    if not out and "nil" not in first.lower():
+        raise ValueError("ban list has no rows and header does not say NIL")
     return frozenset(out)
 
 
@@ -53,9 +62,13 @@ def fetch_fno_ban(cache_dir: Path, today: date,
     try:
         text = fetch(FNO_BAN_URL)
         symbols = parse_fno_ban(text)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(cache_dir / "fo_secban.csv", text)
-        _atomic_write(cache_dir / "fo_secban.date", today.isoformat())
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write(cache_dir / "fo_secban.csv", text)
+            _atomic_write(cache_dir / "fo_secban.date", today.isoformat())
+        except OSError as cerr:
+            return BanList(symbols, "ok", today.isoformat(),
+                           f"Fetched live from NSE; cache write failed ({cerr})")
         return BanList(symbols, "ok", today.isoformat(), "Fetched live from NSE")
     except Exception as err:  # noqa: BLE001 - never raises by contract
         try:

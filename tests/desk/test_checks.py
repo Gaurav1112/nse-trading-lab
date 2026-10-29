@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+import numpy as np
 import pytest
 from nse_backtest.desk.checks import CheckContext, run_checks, stoploss_streak
 from nse_backtest.desk.models import Limits, Mode, Odds, Sizing, Status, TradePlan
@@ -96,3 +97,126 @@ def test_stoploss_streak_per_market():
     j = [{"pnl": -1, "closed_date": f"2026-10-2{i}"} for i in range(3)]
     assert stoploss_streak(j, "NSE") and not stoploss_streak(j, "US")
     assert not stoploss_streak(j + [{"pnl": 5, "closed_date": "2026-10-28"}], "NSE")
+
+
+# ---- Fix round 1: NaN / invalid data never PASS ----
+NAN = float("nan")
+
+
+def _s(p, odds, c):
+    return by_name(run_checks(p, SIZE, odds, c))
+
+
+def test_nan_monte_carlo_warns():
+    cs = run_checks(plan(), SIZE, replace(ODDS, mc_expectancy_r=NAN), ctx())
+    c = [c for c in cs if c.name == "monte_carlo"][0]
+    assert c.status is Status.WARN and "not a number" in c.reason
+
+
+def test_nan_turnover_warns():
+    c = [c for c in run_checks(plan(), SIZE, ODDS, ctx(turnover_20d=NAN)) if c.name == "liquidity"][0]
+    assert c.status is Status.WARN and "unavailable" in c.reason.lower()
+
+
+def test_nan_gap_warns():
+    assert _s(plan(), ODDS, ctx(today_gap_pct=NAN))["gap"] is Status.WARN
+
+
+def test_none_gap_warns():
+    c = [c for c in run_checks(plan(), SIZE, ODDS, ctx(today_gap_pct=None)) if c.name == "gap"][0]
+    assert c.status is Status.WARN and "could not be measured" in c.reason
+
+
+def test_nan_history_expectancy_treated_missing():
+    o = replace(ODDS, history_expectancy_r=NAN)
+    assert _s(plan(mode=Mode.INTRADAY, last_bar="2026-10-29T09:45:00"), o, ctx())["setup_history"] is Status.BLOCK
+    assert _s(plan(), o, ctx())["setup_history"] is Status.WARN
+
+
+def test_nan_noise_frac_warns():
+    assert _s(plan(), replace(ODDS, noise_negative_frac=NAN), ctx())["robustness"] is Status.WARN
+
+
+def test_robustness_not_run_stays_pass():
+    assert _s(plan(), replace(ODDS, noise_negative_frac=None), ctx())["robustness"] is Status.PASS
+
+
+def test_nan_pnl_row_skipped_in_daily_loss():
+    j = ({"pnl": NAN, "closed_date": "2026-10-29"}, {"pnl": -1500, "closed_date": "2026-10-29"},
+         {"pnl": -1500, "closed_date": "2026-10-29"})
+    assert _s(plan(), ODDS, ctx(journal=j))["daily_loss"] is Status.BLOCK
+    assert _s(plan(), ODDS, ctx(journal=({"pnl": NAN, "closed_date": "2026-10-29"},)))["daily_loss"] is Status.PASS
+
+
+def test_regime_none_intraday_warns():
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T09:45:00")
+    c = [c for c in run_checks(p, SIZE, ODDS, ctx(regime=None)) if c.name == "regime"][0]
+    assert c.status is Status.WARN and "Regime unknown" in c.reason
+
+
+@pytest.mark.parametrize("val", [False, np.False_, 0, "false", "no"])
+def test_governor_non_true_blocks(val):
+    assert _s(plan(), ODDS, ctx(governor_can_trade=val, governor_reasons=("x",)))["risk_governor"] is Status.BLOCK
+
+
+def test_governor_np_true_is_not_true_identity():
+    # only the literal True passes
+    assert _s(plan(), ODDS, ctx(governor_can_trade=True))["risk_governor"] is Status.PASS
+    assert _s(plan(), ODDS, ctx(governor_can_trade=None))["risk_governor"] is Status.WARN
+
+
+# ---- now / timezone handling ----
+def test_utc_now_converted_to_profile_tz_blocks_entry_window():
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T14:55:00")
+    utc = datetime(2026, 10, 29, 9, 30, tzinfo=ZoneInfo("UTC"))  # 15:00 IST
+    assert _s(p, ODDS, ctx(now=utc))["entry_window"] is Status.BLOCK
+
+
+def test_naive_now_intraday_blocks_and_does_not_raise():
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T09:45:00")
+    cs = run_checks(p, SIZE, ODDS, ctx(now=datetime(2026, 10, 29, 10, 0)))
+    r = {c.name: c for c in cs}
+    assert r["freshness"].status is Status.BLOCK and "no timezone" in r["freshness"].reason
+    assert r["entry_window"].status is Status.BLOCK and "no timezone" in r["entry_window"].reason
+
+
+def test_naive_now_swing_entry_window_passes():
+    cs = by_name(run_checks(plan(), SIZE, ODDS, ctx(now=datetime(2026, 10, 29, 10, 0))))
+    assert cs["entry_window"] is Status.PASS and cs["freshness"] is Status.BLOCK
+
+
+# ---- minor ----
+def test_journal_market_case_insensitive():
+    j = tuple({"pnl": -1500, "closed_date": "2026-10-29", "market": "nse"} for _ in range(2))
+    assert _s(plan(), ODDS, ctx(journal=j))["daily_loss"] is Status.BLOCK
+
+
+def test_future_bar_warns_swing_and_intraday():
+    c = [c for c in run_checks(plan(last_bar="2026-11-02T00:00:00"), SIZE, ODDS, ctx()) if c.name == "freshness"][0]
+    assert c.status is Status.WARN and "in the future" in c.reason
+    p = plan(mode=Mode.INTRADAY, last_bar="2026-10-29T11:00:00")
+    c = [c for c in run_checks(p, SIZE, ODDS, ctx()) if c.name == "freshness"][0]
+    assert c.status is Status.WARN and "in the future" in c.reason
+
+
+def test_stale_next_earnings_warns_swing():
+    c = [c for c in run_checks(plan(), SIZE, ODDS, ctx(next_earnings=date(2026, 10, 1))) if c.name == "earnings"][0]
+    assert c.status is Status.WARN and "stale" in c.reason
+
+
+def test_unknown_ban_status_warns():
+    assert _s(plan(), ODDS, ctx(ban=BanList(frozenset(), "weird", None, "")))["ban_list"] is Status.WARN
+    assert _s(plan(), ODDS, ctx(ban=BanList(frozenset(), "cached", "2026-10-29", "")))["ban_list"] is Status.PASS
+
+
+def test_streak_date_ties_use_journal_order():
+    # same date: last-in-journal is "latest"; a win listed last breaks the streak
+    j = [{"pnl": -1, "closed_date": "2026-10-20"}, {"pnl": -1, "closed_date": "2026-10-21"},
+         {"pnl": -1, "closed_date": "2026-10-22"}, {"pnl": 5, "closed_date": "2026-10-22"}]
+    assert not stoploss_streak(j, "NSE")
+    # tie on 22nd resolved by journal order: win listed first, loss last -> last 3 = L, W, L
+    k = j[:2] + [j[3], j[2]]
+    assert not stoploss_streak(k, "NSE")
+    # loss listed last on the tie date with two earlier losses -> streak
+    m = [j[0], j[3], j[1], j[2]]
+    assert stoploss_streak(m + [{"pnl": -1, "closed_date": "2026-10-22"}], "NSE") is False

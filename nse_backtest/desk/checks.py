@@ -35,15 +35,17 @@ def _entry(e: dict) -> tuple[str, date, float] | None:
         d = date.fromisoformat(str(raw)[:10])
         pnl = e["pnl"] if e.get("pnl") is not None else e.get("net_pnl")
         pnl = float(pnl)
-        if math.isnan(pnl):
+        if not math.isfinite(pnl):
             return None
     except (TypeError, ValueError, KeyError, AttributeError):
         return None
-    return (str(e.get("market") or "NSE"), d, pnl)
+    return (str(e.get("market") or "NSE").upper(), d, pnl)
 
 
 def _market_entries(journal, market: str) -> list[tuple[date, float]]:
-    rows = [r for r in (_entry(e) for e in journal) if r is not None and r[0] == market]
+    rows = [r for r in (_entry(e) for e in journal) if r is not None and r[0] == str(market).upper()]
+    # Stable sort: entries sharing a date keep their original journal order,
+    # so the later-listed entry counts as the more recent one in a streak.
     return sorted(((d, p) for _, d, p in rows), key=lambda r: r[0])
 
 
@@ -71,7 +73,11 @@ def _parse_bar(last_bar: str, tz: ZoneInfo) -> datetime | None:
 
 
 def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckContext) -> list[Check]:
-    p, lim, prof, now = plan, ctx.limits, ctx.profile, ctx.now
+    p, lim, prof = plan, ctx.limits, ctx.profile
+    now = ctx.now
+    naive = now.tzinfo is None
+    if not naive:
+        now = now.astimezone(ZoneInfo(prof.tz))
     swing = p.mode is Mode.SWING
     out: list[Check] = []
     P, W, B = Status.PASS, Status.WARN, Status.BLOCK
@@ -89,8 +95,10 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         if ctx.regime == "HOSTILE":
             out.append(_ck("regime", W, "Market regime HOSTILE: intraday longs face a falling market, be selective"))
+        elif ctx.regime is None:
+            out.append(_ck("regime", W, "Regime unknown: could not classify the market, be selective"))
         else:
-            out.append(_ck("regime", P, f"Market regime {ctx.regime or 'unknown'} does not restrict intraday longs"))
+            out.append(_ck("regime", P, f"Market regime {ctx.regime} does not restrict intraday longs"))
 
     # 2 reward_risk
     try:
@@ -111,7 +119,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 4 risk_governor
     if ctx.governor_can_trade is None:
         out.append(_ck("risk_governor", W, "Risk governor not evaluated: portfolio limits could not be checked"))
-    elif ctx.governor_can_trade is False:
+    elif ctx.governor_can_trade is not True:
         why = "; ".join(ctx.governor_reasons) or "no reason given"
         out.append(_ck("risk_governor", B, f"Risk governor says no new trades: {why}"))
     else:
@@ -131,7 +139,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         sym = sym[: -len(prof.exchange) - 1]
     if not prof.has_ban_list:
         out.append(_ck("ban_list", P, f"No ban list for {prof.code}"))
-    elif ctx.ban is None or ctx.ban.status == "unavailable":
+    elif ctx.ban is None or ctx.ban.status not in ("ok", "cached", "stale"):
         out.append(_ck("ban_list", W, "Could not verify F&O ban list: check NSE before trading"))
     elif sym in ctx.ban.symbols:
         out.append(_ck("ban_list", B, f"{sym} is in the NSE F&O ban list: no fresh positions allowed"))
@@ -143,6 +151,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 7 monte_carlo
     if odds is None:
         out.append(_ck("monte_carlo", W, "Monte Carlo odds unavailable: no simulated expectancy to check"))
+    elif not math.isfinite(odds.mc_expectancy_r):
+        out.append(_ck("monte_carlo", W, "Monte Carlo expectancy is not a number — odds unavailable"))
     elif odds.mc_expectancy_r < 0:
         out.append(_ck("monte_carlo", B, f"Simulated expectancy {odds.mc_expectancy_r:+.2f}R is negative"))
     elif odds.mc_expectancy_r < 0.1:
@@ -155,15 +165,21 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     bar = _parse_bar(p.last_bar, tz)
     if bar is None:
         out.append(_ck("freshness", B, "Could not read the last bar's time: cannot confirm the data is current"))
+    elif naive:
+        out.append(_ck("freshness", B, "Clock has no timezone — cannot verify freshness"))
     elif swing:
         age = (now.date() - bar.date()).days
-        if age > 3:
+        if age < 0:
+            out.append(_ck("freshness", W, "Last bar is in the future — check the clock/data"))
+        elif age > 3:
             out.append(_ck("freshness", B, f"Data is stale: last daily bar is {age} days old (limit 3)"))
         else:
             out.append(_ck("freshness", P, f"Last daily bar is {age} days old (limit 3)"))
     else:
         age_min = (now - bar).total_seconds() / 60
-        if now - bar > timedelta(minutes=30):
+        if age_min < -5:
+            out.append(_ck("freshness", W, "Last bar is in the future — check the clock/data"))
+        elif now - bar > timedelta(minutes=30):
             out.append(_ck("freshness", B, f"Data is stale: last intraday bar is {age_min:.0f} minutes old (limit 30)"))
         else:
             out.append(_ck("freshness", P, f"Last intraday bar is {age_min:.0f} minutes old (limit 30)"))
@@ -171,6 +187,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 9 entry_window
     if swing:
         out.append(_ck("entry_window", P, "Swing entries have no time-of-day window"))
+    elif naive:
+        out.append(_ck("entry_window", B, "Clock has no timezone — cannot verify the entry window"))
     elif now.weekday() >= 5:
         out.append(_ck("entry_window", B, f"Market is closed: {now:%A} is a weekend"))
     elif not (prof.no_entry_before <= now.time() <= prof.no_entry_after):
@@ -179,8 +197,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("entry_window", P, f"{now:%H:%M} is inside the entry window {prof.no_entry_before:%H:%M}-{prof.no_entry_after:%H:%M}"))
 
     # 10 liquidity
-    if ctx.turnover_20d is None:
-        out.append(_ck("liquidity", W, "Liquidity unknown: 20-day turnover could not be computed"))
+    if ctx.turnover_20d is None or not math.isfinite(ctx.turnover_20d):
+        out.append(_ck("liquidity", W, "Liquidity unavailable: 20-day turnover could not be computed"))
     elif ctx.turnover_20d < prof.min_turnover:
         out.append(_ck("liquidity", B, f"20-day turnover {prof.money(ctx.turnover_20d)} is below the minimum {prof.money(prof.min_turnover)}"))
     else:
@@ -195,7 +213,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         days = (ctx.next_earnings - now.date()).days
         if swing:
             window = math.ceil(p.max_hold_bars * 7 / 5)
-            if 0 <= days <= window:
+            if days < 0:
+                out.append(_ck("earnings", W, f"Earnings date {ctx.next_earnings} is in the past: the date looks stale"))
+            elif days <= window:
                 out.append(_ck("earnings", W, f"Earnings on {ctx.next_earnings} are {days} days away, inside the {window}-day hold window"))
             else:
                 out.append(_ck("earnings", P, f"Next earnings on {ctx.next_earnings} are outside the {window}-day hold window"))
@@ -209,6 +229,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("setup_history", W, "Setup history unavailable: no past trades of this setup to check"))
     else:
         n, exp = odds.history_n, odds.history_expectancy_r
+        if exp is not None and not math.isfinite(exp):
+            exp = None
         if not swing:
             if n < 20 or exp is None or exp < 0.2:
                 out.append(_ck("setup_history", B, "Research only: this setup hasn't earned +0.2R over ≥20 past sessions on this stock"))
@@ -230,10 +252,10 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
 
     # 14 gap
     g = ctx.today_gap_pct
-    if g is not None and abs(g) > 2:
+    if g is None or not math.isfinite(g):
+        out.append(_ck("gap", W, "Today's gap could not be measured: entry price may be off"))
+    elif abs(g) > 2:
         out.append(_ck("gap", W, f"Today's gap of {g:+.1f}% is larger than 2%: entry price may be off"))
-    elif g is None:
-        out.append(_ck("gap", P, "No gap data for today; nothing flagged"))
     else:
         out.append(_ck("gap", P, f"Today's gap of {g:+.1f}% is within 2%"))
 
@@ -241,6 +263,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     nf = odds.noise_negative_frac if odds is not None else None
     if nf is None:
         out.append(_ck("robustness", P, "Noise robustness test not run"))
+    elif not math.isfinite(nf):
+        out.append(_ck("robustness", W, "Noise robustness result is not a number: fragility unknown"))
     elif nf > 0.25:
         out.append(_ck("robustness", W, f"Edge is fragile: {nf:.0%} of noisy replays lose money (limit 25%)"))
     else:
