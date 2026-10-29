@@ -129,8 +129,10 @@ def _parse_row(row: dict) -> Candidate:
     hold = int(hold) if hold is not None else DEFAULT_MAX_HOLD[mode]
     if hold < 1:
         raise ValueError("max_hold_bars < 1")
-    if mode is Mode.INTRADAY and created.astimezone(ZoneInfo(profile.tz)).time() >= profile.flat_by:
-        raise ValueError("created after flat-by")
+    if mode is Mode.INTRADAY:
+        local = created.astimezone(ZoneInfo(profile.tz))
+        if local.time() >= cal.flat_by_for(profile, local.date()):  # early-close days flatten earlier
+            raise ValueError("created after flat-by")
     raw_cps = row.get("cost_per_share")
     if raw_cps is not None:
         cps = float(raw_cps)
@@ -276,20 +278,71 @@ def _with_calendar_note(o: Outcome, first: date, last: date) -> Outcome:
     return replace(o, note=f"{o.note} {NO_CALENDAR}" if o.note else NO_CALENDAR)
 
 
+def logged_mid_session(c: Candidate, fill_session: date) -> bool:
+    """True when a swing TAKE was logged during its own fill session (at/after the open, before the close):
+    that session's daily bar then holds prices from before the order existed."""
+    profile = get_profile(c.market)
+    local = c.created_at.astimezone(ZoneInfo(profile.tz))
+    return local.date() == fill_session and local.time() >= profile.session_open
+
+
+MID_SESSION_NOTE = "TAKE logged mid-session; intraday bars needed for the fill day"
+
+
+def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why: str
+                       ) -> Outcome | tuple[float, pd.Timestamp]:
+    """The fill session of a TAKE logged mid-session, from 15-minute bars strictly after created_at: LIMIT filled
+    at the first bar with Low <= entry at min(Open, entry); after the fill only the stop can trigger that day.
+    Returns a final Outcome (NOT_FILLED, LOST or UNAVAILABLE) or (fill, fill_at) to continue on daily bars."""
+    if bars15 is None:
+        return _outcome(c, Status.UNAVAILABLE, MID_SESSION_NOTE + (f" ({why})" if why else ""))
+    profile = get_profile(c.market)
+    created = c.created_at.astimezone(ZoneInfo(profile.tz)).replace(tzinfo=None)
+    close = cal.session_close_for(profile, day)
+    idx = bars15.index
+    mask = (idx.normalize() == pd.Timestamp(day)) & (idx > pd.Timestamp(created)) & \
+           (np.array([t.time() < close for t in idx], dtype=bool) if len(idx) else True)
+    sess = bars15[mask]
+    if sess.empty:
+        return _outcome(c, Status.UNAVAILABLE, f"{MID_SESSION_NOTE} (no 15-minute bars after the TAKE)")
+    gap_after = _gap_after(sess.index, created)
+    if gap_after is not None:
+        return _outcome(c, Status.UNAVAILABLE, f"gap in intraday bars on the fill day (missing after {gap_after:%H:%M})")
+    last_start = sess.index[-1].to_pydatetime()
+    if last_start < datetime.combine(day, close) - timedelta(minutes=15):
+        return _outcome(c, Status.UNAVAILABLE, f"incomplete fill-day intraday bars (last bar {last_start:%H:%M})")
+    op, lo = sess["Open"].to_numpy(dtype=float), sess["Low"].to_numpy(dtype=float)
+    if not _all_finite(op, lo, sess["High"].to_numpy(dtype=float), sess["Close"].to_numpy(dtype=float)):
+        return _outcome(c, Status.UNAVAILABLE, "bad price data")
+    k = next((p for p in range(len(sess)) if lo[p] <= c.entry), None)
+    if k is None:
+        return _outcome(c, Status.NOT_FILLED, "limit not reached after the TAKE on the fill session")
+    fill, fill_at = min(op[k], c.entry), sess.index[k]
+    m = next((p for p in range(k, len(sess)) if lo[p] <= c.stop), None)
+    if m is not None:  # target on the fill day is ignored (as on a daily fill bar)
+        return _finish(c, fill, fill_at, min(op[m], c.stop), sess.index[m], 0, "stop touched on the fill day")
+    return float(fill), fill_at
+
+
 def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
-                  session_closed_today: bool = False) -> Outcome:
+                  session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
+                  intraday_note: str = "") -> Outcome:
     """CNC LIMIT at entry for one session. Fill bar: filled iff Low <= entry at min(Open, entry); only the stop
     can trigger on it. Then up to max_hold_bars further bars; no exit -> time exit at the last bar's Close.
     Bars dated on/after today (market-local) are ignored unless session_closed_today: they may be partial.
     The bars from the fill session through the last bar used must be consecutive trading sessions: a missing
-    session (where the stop could have been hit) makes the trade UNAVAILABLE, never a guess."""
+    session (where the stop could have been hit) makes the trade UNAVAILABLE, never a guess.
+    A TAKE logged during its fill session (logged_mid_session) resolves that session from `bars15` (15-minute
+    bars, see _fill_day_intraday); without them it is UNAVAILABLE (`intraday_note` says why)."""
     o, last_used = _resolve_swing(c, daily, fill_session=fill_session, now=now,
-                                  session_closed_today=session_closed_today)
+                                  session_closed_today=session_closed_today, bars15=bars15,
+                                  intraday_note=intraday_note)
     return _with_calendar_note(o, fill_session, max(fill_session, last_used or fill_session))
 
 
 def _resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
-                   session_closed_today: bool) -> tuple[Outcome, date | None]:
+                   session_closed_today: bool, bars15: pd.DataFrame | None, intraday_note: str
+                   ) -> tuple[Outcome, date | None]:
     tz = ZoneInfo(get_profile(c.market).tz)
     today = now.astimezone(tz).date()
     if not session_closed_today:
@@ -305,12 +358,18 @@ def _resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now
     if not _all_finite(op[i:i + c.max_hold_bars + 1], hi[i:i + c.max_hold_bars + 1],
                        lo[i:i + c.max_hold_bars + 1], cl[i:i + c.max_hold_bars + 1]):
         return _outcome(c, Status.UNAVAILABLE, "bad price data"), None
-    if not lo[i] <= c.entry:
-        return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session"), None
-    fill = min(op[i], c.entry)
-    fill_at = daily.index[i]
-    if lo[i] <= c.stop:  # target on the fill bar is ignored (intrabar order unknown)
-        return _finish(c, fill, fill_at, min(op[i], c.stop), fill_at, 0, "stop touched on the fill bar"), None
+    if logged_mid_session(c, fill_session):
+        got = _fill_day_intraday(c, bars15, fill_session, intraday_note)
+        if isinstance(got, Outcome):
+            return got, None
+        fill, fill_at = got
+    else:
+        if not lo[i] <= c.entry:
+            return _outcome(c, Status.NOT_FILLED, "limit not reached on the fill session"), None
+        fill = min(op[i], c.entry)
+        fill_at = daily.index[i]
+        if lo[i] <= c.stop:  # target on the fill bar is ignored (intrabar order unknown)
+            return _finish(c, fill, fill_at, min(op[i], c.stop), fill_at, 0, "stop touched on the fill bar"), None
     last = min(i + c.max_hold_bars, len(daily) - 1)
     res = _walk(op, hi, lo, cl, i + 1, last, c.stop, c.target_1) if last > i else None
     if res is not None:
@@ -345,7 +404,9 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
 
 
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
-    """MIS LIMIT at entry over created_at's session, bars strictly after created_at and before flat_by."""
+    """MIS LIMIT at entry over created_at's session, bars strictly after created_at and before flat_by: filled at
+    the first bar with Low <= entry at min(Open, entry) (a BUY LIMIT, as the ticket prints it); only the stop can
+    trigger on the fill bar."""
     tz = ZoneInfo(get_profile(c.market).tz)
     created = c.created_at.astimezone(tz).replace(tzinfo=None)
     now_l = now.astimezone(tz).replace(tzinfo=None)
@@ -368,14 +429,14 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = sess.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    k = next((p for p in range(len(sess)) if hi[p] >= c.entry), None)
+    k = next((p for p in range(len(sess)) if lo[p] <= c.entry), None)  # BUY LIMIT, as the ticket prints
     if k is None:
         if not session_over:
             return _outcome(c, Status.OPEN, "limit not reached yet")
         if incomplete:
             return _outcome(c, Status.UNAVAILABLE, incomplete_note)
         return _outcome(c, Status.NOT_FILLED, "limit not reached before flat-by")
-    fill = max(op[k], c.entry)
+    fill = min(op[k], c.entry)
     fill_at = sess.index[k]
     if lo[k] <= c.stop:
         return _finish(c, fill, fill_at, c.stop, fill_at, 0, "stop touched on the fill bar")

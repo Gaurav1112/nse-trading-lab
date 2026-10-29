@@ -24,7 +24,7 @@ from .markets import get_profile
 from .models import Mode
 from .scoreboard import (
     SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_price_scale, exit_status, load_candidates,
-    realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
+    logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 
 Warn = Callable[[str], None] | None
@@ -407,6 +407,7 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
             try:
                 bars = load_intraday(profile, symbol)
             except Exception as e:  # noqa: BLE001
+                _warn(on_warning, f"scoreboard: intraday bars for {profile.code} {symbol} unavailable: {_err(e)}")
                 for i in todo:
                     out[i] = unavailable(cs[i], f"intraday bars unavailable: {_err(e)}")
             else:
@@ -416,16 +417,44 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
                     out[i] = _replay(c, on_warning, resolve_intraday, bars, flat_by=flat_by, now=now)
     else:
         closed = cal.is_trading_day(profile, today) and now_l.time() >= cal.session_close_for(profile, today)
+        fills = [fill_session_of(c.market, c.created_at) for c in cs]  # cannot fail: candidates_from screened it
         try:
             daily = load_daily(profile, symbol, adjusted=False)  # dividend-adjusted bars are not what was printed
         except Exception as e:  # noqa: BLE001
+            _warn(on_warning, f"scoreboard: daily bars for {profile.code} {symbol} unavailable: {_err(e)}")
             for i, c in enumerate(cs):
                 out[i] = unavailable(c, f"daily bars unavailable: {_err(e)}")
         else:
-            for i, c in enumerate(cs):  # fill_session_of cannot fail here: candidates_from screened it
-                out[i] = _replay(c, on_warning, _replay_swing, daily, fill_session=fill_session_of(c.market, c.created_at),
-                                 now=now, session_closed_today=closed)
+            bars15, why = _fill_day_bars(cs, fills, profile, symbol, today, closed, load_intraday, on_warning)
+            for i, c in enumerate(cs):
+                fresh = _intraday_in_range(fills[i], today)
+                out[i] = _replay(c, on_warning, _replay_swing, daily, fill_session=fills[i], now=now,
+                                 session_closed_today=closed, bars15=bars15 if fresh else None,
+                                 intraday_note=why if fresh else _TOO_OLD)
     return [out[i] for i in range(len(cs))]
+
+
+_TOO_OLD = "older than 60 days (yfinance limit)"
+
+
+def _intraday_in_range(day: date, today: date) -> bool:
+    return (today - day).days <= INTRADAY_MAX_AGE_DAYS
+
+
+def _fill_day_bars(cs: list[Candidate], fills: list[date], profile, symbol: str, today: date, closed: bool,
+                   load_intraday, on_warning: Warn) -> tuple[pd.DataFrame | None, str]:
+    """15-minute bars for swing TAKEs logged during a fill session that has closed (loaded once, only when one
+    needs them and is within yfinance's 60 days), and why they are missing when they are."""
+    mids = [f for c, f in zip(cs, fills) if logged_mid_session(c, f) and (f < today or (f == today and closed))]
+    if not mids:
+        return None, ""
+    if not any(_intraday_in_range(f, today) for f in mids):
+        return None, _TOO_OLD
+    try:
+        return load_intraday(profile, symbol), ""
+    except Exception as e:  # noqa: BLE001 - the trades stay visible as UNAVAILABLE
+        _warn(on_warning, f"scoreboard: intraday bars for {profile.code} {symbol} unavailable: {_err(e)}")
+        return None, f"intraday bars unavailable: {_err(e)}"
 
 
 def build_scoreboard(market: str | None, *, now: datetime, audit_path: Path, cache_path: Path,

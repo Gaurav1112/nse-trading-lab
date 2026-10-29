@@ -27,10 +27,24 @@ it is not the user's real P&L.
   (`Low <= stop` → exit at `min(Open, stop)` if Open <= stop else stop); target on the fill bar is ignored
   (intrabar order unknown → conservative). Then `_walk` the next bars up to `max_hold_bars` bars after the fill bar;
   no exit → time exit at the Close of the last bar. Not filled → `not_filled`.
-- *Intraday* (MIS LIMIT at entry): 15-min bars of created_at's session, strictly after created_at. Filled at the
-  first bar with `High >= entry`, fill = `max(Open, entry)`; on the fill bar stop-only check; then `_walk` the
-  remaining bars before the session's flat-by; no exit → time exit at the Close of the last bar before flat-by.
-  Not filled before flat-by → `not_filled`.
+- *Swing TAKE logged during its fill session* (review round R1): when created_at is inside the fill session
+  (same date, at/after the open) the daily fill bar holds prices from before the order. The fill day is resolved
+  from 15-min bars strictly after created_at (same 60-day yfinance limit and gap rule as intraday): filled at the
+  first bar with `Low <= entry`, fill = `min(Open, entry)`; after the fill only the stop can trigger that day;
+  then the daily walk continues from the next session (max_hold counted from the fill bar). No 15-min bars →
+  `data_unavailable` ("TAKE logged mid-session; intraday bars needed for the fill day").
+- *Swing data checks* (R1): daily bars are **unadjusted** (`auto_adjust=False`); the bars from the fill session
+  through the last bar used must be consecutive trading sessions per the calendar ("missing daily bar for {date}"
+  → `data_unavailable`); the plan's logged `last_close` must match the loaded Close on `last_bar` within 0.5%
+  (split/bonus re-scaling → `data_unavailable`; rows without `last_close`: entry within 20% of that Close).
+- *Intraday* (MIS LIMIT at entry, exactly as the ticket prints it): 15-min bars of created_at's session, strictly
+  after created_at. Filled at the first bar with `Low <= entry`, fill = `min(Open, entry)` (a BUY LIMIT; until R1
+  this was modelled as a buy-stop, `High >= entry` at `max(Open, entry)`, which is not what the ticket says); on
+  the fill bar stop-only check; then `_walk` the remaining bars before the session's flat-by; no exit → time exit
+  at the Close of the last bar before flat-by. Not filled before flat-by → `not_filled`.
+  **Open question for the user:** the ORB plan's entry is the opening-range high, i.e. a breakout. A breakout is
+  normally a BUY STOP (SL-M/SL) order, but the ticket prints BUY MIS LIMIT. The scoreboard replays what is printed;
+  if the ticket should say a stop order, both the ticket and this rule must change together.
 - *Status*: `won` (exit at target), `lost` (exit at/through stop), `time` (time exit), `not_filled`, `open` (not enough
   bars yet; mark-to-market R shown, excluded from stats), `data_unavailable` (bars can't be loaded, e.g. intraday
   older than 60 days and not cached) — never silently dropped.
@@ -43,6 +57,9 @@ seed 19), max drawdown in R, cumulative R series, counts of not_filled/open/unav
 **Verdict** (first that applies):
 1. n < 30 → "Not enough trades yet ({n}/30) — keep paper-trading".
 2. CI upper < 0 → "Losing — do not trade this with real money".
+2a. (R1) unavailable u > 10% of (resolved + u) → "Inconclusive — {u} trades could not be replayed; fix the data
+   before trusting this".
+2b. prediction coverage < 80% → "Inconclusive — keep paper-trading (odds missing for {k} of {n} trades)".
 3. CI upper < mean predicted MC R → "Worse than the desk's odds — do not size up".
 4. CI lower > 0 and mean realised ≥ mean predicted MC − 0.15 → "Matching the odds — real money at small size (≤0.5% risk)".
 5. else → "Inconclusive — keep paper-trading".

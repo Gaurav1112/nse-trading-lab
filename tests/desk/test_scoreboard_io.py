@@ -97,7 +97,7 @@ def run(paths, loader=None, intraday=None, **kw):
 # ---------------------------------------------------------------- swing + cache
 
 def test_swing_won_then_served_from_cache(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     ld = Loader({"ABC": frame(WIN_BARS)})
     res = run(paths, ld)
     assert [o.status for o in res.outcomes] == [Status.WON]
@@ -137,8 +137,8 @@ def test_friday_after_close_dedupes_with_monday_morning(paths):
 
 
 def test_open_not_cached_and_unavailable_not_cached(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 27, 10, 0, tzinfo=IST), symbol="OPN", h="o"),
-                           row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="BAD", h="b")])
+    write_audit(paths[0], [row(datetime(2026, 10, 27, 9, 0, tzinfo=IST), symbol="OPN", h="o"),
+                           row(datetime(2026, 10, 16, 9, 0, tzinfo=IST), symbol="BAD", h="b")])
 
     class Mixed(Loader):
         def __call__(self, profile, symbol, *a, **k):
@@ -179,7 +179,7 @@ def test_intraday_resolves_from_fake_bars(paths):
 
 
 def test_corrupt_cache_backed_up_and_rebuilt(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     paths[1].write_text("{not json", encoding="utf-8")
     warns = []
     res = run(paths, Loader({"ABC": frame(WIN_BARS)}), on_warning=warns.append)
@@ -193,7 +193,7 @@ def test_corrupt_cache_backed_up_and_rebuilt(paths):
 
 @pytest.mark.parametrize("bad", ['[1, 2]', '{"version": 1, "outcomes": []}', '{"outcomes": {}}'])
 def test_wrong_shape_cache_backed_up(paths, bad):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     paths[1].write_text(bad, encoding="utf-8")
     res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
     assert list(paths[1].parent.glob("desk_scoreboard.json.corrupt-*"))
@@ -201,7 +201,7 @@ def test_wrong_shape_cache_backed_up(paths, bad):
 
 
 def test_wrong_version_rebuilt(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     paths[1].write_text(json.dumps({"version": SCOREBOARD_VERSION + 1, "outcomes": {}}), encoding="utf-8")
     ld = Loader({"ABC": frame(WIN_BARS)})
     res = run(paths, ld)
@@ -213,7 +213,7 @@ def test_wrong_version_rebuilt(paths):
 
 
 def test_bool_version_is_not_a_match(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     run(paths, Loader({"ABC": frame(WIN_BARS)}))
     data = json.loads(paths[1].read_text())
     data["version"] = True
@@ -224,7 +224,7 @@ def test_bool_version_is_not_a_match(paths):
 
 
 def test_changed_candidate_fields_recomputed(paths):
-    created = datetime(2026, 10, 16, 10, 0, tzinfo=IST)
+    created = datetime(2026, 10, 16, 9, 0, tzinfo=IST)
     write_audit(paths[0], [row(created)])
     run(paths, Loader({"ABC": frame(WIN_BARS)}))
     write_audit(paths[0], [row(created, target_1=104.0)])  # same input_hash + created_at = same key
@@ -240,7 +240,7 @@ def test_changed_candidate_fields_recomputed(paths):
 
 
 def test_changed_candidate_fields_final_recompute_replaces_entry(paths):
-    created = datetime(2026, 10, 16, 10, 0, tzinfo=IST)
+    created = datetime(2026, 10, 16, 9, 0, tzinfo=IST)
     write_audit(paths[0], [row(created)])
     run(paths, Loader({"ABC": frame(WIN_BARS)}))
     write_audit(paths[0], [row(created, target_1=103.1)])
@@ -251,7 +251,7 @@ def test_changed_candidate_fields_final_recompute_replaces_entry(paths):
 
 
 def test_tampered_cache_entry_dropped_and_recomputed(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     lose = {"2026-10-16": (101, 101.5, 99.5, 100.5), "2026-10-19": (100, 100.2, 97, 97.5)}
     run(paths, Loader({"ABC": frame(lose)}))
     data = json.loads(paths[1].read_text())
@@ -267,8 +267,8 @@ def test_tampered_cache_entry_dropped_and_recomputed(paths):
 
 
 def test_single_malformed_entry_dropped_only(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="AAA", h="a"),
-                           row(datetime(2026, 10, 16, 10, 5, tzinfo=IST), symbol="BBB", h="b")])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST), symbol="AAA", h="a"),
+                           row(datetime(2026, 10, 16, 9, 5, tzinfo=IST), symbol="BBB", h="b")])
     run(paths, Loader({"AAA": frame(WIN_BARS), "BBB": frame(WIN_BARS)}))
     data = json.loads(paths[1].read_text())
     bkey = next(k for k in data["outcomes"] if k.startswith("b|"))
@@ -282,9 +282,9 @@ def test_single_malformed_entry_dropped_only(paths):
 
 
 def test_rejects_carry_line_numbers(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST)), "garbage{", "",
-                           row(datetime(2026, 10, 16, 11, 0, tzinfo=IST), symbol="XYZ", entry=None), "[1, 2]",
-                           row(datetime(2026, 10, 16, 11, 0, tzinfo=IST), action="SKIP", h="s")])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST)), "garbage{", "",
+                           row(datetime(2026, 10, 16, 9, 10, tzinfo=IST), symbol="XYZ", entry=None), "[1, 2]",
+                           row(datetime(2026, 10, 16, 9, 10, tzinfo=IST), action="SKIP", h="s")])
     res = run(paths, Loader({"ABC": frame(WIN_BARS)}))
     assert [n for n, _ in res.rejects] == [2, 4, 5]
     assert "unreadable audit line" in res.rejects[0][1] and "entry" in res.rejects[1][1]
@@ -297,7 +297,7 @@ def test_missing_audit_is_empty(paths):
 
 
 def test_cache_file_mode_and_atomic_write(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     run(paths, Loader({"ABC": frame(WIN_BARS)}))
     assert stat.S_IMODE(os.stat(paths[1]).st_mode) == 0o600
     assert sorted(p.name for p in paths[1].parent.iterdir()) == ["desk_audit.jsonl", "desk_scoreboard.json"]
@@ -308,8 +308,8 @@ def test_cache_file_mode_and_atomic_write(paths):
 
 
 def test_market_filter_and_stats_never_combine(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), h="n"),
-                           row(datetime(2026, 10, 16, 10, 0, tzinfo=ET), market="US", symbol="XYZ", h="u")])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST), h="n"),
+                           row(datetime(2026, 10, 16, 9, 0, tzinfo=ET), market="US", symbol="XYZ", h="u")])
     frames = {"ABC": frame(WIN_BARS), "XYZ": frame(WIN_BARS)}
     res = run(paths, Loader(frames), market="US")
     assert [o.candidate.market for o in res.outcomes] == ["US"]
@@ -337,8 +337,8 @@ def _cli_env(tmp_path, monkeypatch, rows):
 
 def test_cli_text(tmp_path, monkeypatch, capsys):
     from nse_backtest.desk.cli import main
-    _cli_env(tmp_path, monkeypatch, [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST)),
-                                     row(datetime(2026, 10, 16, 10, 0, tzinfo=ET), market="US", symbol="XYZ",
+    _cli_env(tmp_path, monkeypatch, [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST)),
+                                     row(datetime(2026, 10, 16, 9, 0, tzinfo=ET), market="US", symbol="XYZ",
                                          h="u"), "garbage{"])
     assert main(["scoreboard", "--market", "ALL"]) == 0
     from nse_backtest.desk import loaders
@@ -355,8 +355,8 @@ def test_cli_text(tmp_path, monkeypatch, capsys):
 
 def test_cli_default_market_all_and_json(tmp_path, monkeypatch, capsys):
     from nse_backtest.desk.cli import main
-    _cli_env(tmp_path, monkeypatch, [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST)),
-                                     row(datetime(2026, 10, 16, 10, 0, tzinfo=ET), market="US", symbol="XYZ",
+    _cli_env(tmp_path, monkeypatch, [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST)),
+                                     row(datetime(2026, 10, 16, 9, 0, tzinfo=ET), market="US", symbol="XYZ",
                                          h="u")])
     assert main(["scoreboard", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -427,14 +427,14 @@ def _cached(paths) -> dict:
 
 
 def test_nan_cache_entry_dropped_and_cache_repaired(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="AAA", h="a")])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST), symbol="AAA", h="a")])
     run(paths, Loader({"AAA": frame(WIN_BARS)}))
     data = json.loads(paths[1].read_text())
     (entry,) = data["outcomes"].values()
     entry["candidate"]["mc_expectancy_r"] = float("nan")  # a field the match does not compare
     paths[1].write_text(json.dumps(data), encoding="utf-8")  # json writes a bare NaN
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST), symbol="AAA", h="a"),
-                           row(datetime(2026, 10, 16, 10, 5, tzinfo=IST), symbol="BBB", h="b")])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST), symbol="AAA", h="a"),
+                           row(datetime(2026, 10, 16, 9, 5, tzinfo=IST), symbol="BBB", h="b")])
     ld = Loader({"AAA": frame(WIN_BARS), "BBB": frame(WIN_BARS)})
     res = run(paths, ld)
     assert [o.status for o in res.outcomes] == [Status.WON, Status.WON]
@@ -454,7 +454,7 @@ def test_save_reports_unserialisable_payload(tmp_path):
 
 
 def test_same_day_result_shown_but_not_cached(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 9, 0, tzinfo=IST))])
     today = frame({"2026-10-28": (101, 101, 97, 99)})  # fills at 100 and touches the stop on the same bar
     res = run(paths, Loader({"ABC": today}), now=datetime(2026, 10, 28, 15, 31, tzinfo=IST))
     assert res.outcomes[0].status is Status.LOST
@@ -465,10 +465,10 @@ def test_same_day_result_shown_but_not_cached(paths):
 
 
 def test_same_day_not_filled_and_intraday_not_cached(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST)),
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 9, 0, tzinfo=IST)),
                            row(datetime(2026, 10, 28, 9, 50, tzinfo=IST), symbol="XYZ", mode="intraday", h="i")])
     idx = pd.date_range("2026-10-28 09:15", "2026-10-28 15:15", freq="15min")
-    flat = pd.DataFrame({"Open": 99.0, "High": 99.5, "Low": 98.5, "Close": 99.2}, index=idx)
+    flat = pd.DataFrame({"Open": 101.0, "High": 101.5, "Low": 100.5, "Close": 101.2}, index=idx)  # R1: above the limit
     res = run(paths, Loader({"ABC": frame({"2026-10-28": (101, 102, 100.5, 101)})}), Loader({"XYZ": flat}),
               now=datetime(2026, 10, 28, 15, 40, tzinfo=IST))
     assert [o.status for o in res.outcomes] == [Status.NOT_FILLED, Status.NOT_FILLED]
@@ -480,8 +480,8 @@ def test_same_day_not_filled_and_intraday_not_cached(paths):
     '"qty": 1e999', '"max_hold_bars": 1e999'])
 @pytest.mark.parametrize("mode", ["swing", "intraday"])
 def test_overflow_audit_rows_are_rejects(paths, bad, mode):
-    good = row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))
-    base = json.dumps(row(datetime(2026, 10, 16, 11, 0, tzinfo=IST), symbol="XYZ", mode=mode, h="x"))
+    good = row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))
+    base = json.dumps(row(datetime(2026, 10, 16, 9, 10, tzinfo=IST), symbol="XYZ", mode=mode, h="x"))
     key = bad.split(":")[0]
     broken = re.sub(key + r': [^,]+', bad, base, count=1)
     assert broken != base
@@ -534,7 +534,7 @@ def test_intraday_mismatched_entry_beyond_60_days_kept(paths):
 
 
 def test_replay_error_note_and_warning_carry_type(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 9, 0, tzinfo=IST))])
     no_close = frame(WIN_BARS).drop(columns=["Close"])
     warns = []
     res = run(paths, Loader({"ABC": no_close}), on_warning=warns.append)
@@ -581,7 +581,7 @@ def test_us_early_close_flat_by_at_io_level(paths):
 
 
 def test_partial_daily_bar_ignored_before_close(paths):
-    write_audit(paths[0], [row(datetime(2026, 10, 28, 10, 0, tzinfo=IST))])
+    write_audit(paths[0], [row(datetime(2026, 10, 28, 9, 0, tzinfo=IST))])
     f = frame({"2026-10-28": (101, 101, 90, 95)})
     res = run(paths, Loader({"ABC": f}), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
     assert res.outcomes[0].status is Status.OPEN and _cached(paths) == {}
@@ -589,9 +589,9 @@ def test_partial_daily_bar_ignored_before_close(paths):
 
 def test_same_symbol_day_across_markets_and_modes_stay_separate(paths):
     write_audit(paths[0], [
-        row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), h="ns"),
+        row(datetime(2026, 10, 27, 9, 0, tzinfo=IST), h="ns"),
         row(datetime(2026, 10, 27, 9, 50, tzinfo=IST), mode="intraday", h="ni"),
-        row(datetime(2026, 10, 27, 9, 50, tzinfo=ET), market="US", h="us")])
+        row(datetime(2026, 10, 27, 9, 0, tzinfo=ET), market="US", h="us")])
     daily = frame({"2026-10-27": (101, 101.5, 99.5, 100.5), "2026-10-28": (100.5, 103.2, 100.1, 103)})
     res = run(paths, Loader({"ABC": daily}), Loader({"ABC": _intraday_win_bars()}))
     assert sorted((o.candidate.market, o.candidate.mode.value) for o in res.outcomes) == [
@@ -660,3 +660,40 @@ def test_r1_cache_matches_on_last_bar_and_last_close(paths):
     ld = Loader({"ABC": frame(WIN_BARS)})
     o = run(paths, ld).outcomes[0]
     assert ld.calls and o.status is Status.UNAVAILABLE
+
+
+def _fill_day_bars(day="2026-10-16", first="10:15", over=None):
+    idx = pd.date_range(f"{day} {first}", f"{day} 15:15", freq="15min")
+    bars = pd.DataFrame({"Open": 100.5, "High": 100.8, "Low": 100.3, "Close": 100.6}, index=idx)
+    for t, v in (over or {}).items():
+        bars.loc[pd.Timestamp(f"{day} {t}"), ["Open", "High", "Low", "Close"]] = v
+    return bars
+
+
+def test_r1_mid_session_swing_resolved_from_15_minute_bars(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    li = Loader({"ABC": _fill_day_bars()})  # never back to 100 after 10:00: the daily Low 99.5 came earlier
+    res = run(paths, Loader({"ABC": frame(WIN_BARS)}), li)
+    assert res.outcomes[0].status is Status.NOT_FILLED and li.calls == [("NSE", "ABC")]
+    paths[1].unlink()
+    li = Loader({"ABC": _fill_day_bars(over={"11:00": (99.8, 100.1, 99.6, 100.0)})})
+    o = run(paths, Loader({"ABC": frame(WIN_BARS)}), li).outcomes[0]
+    assert o.status is Status.WON and o.fill_price == pytest.approx(99.8) and o.fill_at.startswith("2026-10-16 11:00")
+
+
+def test_r1_mid_session_swing_without_intraday_bars_is_unavailable(paths):
+    write_audit(paths[0], [row(datetime(2026, 10, 16, 10, 0, tzinfo=IST))])
+    warns = []
+    o = run(paths, Loader({"ABC": frame(WIN_BARS)}), Loader(exc=RuntimeError("feed down")),
+            on_warning=warns.append).outcomes[0]
+    assert o.status is Status.UNAVAILABLE
+    assert o.note.startswith("TAKE logged mid-session; intraday bars needed for the fill day") and "feed down" in o.note
+    assert any("feed down" in w for w in warns)
+
+
+def test_r1_old_mid_session_swing_unavailable_without_fetch(paths):
+    write_audit(paths[0], [row(datetime(2026, 8, 20, 10, 0, tzinfo=IST))])
+    days = {d.date().isoformat(): (101, 101.5, 99.5, 100.5) for d in pd.bdate_range("2026-08-20", periods=20)}
+    li = boom_loader()
+    o = run(paths, Loader({"ABC": frame(days)}), li).outcomes[0]
+    assert o.status is Status.UNAVAILABLE and "older than 60 days" in o.note and li.calls == []

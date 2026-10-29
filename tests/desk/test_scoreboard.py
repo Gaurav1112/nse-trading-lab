@@ -86,34 +86,35 @@ def _bars(spec):
     return pd.DataFrame([r for _, *r in spec], index=idx, columns=["Open", "High", "Low", "Close"])
 
 
-def _session(over, first="09:45", last="15:00"):
+def _session(over, first="09:45", last="15:00", idle=(99, 99.5, 98.9, 99.2)):
     """Contiguous 15-minute bars first..last inclusive; `over` maps "HH:MM" -> (O, H, L, C) overrides."""
-    idle = (99, 99.5, 98.9, 99.2)
     rng = pd.date_range(f"2026-10-27 {first}", f"2026-10-27 {last}", freq="15min")
     return _bars([(f"{t:%H:%M}", *over.get(f"{t:%H:%M}", idle)) for t in rng])
 
 
 def test_intraday_fill_and_target():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
+    # R1: BUY LIMIT fill (Low <= entry at min(Open, entry)); the 09:30 bar starts before created_at
     bars = _bars([("09:15", 99, 99.5, 98.5, 99), ("09:30", 99, 99.5, 98.9, 99.2),
-                  ("09:45", 99.5, 99.9, 99, 99.5), ("10:00", 100.2, 100.6, 99.9, 100.3),
+                  ("09:45", 100.5, 100.9, 100.3, 100.6), ("10:00", 100.2, 100.6, 99.9, 100.3),
                   ("10:15", 100.3, 103.1, 100, 103), ("15:15", 50, 200, 40, 60)])
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.WON and o.fill_price == pytest.approx(100.2) and o.exit_price == 103
-    assert o.realised_r == pytest.approx(1.4)
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.0) and o.exit_price == 103
+    assert o.fill_at.startswith("2026-10-27 10:00") and o.realised_r == pytest.approx(1.5)
 
 
 def test_intraday_time_exit_ignores_bars_at_flat_by():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({"09:45": (99.5, 100.1, 99, 99.5), "10:00": (99.5, 100, 99, 100.5),
-                     "15:00": (100.5, 101, 100, 101), "15:15": (50, 200, 40, 60)}, last="15:15")
+    bars = _session({"09:45": (100.0, 100.4, 99.8, 100.2), "10:00": (100.5, 100.8, 100.1, 100.5),
+                     "15:00": (100.5, 101, 100, 101), "15:15": (50, 200, 40, 60)}, last="15:15",
+                    idle=(101, 101.5, 100.5, 101))
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
     assert o.status is Status.TIME and o.exit_price == 101 and o.realised_r == pytest.approx(0.5)
 
 
 def test_intraday_not_filled_and_open():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({})
+    bars = _session({}, idle=(101, 101.5, 100.5, 101))  # R1: never down to the limit
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW).status is Status.NOT_FILLED
     live = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
     assert resolve_intraday(c, bars, flat_by=time(15, 15), now=live).status is Status.OPEN
@@ -292,9 +293,10 @@ def test_swing_open_below_stop_exits_at_open():
 
 def test_intraday_stop_on_fill_bar_lost_at_stop():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({"09:45": (99.5, 100.5, 97.5, 99)})
+    bars = _session({"09:45": (100.2, 100.5, 97.5, 99)})  # R1: limit fill at min(Open, entry) = 100
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
-    assert o.status is Status.LOST and o.exit_price == 98 and o.realised_r == pytest.approx(-1.0 - 0.0)
+    assert o.fill_price == 100 and o.status is Status.LOST and o.exit_price == 98
+    assert o.realised_r == pytest.approx(-1.0 - 0.0)
 
 
 def test_win_pct_excludes_cost_eaten_wins():
@@ -529,3 +531,112 @@ def test_audit_writes_last_close(tmp_path):
     v = replace(decide(P, S, None, OK, NSE, 100.0, VNOW), cost_per_share=0.37)
     rec = json.loads(audit.append_verdict(v, tmp_path / "a.jsonl").read_text())
     assert rec["last_close"] == P.last_close
+
+
+# ---- swing TAKE logged during its fill session: the daily fill bar holds prices from before the order
+MID = datetime(2026, 10, 26, 14, 0, tzinfo=IST)
+CLOSED = datetime(2026, 10, 29, 20, 0, tzinfo=IST)
+
+
+def _mid_cand(created=MID):
+    return Candidate(created, "NSE", "FAKE", Mode.SWING, 100.0, 97.0, 104.5, 15, 0.0, 10, 0.3, 0.2, "h|x")
+
+
+def _mid_daily():
+    idx = pd.to_datetime(["2026-10-26", "2026-10-27", "2026-10-28"])
+    return pd.DataFrame({"Open": [98.6, 101.0, 104.0], "High": [100.9, 103.0, 105.0], "Low": [98.4, 100.6, 103.5],
+                         "Close": [100.7, 102.9, 104.8]}, index=idx)
+
+
+def _fill_day(over=None, first="14:15", last="15:15", day="2026-10-26"):
+    """15-minute bars of the fill day; idle bars stay above the entry."""
+    idle = (100.5, 100.8, 100.3, 100.6)
+    rng = pd.date_range(f"{day} {first}", f"{day} {last}", freq="15min")
+    over = over or {}
+    return pd.DataFrame([over.get(f"{t:%H:%M}", idle) for t in rng], index=rng,
+                        columns=["Open", "High", "Low", "Close"])
+
+
+def test_mid_session_swing_needs_intraday_bars():
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True)
+    assert o.status is Status.UNAVAILABLE
+    assert o.note.startswith("TAKE logged mid-session; intraday bars needed for the fill day")
+
+
+def test_mid_session_swing_probe1_not_filled():
+    # probe1: the daily Low 98.4 came before the 14:00 TAKE; afterwards price never came back to 100
+    bars = _fill_day()
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=bars)
+    assert o.status is Status.NOT_FILLED and o.realised_r is None
+
+
+def test_mid_session_swing_fill_then_target():
+    bars = _fill_day({"14:30": (99.9, 100.2, 99.7, 100.1), "15:00": (100.5, 106.0, 100.4, 105.0)})
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=bars)
+    assert o.status is Status.WON and o.fill_price == pytest.approx(99.9)  # min(Open, entry) of the 15-min bar
+    assert o.fill_at.startswith("2026-10-26 14:30") and o.exit_price == 104.5
+    assert o.exit_at.startswith("2026-10-28") and o.bars_held == 2  # the 106 high on the fill day is ignored
+
+
+def test_mid_session_swing_stop_after_fill_on_fill_day():
+    bars = _fill_day({"14:30": (100.2, 100.3, 99.8, 100.0), "15:00": (96.5, 97.0, 96.0, 96.8)})
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=bars)
+    assert o.status is Status.LOST and o.fill_price == 100.0 and o.exit_price == 96.5
+    assert o.exit_at.startswith("2026-10-26 15:00")
+
+
+def test_mid_session_swing_gap_or_short_fill_day_unavailable():
+    gap = _fill_day().drop(pd.Timestamp("2026-10-26 14:45"))
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=gap)
+    assert o.status is Status.UNAVAILABLE and "gap in intraday bars" in o.note
+    short = _fill_day(last="14:45")
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=short)
+    assert o.status is Status.UNAVAILABLE and "incomplete" in o.note
+    o = resolve_swing(_mid_cand(), _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED,
+                      session_closed_today=True, bars15=_fill_day(day="2026-10-23"))
+    assert o.status is Status.UNAVAILABLE
+
+
+def test_swing_before_open_or_after_close_keeps_daily_rule():
+    pre = _mid_cand(datetime(2026, 10, 26, 9, 0, tzinfo=IST))
+    o = resolve_swing(pre, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True)
+    assert o.status is Status.WON and o.fill_price == 98.6
+    from nse_backtest.desk.scoreboard import logged_mid_session
+    assert not logged_mid_session(pre, date(2026, 10, 26))
+    assert logged_mid_session(_mid_cand(), date(2026, 10, 26))
+    after = _mid_cand(datetime(2026, 10, 26, 16, 0, tzinfo=IST))
+    assert not logged_mid_session(after, date(2026, 10, 27))
+
+
+# ---- intraday fill = the printed ticket: BUY MIS LIMIT at entry
+def test_intraday_limit_fill_probe3_not_filled():
+    c = Candidate(datetime(2026, 10, 26, 10, 0, tzinfo=IST), "NSE", "FAKE", Mode.INTRADAY, 100.0, 99.0, 101.5, 20,
+                  0.0, 10, 0.2, None, "h|x")
+    idx = pd.date_range("2026-10-26 10:00", "2026-10-26 15:00", freq="15min")
+    op = [100.8 + 0.05 * i for i in range(len(idx))]
+    bars = pd.DataFrame({"Open": op, "High": [x + 0.3 for x in op], "Low": [x - 0.2 for x in op],
+                         "Close": [x + 0.05 for x in op]}, index=idx)
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=datetime(2026, 10, 27, 9, 0, tzinfo=IST))
+    assert o.status is Status.NOT_FILLED  # price stayed above the limit: a BUY LIMIT never fills
+
+
+def test_intraday_limit_fills_at_min_open_entry():
+    c = _ic()
+    bars = _session({"10:00": (99.6, 100.0, 99.4, 99.8), "10:15": (99.9, 103.2, 99.8, 103)}, idle=(101, 101.5, 100.5, 101))
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.WON and o.fill_price == pytest.approx(99.6) and o.fill_at.startswith("2026-10-27 10:00")
+
+
+def test_parse_row_uses_early_close_flat_by():
+    row = dict(action="TAKE", market="US", symbol="ABC", mode="intraday", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-11-27T12:50:00-05:00")  # early close 13:00, flat-by 12:45
+    cands, rejects = load_candidates([row])
+    assert not cands and rejects[0][1] == "created after flat-by"
+    cands, _ = load_candidates([dict(row, created_at="2026-11-27T12:40:00-05:00")])
+    assert len(cands) == 1
