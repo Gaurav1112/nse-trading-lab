@@ -5,7 +5,8 @@ against what prices actually did, using conservative fill and exit rules, then s
 mode): the two records are never pooled. It is a paper record as if every ticket were taken exactly as printed,
 not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
 
-The bar containing created_at counts (its remainder came after the verdict), but a fill that only that bar made
+A replay starts at max(created_at, quote_as_of): the ticket can't be typed before the quote it was
+based on. The bar containing that start counts (its remainder came after it), but a fill that only that bar made
 possible is ambiguous (the touch may have come before the TAKE): it is kept when it loses or exits at <= 0R, its
 target never counts, and when it would win the order is replayed from the later bars: a later fill counts only if
 its R is at most the containing-bar fill's (a counted result is never better than either possible history), else

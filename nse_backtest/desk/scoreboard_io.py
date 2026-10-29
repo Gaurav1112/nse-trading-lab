@@ -27,7 +27,7 @@ from .models import Mode
 from .scoreboard import (
     RECORD_OF_ACTION, SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_intraday_price_scale,
     check_price_scale, exit_status, load_candidates,
-    logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
+    _from_quote, logged_mid_session, realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 
 Warn = Callable[[str], None] | None
@@ -508,7 +508,9 @@ def _fill_day_bars(cs: list[Candidate], fills: list[date], profile, symbol: str,
                    load_intraday, on_warning: Warn) -> tuple[pd.DataFrame | None, str]:
     """15-minute bars for swing TAKEs logged during a fill session that has closed (loaded once, only when one
     needs them and is within yfinance's 60 days), and why they are missing when they are."""
-    mids = [f for c, f in zip(cs, fills) if logged_mid_session(c, f) and (f < today or (f == today and closed))]
+    # the replay starts at max(created_at, quote_as_of), so load bars for the same start
+    mids = [f for c, f in zip(cs, fills) if logged_mid_session(_from_quote(c), f)
+            and (f < today or (f == today and closed))]
     if not mids:
         return None, ""
     if not any(_intraday_in_range(f, today) for f in mids):

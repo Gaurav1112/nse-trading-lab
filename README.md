@@ -227,7 +227,8 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   then); a later fill is `not_filled`. On the fill bar a stop touch exits at the stop. Flat by the
   session's flat-by time. The Time Machine's intraday history uses the same rule. When a bar touches
   both stop and target, the stop wins.
-- The 15-minute bar that contains the verdict's time counts, for swing and intraday, but a fill that only that
+- A replay starts at the later of the verdict's time and its quote's time (the ticket can't be typed
+  before the quote it was based on). The 15-minute bar that contains that start counts, for swing and intraday, but a fill that only that
   bar made possible is ambiguous: the touch may have come before the verdict. Such a fill is kept only if it
   loses (or exits at 0R or below), and its target never counts. If it would win, the order is replayed from the
   later bars, and a later fill counts only if its R is no better than the containing-bar fill's: a counted

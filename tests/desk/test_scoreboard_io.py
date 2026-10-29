@@ -1094,3 +1094,32 @@ def test_r9_a_cached_bool_never_matches_another_value():
     entry["candidate"]["quote_live"] = True
     entry["candidate"]["qty"] = True  # a bool is never a number
     assert not _matches(c, entry)
+
+
+def test_swing_logged_before_open_with_quote_after_open_loads_fill_day_bars(tmp_path):
+    """The replay starts at the later of the TAKE and quote times, so the bar loader must use that start too."""
+    import json as _json
+    days = pd.bdate_range("2026-10-20", "2026-10-30")
+    daily_df = pd.DataFrame({"Open": 101.0, "High": 102.0, "Low": 99.5, "Close": 101.0}, index=days)
+    idx = pd.date_range("2026-10-27 09:15", "2026-10-27 15:15", freq="15min")
+    b15 = pd.DataFrame({"Open": 101.0, "High": 101.5, "Low": 99.8, "Close": 101.0}, index=idx)
+    calls = []
+
+    def load_intraday(*a, **k):
+        calls.append(1)
+        return b15
+
+    rec = {"created_at": "2026-10-27T09:12:00+05:30", "action": "TAKE", "symbol": "ABC", "market": "NSE",
+           "mode": "swing", "entry": 100.0, "stop": 98.0, "target_1": 103.0, "qty": 10, "risk_amount": 20.0,
+           "mc_expectancy_r": 0.3, "blocks": [], "warns": [], "input_hash": "a" * 64, "max_hold_bars": 5,
+           "cost_per_share": 0.0, "history_expectancy_r": None, "target_2": None, "last_bar": "2026-10-26",
+           "current_price": 100.5, "stop_basis": "x", "last_close": 101.0, "entry_limit": None,
+           "quote_live": True, "quote_as_of": "2026-10-27T09:16:00+05:30"}
+    audit = tmp_path / "a.jsonl"
+    audit.write_text(_json.dumps(rec) + "\n")
+    r = scoreboard_io.build_scoreboard("NSE", now=datetime(2026, 10, 31, 12, tzinfo=IST), audit_path=audit,
+                                       cache_path=tmp_path / "c.json", load_daily=lambda *a, **k: daily_df,
+                                       load_intraday=load_intraday, on_warning=None)
+    o = r.outcomes[0]
+    assert calls, "fill-day 15-minute bars were never loaded"
+    assert o.status is not Status.UNAVAILABLE, o.note
