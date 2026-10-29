@@ -112,3 +112,10 @@ def test_r8_audit_row_records_whether_the_price_was_a_live_quote(tmp_path):
         v = replace(_verdict(Action.SKIP), quote_live=live)
         (rec,) = [json.loads(x) for x in audit.append_verdict(v, tmp_path / f"{live}.jsonl").read_text().splitlines()]
         assert rec["quote_live"] is live
+
+
+
+def test_r9_audit_row_records_the_quote_time(tmp_path):
+    v = replace(_verdict(Action.SKIP), quote_live=True, quote_as_of="2026-10-29T10:01:00+05:30")
+    (rec,) = [json.loads(x) for x in audit.append_verdict(v, tmp_path / "a.jsonl").read_text().splitlines()]
+    assert rec["quote_as_of"] == "2026-10-29T10:01:00+05:30"

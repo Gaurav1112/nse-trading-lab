@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 11  # F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 12  # F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -903,7 +903,7 @@ def test_c8_two_scans_of_the_same_take_are_one_candidate():
 def _limit_cand(current_price, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST), quote_live=True):
     from dataclasses import replace as _replace  # F1 r8: a live quote unless a test says otherwise
     return _replace(cand(mode=Mode.INTRADAY, created=created), entry_limit=100.5, current_price=current_price,
-                    quote_live=quote_live)
+                    quote_live=quote_live, quote_as_of=created if quote_live else None)
 
 
 def test_i2_plain_limit_fills_at_the_logged_price_and_a_failed_breakout_is_lost():
@@ -955,10 +955,13 @@ def test_i2_audit_rows_carry_the_current_price_into_the_candidate():
 IDLE = (99.0, 99.5, 98.9, 99.2)
 
 
-def _r3(cp, over=None, created=(10, 7), record="desk", first="09:15", quote_live=None, **kw):
+def _r3(cp, over=None, created=(10, 7), record="desk", first="09:15", quote_live=None, quote_as_of=None, **kw):
     from dataclasses import replace as _replace
-    c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, *created, tzinfo=IST)), entry_limit=100.5,
-                 current_price=cp, record=record, quote_live=quote_live, **kw)
+    at = datetime(2026, 10, 27, *created, tzinfo=IST)
+    if quote_live is True and quote_as_of is None:
+        quote_as_of = at  # F1 r9: a live quote taken at the TAKE unless a test says otherwise
+    c = _replace(cand(mode=Mode.INTRADAY, created=at), entry_limit=100.5,
+                 current_price=cp, record=record, quote_live=quote_live, quote_as_of=quote_as_of, **kw)
     return resolve_intraday(c, _session(over, first=first, idle=IDLE), flat_by=time(15, 15), now=NOW)
 
 
@@ -1123,7 +1126,8 @@ AMBIG = "fill only possible on the bar the TAKE was logged in — counted only i
 
 def _sw(hm, cp, over, quote_live=None):
     from dataclasses import replace as _replace
-    c = _replace(_mid_cand(datetime(2026, 10, 26, *hm, tzinfo=IST)), current_price=cp, quote_live=quote_live)
+    at = datetime(2026, 10, 26, *hm, tzinfo=IST)
+    c = _replace(_mid_cand(at), current_price=cp, quote_live=quote_live, quote_as_of=at if quote_live else None)
     return resolve_swing(c, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True,
                          bars15=_fill_day(over))
 
@@ -1405,3 +1409,37 @@ def test_r8_audit_rows_carry_quote_live_and_old_rows_infer_it():
     assert load_candidates([{**row, "quote_live": True}])[0][0].quote_live is True
     assert load_candidates([row])[0][0].quote_live is None  # old row, price differs from the last close: unknown
     assert load_candidates([{**row, "current_price": 99.0}])[0][0].quote_live is False  # == last close: not live
+
+
+
+# ---------------------------------------------------------------- F1 round 9: the quote's own time
+
+def test_r9_trust_uses_the_bar_containing_the_quote_time():
+    """lag: the TAKE was stamped at 10:07 (ctx.now) and the quote came at 10:17: the price is tested against the
+    10:15 bar it was quoted in, not the 10:00 bar."""
+    over = {"10:00": (99.4, 99.6, 99.3, 99.5), "10:15": (100.0, 100.3, 99.9, 100.2), "10:30": (100.2, 103.2, 100.1, 103)}
+    o = _r3(100.2, over, quote_live=True, quote_as_of=datetime(2026, 10, 27, 10, 17, tzinfo=IST))
+    assert o.status is not Status.UNAVAILABLE and o.fill_price == pytest.approx(100.2)
+    same_bar0 = _r3(100.2, over, quote_live=True)  # quoted at the TAKE: 100.2 is outside the 10:00 bar
+    assert same_bar0.status is Status.UNAVAILABLE
+
+
+def test_r9_a_live_flag_without_a_quote_time_is_untrusted():
+    from dataclasses import replace as _replace
+    c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST)), entry_limit=100.5,
+                 current_price=100.2, quote_live=True, quote_as_of=None)  # an old-style row: no quote time
+    bars = _session({"10:00": (100.1, 100.4, 100.0, 100.2), "10:15": (100.3, 103.2, 100.1, 103)}, first="09:15",
+                    idle=IDLE)
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
+    assert o.fill_price != pytest.approx(100.2)  # the no-price (resting) model, not the logged-price fill
+
+
+def test_r9_audit_rows_carry_quote_as_of_into_the_candidate():
+    from nse_backtest.desk.scoreboard import load_candidates
+    row = {"created_at": "2026-10-27T10:07:00+05:30", "action": "TAKE", "symbol": "ABC", "market": "NSE",
+           "mode": "intraday", "entry": 100.0, "stop": 98.0, "target_1": 103.0, "qty": 10, "input_hash": "h",
+           "entry_limit": 100.5, "current_price": 100.2, "quote_live": True, "quote_as_of": "2026-10-27T10:09:30+05:30"}
+    (c,), _ = load_candidates([row])
+    assert c.quote_as_of == datetime(2026, 10, 27, 10, 9, 30, tzinfo=IST)
+    (old,), _ = load_candidates([{k: v for k, v in row.items() if k != "quote_as_of"}])
+    assert old.quote_as_of is None

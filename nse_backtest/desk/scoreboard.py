@@ -10,13 +10,14 @@ possible is ambiguous (the touch may have come before the TAKE): it is kept when
 target never counts, and when it would win the order is replayed from the later bars: a later fill counts only if
 its R is at most the containing-bar fill's (a counted result is never better than either possible history), else
 NOT_FILLED ("fill only possible on the bar the TAKE was logged in — counted only if it loses").
-The logged price (current_price) is used only when it is TRUSTED: a live quote (quote_live True) inside the TAKE
-bar's [Low, High + 0.5%]. Without a quote the desk logs the plan's last close, so an untrusted price (not live, or
+The logged price (current_price) is used only when it is TRUSTED: a fresh live quote (quote_live True, with its own
+quote_as_of) inside [Low, High + 0.5%] of the 15-minute bar containing quote_as_of. Without a quote the desk logs the plan's last close, so an untrusted price (not live, or
 unknown in old rows) is ignored entirely: the row is scored with its branch's no-price model (swing and stop-limit:
 the ambiguous containing-bar rules; LIMIT tickets: the resting model). The branch itself still follows the ticket
 that was printed. A live price outside that range contradicts the bars: data_unavailable.
 The one accepted residual optimism: a trusted live price in [entry, limit] (desk TAKE or override) fills at that
-price, although an order typed in later could fill up to the limit (at most about 0.25R worse).
+price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price runs
+above the limit while the ticket is typed it may not fill at all (about 1% of trusted rows in a simulation).
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 11  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 12  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -67,6 +68,7 @@ class Candidate:
     record: str = "desk"        # "desk" (a logged TAKE) or "override" (the owner chose a WAIT/SKIP anyway)
     current_price: float | None = None  # the price the verdict was decided at; None in rows logged before it
     quote_live: bool | None = None  # current_price was a live quote; False: the last close; None: unknown (old row)
+    quote_as_of: datetime | None = None  # the quote's own time (tz-aware); None without one (old rows: untrusted)
 
 
 class Status(str, Enum):
@@ -190,12 +192,24 @@ def _parse_row(row: dict) -> Candidate:
                      str(last_bar) if last_bar not in (None, "") else None,
                      last_close if last_close is not None and last_close > 0 else None, limit, record,
                      cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None,
-                     _quote_live(row))
+                     _quote_live(row), _quote_as_of(row))
+
+
+def _quote_as_of(row: dict) -> datetime | None:
+    raw = row.get("quote_as_of")
+    if not raw:
+        return None
+    try:
+        t = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
 
 
 def _quote_live(row: dict) -> bool | None:
     """The row's quote_live; rows logged before it: False when current_price equals the logged last close (the
-    plan's fallback without a quote), else None (unknown). Only True makes the logged price trusted."""
+    plan's fallback without a quote), else None (unknown). Both inferred values are untrusted: only True (with a
+    quote_as_of) makes the logged price usable."""
     q = row.get("quote_live")
     if isinstance(q, bool):
         return q
@@ -436,8 +450,9 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     op, lo = sess["Open"].to_numpy(dtype=float), sess["Low"].to_numpy(dtype=float)
     if not _all_finite(op, lo, sess["High"].to_numpy(dtype=float), sess["Close"].to_numpy(dtype=float)):
         return _outcome(c, Status.UNAVAILABLE, "bad price data")
-    if _price_trust(c, sess.iloc[0]) == "contradiction":
-        return _contradiction(c, sess.iloc[0])
+    trust, qbar = _price_trust(c, bars15)
+    if trust == "contradiction":
+        return _contradiction(c, qbar)
     k = next((p for p in range(1 if skip_containing else 0, len(sess)) if lo[p] <= c.entry), None)
     if k is None:
         return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing
@@ -446,7 +461,7 @@ def _fill_day_intraday(c: Candidate, bars15: pd.DataFrame | None, day: date, why
     # (the touch may have come before the TAKE) unless the logged price was already at or below the limit.
     fill = c.entry if k == 0 else min(op[k], c.entry)
     fill_at = c.created_at.isoformat() if k == 0 else sess.index[k]
-    trusted = _price_trust(c, sess.iloc[0]) == "trusted"
+    trusted = trust == "trusted"
     ambiguous = k == 0 and not (trusted and c.current_price <= c.entry)
     m = next((p for p in range(k, len(sess)) if lo[p] <= c.stop), None)
     if m is not None:  # target on the fill day is ignored (as on a daily fill bar); a loss is always kept
@@ -552,22 +567,27 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
 PLAIN_PRICE_TOLERANCE = 0.005  # a logged price within 0.5% of the TAKE bar's range counts as traded there
 
 
-def _price_trust(c: Candidate, bar0) -> str:
-    """How far the logged price can be used against the bar containing created_at: "none" (no price), "untrusted"
-    (not a live quote, or unknown: ignored entirely), "trusted" (a live quote inside [Low, High + 0.5%]) or
-    "contradiction" (a live quote outside that range)."""
+def _price_trust(c: Candidate, bars15: pd.DataFrame) -> tuple[str, object]:
+    """(state, the bar containing quote_as_of). State: "none" (no price), "untrusted" (not a live quote, unknown,
+    no quote time, or no bar at the quote time: ignored entirely), "trusted" (a live quote inside that bar's
+    [Low, High + 0.5%]) or "contradiction" (a live quote outside that range)."""
     cp = c.current_price
     if cp is None:
-        return "none"
-    if c.quote_live is not True:
-        return "untrusted"
-    lo0, hi0 = float(bar0["Low"]), float(bar0["High"])
-    return "trusted" if lo0 <= cp <= hi0 + PLAIN_PRICE_TOLERANCE * cp else "contradiction"
+        return "none", None
+    if c.quote_live is not True or c.quote_as_of is None:
+        return "untrusted", None
+    tz = ZoneInfo(get_profile(c.market).tz)
+    qb = pd.Timestamp(c.quote_as_of.astimezone(tz).replace(tzinfo=None)).floor("15min")
+    if qb not in bars15.index:
+        return "untrusted", None
+    bar = bars15.loc[qb]
+    lo, hi = float(bar["Low"]), float(bar["High"])
+    return ("trusted" if lo <= cp <= hi + PLAIN_PRICE_TOLERANCE * cp else "contradiction"), bar
 
 
-def _contradiction(c: Candidate, bar0) -> Outcome:
+def _contradiction(c: Candidate, bar) -> Outcome:
     return _outcome(c, Status.UNAVAILABLE, f"logged live price {c.current_price} is outside the bar's range "
-                                           f"{float(bar0['Low'])}-{float(bar0['High'])}")
+                                           f"{float(bar['Low'])}-{float(bar['High'])}")
 
 
 def limit_model(c: Candidate, limit: float) -> str | None:
@@ -680,9 +700,9 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = frame.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
-    trust = _price_trust(c, frame.iloc[0]) if has_bar0 else "none"
+    trust, qbar = _price_trust(c, bars15) if has_bar0 else ("none", None)
     if trust == "contradiction":
-        return _contradiction(c, frame.iloc[0])
+        return _contradiction(c, qbar)
     if model == "plain" and trust != "trusted":
         model = "resting"  # a price that is not a live quote the bar traded at: never a certain fill
     if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts

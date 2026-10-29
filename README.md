@@ -240,13 +240,17 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   override), it fills at the logged price only when that price is trusted (below). Priced above the limit, it is
   a resting limit at the limit price. A LIMIT row logged outside the entry window, or a stop-limit row logged
   after the cancel time, is `not_filled`.
-- The logged price is trusted only when it was a live quote (the audit row's `quote_live`; without a quote the
-  desk logs the plan's last close) and the TAKE's bar traded at it (between its low and 0.5% above its high).
+- The logged price is trusted only when it was a fresh live quote (the audit row's `quote_live`: a quote from the
+  same session, at most 5 minutes old when the check used it; without a quote the desk logs the plan's last close)
+  and the 15-minute bar containing the quote's own time (`quote_as_of`) traded at it (between its low and 0.5%
+  above its high). Rows without a quote time are untrusted.
   An untrusted price is ignored: the trade is scored as if no price had been logged (swing and stop-limit: the
   containing-bar rules above; a LIMIT ticket: a resting limit), though which ticket was printed still follows it.
   A live price outside that bar's range contradicts the bars and makes the trade `data_unavailable`.
 - One small optimism is accepted: a trusted live price (desk TAKE or override, up to the limit) fills at that
-  price, although an order typed in later could fill up to the limit (at most about 0.25R worse).
+  price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price
+  runs above the limit while the ticket is being typed it may not fill at all (about 1% of trusted rows in a
+  simulation).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.

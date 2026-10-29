@@ -237,5 +237,23 @@ def test_r8_check_trade_marks_whether_the_price_was_a_live_quote(tmp_path):
     v = check_trade(df, "ABC", NSE, Mode.SWING, lim, _ctx_ok(), replays=200, robustness=False, audit=False)
     assert v.quote_live is False  # no quote: the plan's last close
     q = check_trade(df, "ABC", NSE, Mode.SWING, lim, _ctx_ok(price_is_live=True), replays=200, robustness=False,
-                    audit=False, quote=_quote(float(df["Close"].iloc[-1])))
+                    audit=False, quote=_quote(float(df["Close"].iloc[-1])), used_at=NOW)
     assert q.quote_live is True
+
+
+@pytest.mark.parametrize("minutes_old,live", [(1, True), (5, True), (6, False), (60 * 20, False)])
+def test_r9_quote_live_needs_a_fresh_same_session_quote(minutes_old, live):
+    """F1 r9: a quote more than 5 minutes old when it is used, or from another session, is not live."""
+    from datetime import timedelta
+    df = rising()
+    q = check_trade(df, "ABC", NSE, Mode.SWING, Limits(capital=100_000), _ctx_ok(price_is_live=True), replays=200,
+                    robustness=False, audit=False, quote=_quote(float(df["Close"].iloc[-1]), minutes_old=minutes_old),
+                    used_at=NOW)
+    assert q.quote_live is live
+    assert q.quote_as_of == (NOW - timedelta(minutes=minutes_old)).isoformat()  # the quote's own time, logged
+
+
+def test_r9_check_trade_without_a_quote_logs_no_quote_time():
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), _ctx_ok(), replays=200,
+                    robustness=False, audit=False)
+    assert v.quote_live is False and v.quote_as_of is None

@@ -129,7 +129,8 @@ class DeskVerdict:
     input_hash: str
     created_at: str
     cost_per_share: float | None = None  # per-share round-trip cost the odds used (None: no odds computed)
-    quote_live: bool | None = None  # True: current_price is a live quote; False: the plan's last close (no quote)
+    quote_live: bool | None = None  # True: current_price is a fresh live quote (<= 5 min old, same session)
+    quote_as_of: str | None = None  # the quote's own time (ISO, market tz); None without a quote
 
     def blocks(self) -> list[Check]:
         return [c for c in self.checks if c.status is Status.BLOCK]
