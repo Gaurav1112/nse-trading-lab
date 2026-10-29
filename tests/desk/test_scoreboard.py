@@ -96,7 +96,7 @@ def _bars(spec):
     return pd.DataFrame([r for _, *r in spec], index=idx, columns=["Open", "High", "Low", "Close"])
 
 
-def _session(over, first="09:45", last="15:00", idle=(99, 99.5, 98.9, 99.2)):
+def _session(over, first="09:15", last="15:00", idle=(99, 99.5, 98.9, 99.2)):  # F1 r4: incl. the containing bar
     """Contiguous 15-minute bars first..last inclusive; `over` maps "HH:MM" -> (O, H, L, C) overrides."""
     rng = pd.date_range(f"2026-10-27 {first}", f"2026-10-27 {last}", freq="15min")
     return _bars([(f"{t:%H:%M}", *over.get(f"{t:%H:%M}", idle)) for t in rng])
@@ -116,7 +116,7 @@ def test_intraday_fill_and_target():
 
 def test_intraday_time_exit_ignores_bars_at_flat_by():
     c = cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 9, 31, tzinfo=IST))
-    bars = _session({"09:45": (100.0, 100.4, 99.8, 100.2), "10:00": (100.5, 100.8, 100.1, 100.5),
+    bars = _session({"09:30": (99, 99.5, 98.9, 99.2), "09:45": (100.0, 100.4, 99.8, 100.2), "10:00": (100.5, 100.8, 100.1, 100.5),
                      "15:00": (100.5, 101, 100, 101), "15:15": (50, 200, 40, 60)}, last="15:15",
                     idle=(101, 101.5, 100.5, 101))
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 6  # F1 round 3 (6): containing bar, resting LIMIT, window; C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 7  # F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -560,7 +560,7 @@ def _mid_daily():
                          "Close": [100.7, 102.9, 104.8]}, index=idx)
 
 
-def _fill_day(over=None, first="14:15", last="15:15", day="2026-10-26"):
+def _fill_day(over=None, first="14:00", last="15:15", day="2026-10-26"):  # F1 r4: incl. the containing bar
     """15-minute bars of the fill day; idle bars stay above the entry."""
     idle = (100.5, 100.8, 100.3, 100.6)
     rng = pd.date_range(f"{day} {first}", f"{day} {last}", freq="15min")
@@ -640,7 +640,8 @@ def test_intraday_limit_fill_probe3_not_filled():
 
 def test_intraday_gap_above_limit_rests_and_fills_at_the_limit():
     c = _ic()
-    bars = _session({"10:00": (99.6, 100.0, 99.4, 99.8), "10:15": (99.9, 103.2, 99.8, 103)}, idle=(101, 101.5, 100.5, 101))
+    bars = _session({"09:30": (99, 99.5, 98.9, 99.2), "10:00": (99.6, 100.0, 99.4, 99.8), "10:15": (99.9, 103.2, 99.8, 103)},
+                    idle=(101, 101.5, 100.5, 101))  # F1 r4: the 09:30 containing bar stays below the trigger
     o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)
     # 09:45 opens at 101 above the 100.5 limit: the order rests and fills at the limit (Low 100.5), never better
     assert o.status is Status.WON and o.fill_price == pytest.approx(100.5) and o.fill_at.startswith("2026-10-27 09:45")
@@ -672,7 +673,8 @@ def test_intraday_fill_bar_opening_below_stop_exits_at_the_stop():
     # filled at 100; the stop order exists only after that, so the later stop touch exits at the stop 98
     c = Candidate(datetime(2026, 10, 27, 10, 5, tzinfo=IST), "NSE", "ABC", Mode.INTRADAY, 100.0, 98.0, 103.0, 20,
                   0.0, 10, None, None, "h|x")
-    rows = [(101, 101, 100.5, 101)] * 4 + [(97, 100.2, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
+    rows = [(101, 101, 100.5, 101)] * 3 + [(99, 99.5, 98.9, 99.2)] + [(97, 100.2, 96.5, 98.5)] + [(98.5, 99, 98, 98.5)] * 20
+    # F1 r4: the 10:00 bar contains the 10:05 TAKE and stays below the trigger
     idx = pd.date_range("2026-10-27 09:15", periods=len(rows), freq="15min")
     bars = pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
     o = resolve_intraday(c, bars, flat_by=time(15, 10), now=datetime(2026, 10, 28, 12, 0, tzinfo=IST))
@@ -719,7 +721,7 @@ def test_property_exits_respect_stop_and_target():
         # swing logged mid-session: fill day from 15-minute bars
         cm = Candidate(datetime(2026, 11, 2, 11, 0, tzinfo=IST), "NSE", "P", Mode.SWING, 100.0, 98.0, 103.0,
                        int(rng.integers(1, 8)), 0.05, 10, None, None, f"m{trial}")
-        idx = pd.date_range("2026-11-02 11:15", "2026-11-02 15:15", freq="15min")
+        idx = pd.date_range("2026-11-02 11:00", "2026-11-02 15:15", freq="15min")  # F1 r4: + the containing bar
         b15 = pd.DataFrame(_random_bars(rng, len(idx), base=100.5, spread=float(rng.choice([0.6, 3.0]))),
                            index=idx, columns=["Open", "High", "Low", "Close"])
         o = resolve_swing(cm, df, fill_session=days[0].date(), now=NOW + pd.Timedelta(days=30).to_pytimedelta(),
@@ -729,7 +731,7 @@ def test_property_exits_respect_stop_and_target():
         # intraday
         ci = Candidate(datetime(2026, 11, 2, 9, 31, tzinfo=IST), "NSE", "P", Mode.INTRADAY, 100.0, 98.0, 103.0, 26,
                        0.05, 10, None, None, f"i{trial}")
-        idx = pd.date_range("2026-11-02 09:45", "2026-11-02 15:00", freq="15min")
+        idx = pd.date_range("2026-11-02 09:30", "2026-11-02 15:00", freq="15min")  # F1 r4: + the containing bar
         bi = pd.DataFrame(_random_bars(rng, len(idx)), index=idx, columns=["Open", "High", "Low", "Close"])
         o = resolve_intraday(ci, bi, flat_by=time(15, 15), now=NOW + pd.Timedelta(days=30).to_pytimedelta())
         _check_invariants(ci, o)
@@ -1036,3 +1038,65 @@ def test_r3_property_no_fill_better_than_the_logged_price_or_limit_and_no_skippe
             filled_in_containing = record == "desk" and cp <= 100.5 or cont[2] <= 100.5
             if filled_in_containing and cont[2] <= 98.0:
                 assert out.status is Status.LOST and out.exit_price == 98.0, (cp, record, out)
+
+
+# ---------------------------------------------------------------- F1 round 4
+
+@pytest.mark.parametrize("hm", [(14, 20), (14, 50), (15, 5)])
+@pytest.mark.parametrize("cp", [None, 100.6, 101.5])
+def test_r4_swing_fill_day_ignores_the_intraday_limit_models_and_window(hm, cp):
+    """p_swing3: a swing CNC LIMIT logged mid-session is never scored by the intraday entry window; the bar that
+    contains created_at counts (its Low may come after the TAKE), so the fill-day stop is never lost."""
+    from dataclasses import replace as _replace
+    bars = _fill_day({"15:00": (100.2, 100.3, 96.5, 96.8)})  # fill at entry 100 then the stop 97
+    c = _replace(_mid_cand(datetime(2026, 10, 26, *hm, tzinfo=IST)), current_price=cp)
+    o = resolve_swing(c, _mid_daily(), fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True,
+                      bars15=bars)
+    assert o.status is Status.LOST and o.realised_r == pytest.approx(-1.0) and o.fill_price == 100.0, o
+
+
+def test_r4_swing_containing_bar_missing_is_unavailable():
+    bars = _fill_day({"15:00": (100.2, 100.3, 96.5, 96.8)}).drop(pd.Timestamp("2026-10-26 14:45"))
+    o = resolve_swing(_mid_cand(datetime(2026, 10, 26, 14, 50, tzinfo=IST)), _mid_daily(),
+                      fill_session=date(2026, 10, 26), now=CLOSED, session_closed_today=True, bars15=bars)
+    assert o.status is Status.UNAVAILABLE and "no bar containing 14:50" in o.note
+
+
+S_BARS = {"10:00": (99.7, 100.3, 97.8, 98.2), "10:15": (98.2, 100.4, 98.1, 100.3), "10:30": (100.3, 103.2, 100.2, 103)}
+
+
+@pytest.mark.parametrize("cp,record", [(99.8, "desk"), (99.8, "override"), (None, "desk")])  # p_r3 S1-S3
+def test_r4_stop_limit_containing_bar_trigger_and_stop_is_lost(cp, record):
+    o = _r3(cp, S_BARS, record=record)
+    assert o.status is Status.LOST and o.fill_price == 100.0 and o.exit_price == 98.0
+    assert o.realised_r == pytest.approx(-1.0)
+
+
+def test_r4_stop_limit_containing_bar_trigger_without_stop_fills_there_and_walks_on():
+    o = _r3(99.8, {"10:00": (99.7, 100.3, 99.6, 100.2), "10:15": (100.2, 103.2, 100.1, 103)})
+    assert o.status is Status.WON and o.fill_price == 100.0 and o.fill_at == "2026-10-27 10:00:00"
+
+
+def test_r4_stop_limit_missing_containing_bar_is_unavailable():
+    from dataclasses import replace as _replace
+    c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST)), current_price=99.8)
+    bars = _session({"10:15": (100.3, 103.2, 100.1, 103)}, first="09:15", idle=IDLE).drop(
+        pd.Timestamp("2026-10-27 10:00"))
+    o = resolve_intraday(c, bars, flat_by=time(15, 15), now=NOW)  # p_r3 M2
+    assert o.status is Status.UNAVAILABLE and "no bar containing 10:07" in o.note
+
+
+def test_r4_stop_limit_containing_bar_below_entry_keeps_the_existing_rule():
+    o = _r3(99.8, {"10:15": (99.9, 100.4, 99.8, 100.3), "10:30": (100.3, 103.2, 100.2, 103)})
+    assert o.status is Status.WON and o.fill_at == "2026-10-27 10:15:00"
+
+
+def test_r4_early_close_last_bar_reaches_the_containing_bar_path():
+    """p_r3 E1: a LIMIT row logged in the last bar before an early flat-by is scored from that bar."""
+    from dataclasses import replace as _replace
+    c = _replace(cand(mode=Mode.INTRADAY, created=datetime(2026, 10, 27, 12, 50, tzinfo=IST)), entry_limit=100.5,
+                 current_price=100.8)
+    bars = _session({"12:45": (100.8, 100.9, 100.4, 100.8), "13:00": (100.6, 103.2, 100.4, 103)}, first="09:15",
+                    last="13:00", idle=IDLE)
+    o = resolve_intraday(c, bars, flat_by=time(13, 0), now=NOW)
+    assert "no intraday bars" not in o.note and o.fill_price == 100.5 and o.status is Status.TIME

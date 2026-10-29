@@ -672,7 +672,7 @@ def test_r1_cache_matches_on_last_bar_and_last_close(paths):
     assert ld.calls and o.status is Status.UNAVAILABLE
 
 
-def _fill_day_bars(day="2026-10-16", first="10:15", over=None):
+def _fill_day_bars(day="2026-10-16", first="10:00", over=None):  # F1 r4: incl. the containing bar
     idx = pd.date_range(f"{day} {first}", f"{day} 15:15", freq="15min")
     bars = pd.DataFrame({"Open": 100.5, "High": 100.8, "Low": 100.3, "Close": 100.6}, index=idx)
     for t, v in (over or {}).items():
