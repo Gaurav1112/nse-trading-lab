@@ -66,3 +66,30 @@ def test_orb_scan_returns_failures_not_silence():
     bad = pd.DataFrame({"Open": [], "High": [], "Low": [], "Close": []})
     verdicts, failures = orb_scan(NSE, {"EMPTY": bad}, Limits(capital=100_000), ctx(), replays=200)
     assert verdicts == [] and failures and failures[0][0] == "EMPTY"
+
+
+def _trending_plan(**kw):
+    frames = {"AAA": series(), "BBB": series(step=1.003), "CCC": series(step=1.0035), "DDD": series(step=1.0045)}
+    return daily_plan(NSE, frames, series(step=1.004), Limits(capital=100_000), ctx(), replays=500, **kw)
+
+
+def test_daily_plan_trending_orders_and_overflow(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    dp = _trending_plan(top_take=2, audit_path=audit)
+    assert dp.regime == "TRENDING" and len(dp.take) == 2
+    exps = [v.odds.mc_expectancy_r for v in dp.take]
+    assert exps == sorted(exps, reverse=True)
+    assert any("(beyond top 2" in why for _, why in dp.skipped)
+    assert len(audit.read_text().strip().splitlines()) >= 2
+
+
+def test_daily_plan_earnings_lookup_only_for_take_candidates():
+    calls = []
+    from datetime import date, timedelta
+    def lookup(sym):
+        calls.append(sym)
+        return date(2026, 10, 29) + timedelta(days=2), True
+    dp = _trending_plan(top_take=2, earnings_lookup=lookup)
+    assert len(calls) == 2 and len(dp.take) >= 1  # 4 TAKE-able frames, only top 2 looked up
+    for v in dp.take:
+        assert any(c.name == "earnings" and c.status.value == "WARN" for c in v.checks)

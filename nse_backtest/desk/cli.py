@@ -13,10 +13,10 @@ from enum import Enum
 from nse_backtest import tape_monitor
 
 from . import loaders
-from .daily import daily_plan
+from .daily import daily_plan, market_stats
 from .intraday import orb_scan
 from .markets import get_profile, universe
-from .models import DeskVerdict, Limits, Mode
+from .models import Action, DeskVerdict, Limits, Mode
 from .positions import review_positions
 from .service import check_trade
 
@@ -93,16 +93,35 @@ def _finish(lines: list[str]) -> int:
     return 0
 
 
+def _limits(profile, as_json: bool = False):
+    """(limits, warning lines). A corrupt settings file falls back to defaults, loudly."""
+    limits, fell_back = loaders.load_limits_with_status(profile)
+    if not fell_back:
+        return limits, []
+    msg = f"WARNING: settings file unreadable — using default capital {profile.money(limits.capital)}"
+    if as_json:
+        print(msg, file=sys.stderr)
+        return limits, []
+    return limits, [msg, ""]
+
+
 # ---------------------------------------------------------------- data assembly
 
+def _regime_of(regime_df) -> str | None:
+    try:
+        tape = tape_monitor.assess_tape(regime_df)
+        return tape.regime if tape else None
+    except Exception as e:  # noqa: BLE001 - unknown regime is handled fail-closed downstream
+        print(f"warning: regime unavailable: {e}", file=sys.stderr)
+        return None
+
+
 def _regime(profile) -> str | None:
-    tape = tape_monitor.assess_tape(loaders.load_regime(profile))
-    return tape.regime if tape else None
+    return _regime_of(loaders.load_regime(profile))
 
 
-def _ctx_for(profile, limits, symbol_df=None):
-    ctx = loaders.build_context(profile, limits, symbol_df=symbol_df)
-    return replace(ctx, regime=_regime(profile))
+def _ctx_for(profile, limits, symbol_df=None, regime=None):
+    return loaders.build_context(profile, limits, symbol_df=symbol_df, regime=regime)
 
 
 def _frames(profile, symbols) -> dict:
@@ -120,40 +139,47 @@ def _frames(profile, symbols) -> dict:
 
 def cmd_check(a, profile) -> int:
     sym = a.symbol.strip().upper()
-    limits = loaders.load_limits(profile)
+    limits, warn = _limits(profile, a.json)
     mode = Mode(a.mode)
     daily = loaders.load_daily(profile, sym)
     df = loaders.load_intraday(profile, sym) if mode is Mode.INTRADAY else daily
-    ctx = _ctx_for(profile, limits, daily)
+    ctx = _ctx_for(profile, limits, daily, _regime(profile))
     nxt, checked = loaders.next_earnings(profile, sym)
     ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked)
     v = check_trade(df, sym, profile, mode, limits, ctx, entry=a.entry, stop=a.stop, target=a.target)
     if a.json:
         _emit_json(v)
         return 0
-    return _finish(format_verdict(v, profile))
+    return _finish(warn + format_verdict(v, profile))
 
 
-def _format_row(v: DeskVerdict, profile) -> str:
+def _format_row(v: DeskVerdict, profile, *, why: bool = False) -> str:
     e = v.odds.mc_expectancy_r if v.odds is not None else None
-    return f"  {v.headline}  [exp {_r(e)}]"
+    row = f"  {v.headline}  [exp {_r(e)}]"
+    if why:
+        blocks = [c.name for c in v.blocks()]
+        warns = [c.name for c in v.checks if c.status.value == "WARN"]
+        if blocks or warns:
+            row += f"\n    blocked by: {', '.join(blocks) or 'none'}; warnings: {', '.join(warns) or 'none'}"
+    return row
 
 
 def cmd_plan(a, profile) -> int:
-    limits = loaders.load_limits(profile)
+    limits, warn = _limits(profile, a.json)
     syms = universe(profile)[:PLAN_UNIVERSE_LIMIT]
     frames = _frames(profile, syms)
     regime_df = loaders.load_regime(profile)
-    ctx = loaders.build_context(profile, limits)
-    plan = daily_plan(profile, frames, regime_df, limits, ctx)
+    ctx = loaders.build_context(profile, limits, regime=_regime_of(regime_df))
+    plan = daily_plan(profile, frames, regime_df, limits, ctx,
+                      earnings_lookup=lambda s: loaders.next_earnings(profile, s))
     if a.json:
         _emit_json(plan)
         return 0
-    lines = [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
+    lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
     lines += ["", "TAKE:"] + ([_format_row(v, profile) for v in plan.take] or ["  none today — no trade is a valid answer"])
-    lines += ["", "WATCH:"] + ([_format_row(v, profile) for v in plan.watch] or ["  none"])
+    lines += ["", "WATCH:"] + ([_format_row(v, profile, why=True) for v in plan.watch] or ["  none"])
     for v in plan.take:
         lines += [""] + format_verdict(v, profile)
     if plan.unavailable:
@@ -180,23 +206,35 @@ def cmd_positions(a, profile) -> int:
 
 
 def cmd_intraday(a, profile) -> int:
-    limits = loaders.load_limits(profile)
+    limits, warn = _limits(profile, a.json)
     syms = ([s.strip().upper() for s in a.symbols.split(",") if s.strip()]
             if a.symbols else universe(profile)[:15])
-    frames15, load_failures = {}, []
+    frames15, load_failures, per_symbol = {}, [], {}
+    ctx = _ctx_for(profile, limits, regime=_regime(profile))
     for s in syms:
         try:
             frames15[s] = loaders.load_intraday(profile, s)
         except Exception as e:  # noqa: BLE001
             load_failures.append((s, str(e)))
-    ctx = _ctx_for(profile, limits)
-    verdicts, failures = orb_scan(profile, frames15, limits, ctx)
+            continue
+        try:  # daily bars give the liquidity (turnover) and gap checks something to read
+            turnover, gap = market_stats(loaders.load_daily(profile, s))
+            per_symbol[s] = replace(ctx, turnover_20d=turnover, today_gap_pct=gap)
+        except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
+            print(f"warning: no daily data for {s}: {e}", file=sys.stderr)
+    verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol)
     failures = load_failures + list(failures)
     if a.json:
         _emit_json({"verdicts": verdicts, "failures": failures})
         return 0
-    lines = [f"Intraday opening-range scan {profile.code} ({len(syms)} symbols)"]
-    lines += [_format_row(v, profile) for v in verdicts] or ["  no setups scanned"]
+    lines = warn + [f"Intraday opening-range scan {profile.code} ({len(syms)} symbols)"]
+    for v in verdicts:
+        if v.action is Action.SKIP:
+            lines.append(_format_row(v, profile))
+        else:
+            lines += [""] + format_verdict(v, profile)
+    if not verdicts:
+        lines.append("  no setups scanned")
     if failures:
         lines += ["", "Not scanned:"] + [f"  {s}: {why}" for s, why in failures]
     return _finish(lines)

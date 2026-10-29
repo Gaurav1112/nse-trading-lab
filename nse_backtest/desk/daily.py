@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -95,7 +97,8 @@ def _closeness(v: DeskVerdict) -> float:
 
 def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limits, ctx_base: CheckContext,
                *, top_take: int = 3, top_watch: int = 5, replays: int = 3000,
-               audit_path: Path | None = None) -> DailyPlan:
+               audit_path: Path | None = None,
+               earnings_lookup: Callable[[str], tuple[date | None, bool]] | None = None) -> DailyPlan:
     tape = tape_monitor.assess_tape(regime_df)
     regime = tape.regime if tape else None
     regime_text = tape.recommendation if tape else "Regime unknown — treat as HOSTILE"
@@ -140,8 +143,15 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
     final_take: list[DeskVerdict] = []
     for v in takes[:top_take]:
         sym = v.plan.symbol
+        c2 = sym_ctx[sym]
+        if earnings_lookup is not None:  # only for final candidates: one network call each
+            try:
+                nxt, checked = earnings_lookup(sym)
+            except Exception:  # noqa: BLE001 - unknown earnings WARNs, never passes
+                nxt, checked = None, False
+            c2 = replace(c2, next_earnings=nxt, earnings_checked=checked)
         try:
-            v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, sym_ctx[sym], entry=entries[sym],
+            v2 = check_trade(frames[sym], sym, profile, Mode.SWING, limits, c2, entry=entries[sym],
                              robustness=True, replays=replays, audit=True, audit_path=audit_path)
         except ValueError as err:
             skipped.append((sym, str(err)))

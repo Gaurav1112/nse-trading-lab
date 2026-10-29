@@ -106,18 +106,21 @@ def next_earnings(profile: MarketProfile, symbol: str) -> tuple[date | None, boo
 
 # ---------------------------------------------------------------- user state (read-only)
 
+class UserDataError(ValueError):
+    """positions.json / trade_journal.json exists but cannot be trusted (unreadable, corrupt, not a list)."""
+
+
 def _read_list(name: str) -> list[dict]:
+    """Missing file -> []. Unreadable, corrupt or not a JSON list -> UserDataError (never a silent [])."""
     path = data_dir() / name
+    if not path.exists():
+        return []
     try:
-        if not path.exists():
-            return []
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        log.warning("cannot read %s: %s", path, e)
-        return []
+        raise UserDataError(f"cannot read {name}: {e}") from e
     if not isinstance(data, list):
-        log.warning("%s is not a JSON list; ignoring", path)
-        return []
+        raise UserDataError(f"{name} is not a JSON list")
     return [r for r in data if isinstance(r, dict)]
 
 
@@ -165,33 +168,44 @@ def _settings_path() -> Path:
     return data_dir() / _SETTINGS_FILE
 
 
-def _read_settings() -> dict:
+def _read_settings_status() -> tuple[dict, bool]:
+    """(settings, ok). ok is False when the file exists but could not be used."""
     path = _settings_path()
     try:
         if not path.exists():
-            return {}
+            return {}, True
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("top level is not an object")
-        return data
+        return data, True
     except (OSError, ValueError) as e:
         log.warning("cannot read %s (%s); using defaults", path, e)
-        return {}
+        return {}, False
 
 
-def load_limits(profile: MarketProfile) -> Limits:
-    entry = _read_settings().get(profile.code)
+def _read_settings() -> dict:
+    return _read_settings_status()[0]
+
+
+def load_limits_with_status(profile: MarketProfile) -> tuple[Limits, bool]:
+    """(limits, fell_back). fell_back is True when a settings file was unreadable or invalid."""
+    settings, ok = _read_settings_status()
+    entry = settings.get(profile.code)
     base = default_limits(profile)
     if not isinstance(entry, dict):
-        return base
+        return base, not ok
     names = {f.name for f in fields(Limits)}
     try:
         limits = replace(base, **{k: v for k, v in entry.items() if k in names})
         validate_limits(limits)
-        return limits
+        return limits, False
     except (TypeError, ValueError) as e:
         log.warning("invalid %s settings (%s); using defaults", profile.code, e)
-        return base
+        return base, True
+
+
+def load_limits(profile: MarketProfile) -> Limits:
+    return load_limits_with_status(profile)[0]
 
 
 def save_limits(profile: MarketProfile, limits: Limits) -> None:
@@ -215,20 +229,29 @@ def save_limits(profile: MarketProfile, limits: Limits) -> None:
 # ---------------------------------------------------------------- context
 
 def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | None = None,
-                  symbol_df: pd.DataFrame | None = None) -> CheckContext:
-    """CheckContext without regime (the caller fills it from assess_tape(load_regime(profile)))."""
+                  symbol_df: pd.DataFrame | None = None, regime: str | None = None) -> CheckContext:
+    """CheckContext. `regime` is the tape regime; None/unknown is assessed as HOSTILE (most
+    conservative book cap) but stays None on the context so the regime check WARNs."""
     now = now or datetime.now(ZoneInfo(profile.tz))
-    positions = _for_market(load_positions(), profile)
-    journal = _for_market(load_journal(), profile)
     can_trade: bool | None
     reasons: tuple[str, ...] = ()
     try:
-        from components import risk_governor
-        verdict = risk_governor.assess(positions, journal, limits.capital, None)
-        can_trade, reasons = bool(verdict.can_trade), tuple(verdict.reasons)
-    except Exception as e:  # noqa: BLE001 - desk WARNs on None
-        log.warning("risk governor failed: %s", e)
+        positions = _for_market(load_positions(), profile)
+        journal = _for_market(load_journal(), profile)
+    except UserDataError as e:
+        log.warning("%s", e)
+        positions, journal = [], []
         can_trade = None
+        reasons = ("Could not read positions.json/trade_journal.json — risk governor not evaluated",)
+    else:
+        try:
+            from components import risk_governor
+            known = regime if regime in ("TRENDING", "MIXED", "HOSTILE") else "HOSTILE"
+            verdict = risk_governor.assess(positions, journal, limits.capital, known)
+            can_trade, reasons = bool(verdict.can_trade), tuple(verdict.reasons)
+        except Exception as e:  # noqa: BLE001 - desk WARNs on None
+            log.warning("risk governor failed: %s", e)
+            can_trade = None
     ban = None
     if profile.has_ban_list:
         ban = nse_lists.fetch_fno_ban(data_dir() / "cache", now.date())
@@ -237,5 +260,5 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
         from .daily import market_stats
         turnover, gap = market_stats(symbol_df)
     return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
-                        governor_can_trade=can_trade, governor_reasons=reasons, ban=ban,
+                        governor_can_trade=can_trade, governor_reasons=reasons, ban=ban, regime=regime,
                         turnover_20d=turnover, today_gap_pct=gap)

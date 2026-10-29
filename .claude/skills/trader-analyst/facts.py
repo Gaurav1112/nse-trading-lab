@@ -479,6 +479,9 @@ def main(argv=None):
     ap.add_argument("--offline", metavar="DIR")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if args.cik is not None and not re.fullmatch(r"\d{1,10}", args.cik):
+        print("facts: --cik must be 1 to 10 digits", file=sys.stderr)
+        return 2
     if not args.tickers and not args.cik:
         ap.print_help()
         return 2

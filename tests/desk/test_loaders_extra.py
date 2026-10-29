@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import math
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
@@ -73,7 +74,10 @@ def test_positions_journal_missing_and_corrupt(tmp_path, caplog):
     assert loaders.load_positions() == [] and loaders.load_journal() == []
     (tmp_path / "positions.json").write_text("{not json")
     (tmp_path / "trade_journal.json").write_text('{"a": 1}')
-    assert loaders.load_positions() == [] and loaders.load_journal() == []
+    with pytest.raises(loaders.UserDataError):
+        loaders.load_positions()
+    with pytest.raises(loaders.UserDataError):
+        loaders.load_journal()
     (tmp_path / "positions.json").write_text(json.dumps([{"symbol": "A"}, 3]))
     assert loaders.load_positions() == [{"symbol": "A"}]
 
@@ -195,7 +199,12 @@ NEWS = Path(__file__).resolve().parents[2] / ".claude/skills/trader-news/news.py
 def _news():
     spec = importlib.util.spec_from_file_location("vendored_news", NEWS)
     m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)  # import-time is side-effect free (defs and constants only)
+    old = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True  # never leave __pycache__ under .claude/skills
+    try:
+        spec.loader.exec_module(m)  # import-time is side-effect free (defs and constants only)
+    finally:
+        sys.dont_write_bytecode = old
     return m
 
 
@@ -213,3 +222,104 @@ def test_vendored_news_accepts_good_ticker():
     m = _news()
     assert m.validate_ticker("BRK.B") == "BRK.B" and m.yahoo_symbol("brk.b") == "BRK-B"
     assert m.main(["--tickers", "AAPL/../../x", "--dry-run"]) == 2
+
+
+# ------------------------------------------------------------------ fix round 1
+
+def _record_assess(monkeypatch):
+    import components.risk_governor as rg
+    seen = []
+    class V:
+        can_trade = True
+        reasons = []
+    monkeypatch.setattr(rg, "assess", lambda pos, jr, cap, regime=None: seen.append(regime) or V())
+    return seen
+
+
+def test_build_context_passes_regime_to_governor(monkeypatch):
+    seen = _record_assess(monkeypatch)
+    ctx = loaders.build_context(NSE, Limits(capital=5000), regime=None)
+    assert seen[-1] == "HOSTILE" and ctx.regime is None
+    ctx = loaders.build_context(NSE, Limits(capital=5000), regime="MIXED")
+    assert seen[-1] == "MIXED" and ctx.regime == "MIXED"
+    loaders.build_context(NSE, Limits(capital=5000), regime="weird")
+    assert seen[-1] == "HOSTILE"
+
+
+@pytest.mark.parametrize("fname,content", [("positions.json", "{not json"), ("trade_journal.json", '{"a": 1}')])
+def test_build_context_unreadable_user_data_warns(tmp_path, monkeypatch, fname, content):
+    seen = _record_assess(monkeypatch)
+    (tmp_path / fname).write_text(content)
+    ctx = loaders.build_context(NSE, Limits(capital=5000))
+    assert ctx.governor_can_trade is None and ctx.journal == () and seen == []
+    assert "Could not read" in ctx.governor_reasons[0]
+
+
+def test_cli_positions_corrupt_exits_2(tmp_path, capsys):
+    (tmp_path / "positions.json").write_text("[oops")
+    assert cli.main(["positions"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "positions.json" in err
+
+
+def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
+    from nse_backtest.desk.service import check_trade
+    from nse_backtest.desk.checks import CheckContext
+    seen = {}
+    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_regime", lambda p: series())
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
+    def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None):
+        seen["ctx"] = (ctx_by_symbol or {}).get("AAA")
+        v = check_trade(series(), "AAA", profile, __import__("nse_backtest.desk.models", fromlist=["Mode"]).Mode.SWING,
+                        limits, ctx, robustness=False, replays=200, audit=False)
+        return [v], []
+    monkeypatch.setattr(cli, "orb_scan", fake_scan)
+    assert cli.main(["intraday", "--symbols", "AAA"]) == 0
+    out = capsys.readouterr().out
+    assert "Checks:" in out and ("PASS" in out or "WARN" in out)
+    assert seen["ctx"] is not None and seen["ctx"].turnover_20d and seen["ctx"].turnover_20d > 0
+
+
+def test_cli_settings_fallback_warning(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_regime", lambda p: series())
+    monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
+    (tmp_path / "desk_settings.json").write_text("garbage")
+    assert cli.main(["check", "ABC"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("WARNING: settings file unreadable — using default capital ")
+    assert loaders.load_limits_with_status(NSE)[1] is True
+    (tmp_path / "desk_settings.json").unlink()
+    assert loaders.load_limits_with_status(NSE)[1] is False
+
+
+def test_cli_plan_passes_regime_and_earnings_lookup(capsys, monkeypatch):
+    seen = _record_assess(monkeypatch)
+    monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 2, raising=False)
+    assert cli.main(["plan", "--market", "US"]) == 0
+    assert seen and seen[0] in ("TRENDING", "MIXED", "HOSTILE")
+
+
+def test_plan_watch_rows_list_check_names():
+    from nse_backtest.desk.models import Action
+    from nse_backtest.desk.daily import daily_plan
+    from tests.desk.test_daily_positions_intraday import ctx as dctx, series as dseries
+    dp = daily_plan(NSE, {"AAA": dseries()}, dseries(step=0.997), Limits(capital=100_000), dctx(), replays=300)
+    row = cli._format_row(dp.watch[0], NSE, why=True)
+    assert "blocked by: regime" in row
+
+
+def test_vendored_facts_rejects_non_digit_cik(capsys):
+    path = Path(__file__).resolve().parents[2] / ".claude/skills/trader-analyst/facts.py"
+    spec = importlib.util.spec_from_file_location("vendored_facts", path)
+    m = importlib.util.module_from_spec(spec)
+    old = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        sys.dont_write_bytecode = old
+    for bad in ("../x", "12a", "12345678901", ""):
+        assert m.main(["--cik", bad]) == 2
+    assert "digits" in capsys.readouterr().err

@@ -14,6 +14,8 @@
 - N2: tickers were not validated before being placed in URLs. **Fixed here**: `news.py` now checks
   every ticker with `re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", t)` (`validate_ticker`), rejects with a clear
   error, and `urllib.parse.quote`s it in URLs. Local change; reapply it if you re-vendor.
+- N7: `trader-analyst/facts.py` `--cik` was only zero-filled before going into SEC URLs. **Fixed here**: `main()`
+  now requires `re.fullmatch(r"\d{1,10}", args.cik)` and exits 2 otherwise. Local change; reapply it if you re-vendor.
 - N3: feeds are parsed with `xml.etree.ElementTree`. Acceptable here (trusted hosts, no DTD
   resolution); noted for completeness.
 - N4: `trader-broker` has a chat "yes" confirmation gate that can be spoofed. **Not vendored.**

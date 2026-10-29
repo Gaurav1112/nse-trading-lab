@@ -57,3 +57,5 @@ kite_credentials.py
 positions.json
 trade_journal.json
 audit_log.jsonl
+
+.claude/skills/**/__pycache__/
