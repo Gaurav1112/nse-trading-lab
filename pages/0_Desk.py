@@ -523,8 +523,13 @@ with tab_intra:
 
 # ---------------------------------------------------------------- Scoreboard
 
+def _score_mode(mode, side) -> str:
+    """"intraday", "swing", or "intraday short": short stats are never pooled with longs."""
+    return f"{mode.value} short" if getattr(side, "value", side) == "short" else mode.value
+
+
 def _score_banner(s) -> None:
-    text = f"**{s.market} {s.mode.value}** — {s.verdict}"
+    text = f"**{s.market} {_score_mode(s.mode, s.side)}** — {s.verdict}"
     if s.verdict.startswith(("Losing", "Worse")):
         st.error(text)
     elif s.verdict.startswith("Matching"):
@@ -534,12 +539,12 @@ def _score_banner(s) -> None:
 
 
 def _render_projected_vs_real(outcomes, s) -> None:
-    """Projected vs realised R for one (record, market, mode) group, or an info line without any projection."""
-    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
-             (s.record, s.market, s.mode)]
+    """Projected vs realised R for one (record, market, mode, side) group, or an info line without any projection."""
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode, o.candidate.side) ==
+             (s.record, s.market, s.mode, s.side)]
     cum_proj, cum_real, pairs, n_without = projected_vs_real(group)
     n_no_r = resolved_without_r(group)
-    st.markdown(f"**Projected vs realised R — {s.mode.value}**")
+    st.markdown(f"**Projected vs realised R — {_score_mode(s.mode, s.side)}**")
     if n_no_r:  # never dropped silently
         st.caption(f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R — left out of this "
                    "comparison.")
@@ -547,7 +552,7 @@ def _render_projected_vs_real(outcomes, s) -> None:
         st.info("No projections to compare yet")
         return
     st.plotly_chart(projected_vs_real_chart(cum_proj, cum_real, pairs, n_without), width="stretch",
-                    key=f"pvr_{s.record}_{s.market}_{s.mode.value}")
+                    key=f"pvr_{s.record}_{s.market}_{s.mode.value}" + ("_short" if s.side.value == "short" else ""))
     other = sum(o.realised_r for o in group if o.candidate.mc_expectancy_r is None and o.realised_r is not None)
     st.caption(f"{n_without} resolved trade{'s' if n_without != 1 else ''} without a projection"
                + (f" (realised {other:+.2f}R, not on the chart)." if n_without else "."))
@@ -559,7 +564,7 @@ def _render_record(stats, outcomes=()) -> None:
         _score_banner(s)
     if stats:
         st.dataframe(pd.DataFrame([{
-            "Mode": s.mode.value, "Trades": s.n, "Win %": None if s.win_pct is None else round(s.win_pct, 1),
+            "Mode": _score_mode(s.mode, s.side), "Trades": s.n, "Win %": None if s.win_pct is None else round(s.win_pct, 1),
             "Mean realised": _r(s.mean_r), "Predicted MC": _r(s.mean_pred_mc_r),
             "Predicted history": _r(s.mean_pred_hist_r),
             "95% CI": "n/a" if s.ci_low is None else f"{_r(s.ci_low)} to {_r(s.ci_high)}",
@@ -568,7 +573,7 @@ def _render_record(stats, outcomes=()) -> None:
             "Prediction coverage": _pct(s.pred_coverage)} for s in stats]), hide_index=True, width="stretch")
         for s in stats:
             if s.cumulative_r:
-                st.markdown(f"**Cumulative R — {s.mode.value}**")
+                st.markdown(f"**Cumulative R — {_score_mode(s.mode, s.side)}**")
                 st.line_chart(pd.DataFrame({"cumulative R": list(s.cumulative_r)}))
             _render_projected_vs_real(outcomes, s)
 
@@ -595,7 +600,8 @@ def _render_scoreboard(res, profile, warnings=()) -> None:
         st.dataframe(pd.DataFrame([{
             "Date": o.candidate.created_at.astimezone(ZoneInfo(profile.tz)).date().isoformat(),
             "Record": RECORD_LABELS.get(o.candidate.record, o.candidate.record),
-            "Symbol": o.candidate.symbol, "Mode": o.candidate.mode.value, "Status": o.status.value,
+            "Symbol": o.candidate.symbol, "Mode": _score_mode(o.candidate.mode, o.candidate.side),
+            "Status": o.status.value,
             "Fill": "" if o.fill_price is None else profile.money(o.fill_price),
             "Exit": "" if o.exit_price is None else profile.money(o.exit_price),
             "Realised R": _r(o.realised_r) if o.realised_r is not None else (

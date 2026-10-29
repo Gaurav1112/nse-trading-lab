@@ -39,7 +39,8 @@ read-only: it replays the TAKEs in `desk_audit.jsonl` against later prices (cons
 caches final results in `desk_scoreboard.json`; it writes no trades and places nothing. It is the
 desk's paper record, not the user's real P&L. Report the verdict per market and mode first (needs 30
 resolved trades; Losing / Worse than the desk's odds / Matching the odds / Inconclusive), then n, mean
-realised R vs predicted MC R and the 95% interval, then the count of `data_unavailable` trades.
+realised R vs predicted MC R and the 95% interval, then the count of `data_unavailable` trades. ORB shorts are
+scored separately as "intraday short" (mirrored rules) and must never be added to the long figures.
 Never tell the user to delete `desk_scoreboard.json`: intraday results older than about 60 days exist
 only there.
 

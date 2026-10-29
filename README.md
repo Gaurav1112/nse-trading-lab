@@ -252,6 +252,16 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price
   runs above the limit while the ticket is being typed it may not fill at all (about 1% of trusted rows in a
   simulation).
+- ORB shorts (NSE intraday, the SELL tickets) are replayed by the exact mirror of every rule above: a sell
+  stop-limit fills between the limit and the trigger (never below the limit), a gap through the stop exits at the
+  open or the stop, whichever is higher, a lost short never shows a gain, a won short exits at or below the target,
+  and the containing-bar, worst-fill, gap, window and trusted-price rules all apply mirrored (a live sell price is
+  trusted between 0.5% below its bar's low and its high). The ticket says to square off by 15:10, inside the
+  15:00 bar: a stop in that bar counts, its target never does, and with no stop the time exit is at that bar's
+  high, the worst buy-back price it allows. This is stricter than the Time Machine's short history (time exit at
+  the 14:45 bar's close). Short stats are shown as "intraday short", never pooled with longs. A short row with a
+  safety block (not an F&O stock, in the F&O ban, either list unverified) could never have been traded and is
+  listed as a rejected line, never scored.
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.
@@ -259,7 +269,7 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
 - Each trade gets a status: `won`, `lost`, `time` (time exit), `not_filled`, `open` (still running;
   shown marked to the last close, not counted) or `data_unavailable` (bars could not be loaded, have
   gaps, or are missing). Nothing is dropped silently; malformed audit lines are listed by line number.
-- Per market and mode it shows trades, win %, mean realised R against the mean predicted Monte Carlo
+- Per market, mode and side it shows trades, win %, mean realised R against the mean predicted Monte Carlo
   and history R, a 95% bootstrap interval of the mean realised R, max drawdown in R and a cumulative
   R chart.
 

@@ -403,8 +403,8 @@ def _projected_line(outcomes, s) -> str:
     """"Projected xR vs realised yR over n trades" for one (record, market, mode) group: the trades that had a
     projection, so both sums cover the same trades."""
     from .projections import projected_vs_real, resolved_without_r
-    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode) ==
-             (s.record, s.market, s.mode)]
+    group = [o for o in outcomes if (o.candidate.record, o.candidate.market, o.candidate.mode, o.candidate.side) ==
+             (s.record, s.market, s.mode, s.side)]  # shorts are never pooled with longs
     _, _, pairs, n_without = projected_vs_real(group)
     n_no_r = resolved_without_r(group)
     no_r = f"{n_no_r} resolved trade{'s' if n_no_r != 1 else ''} without a realised R, left out" if n_no_r else ""
@@ -415,6 +415,11 @@ def _projected_line(outcomes, s) -> str:
     extra = f" ({'; '.join(parts)})" if parts else ""
     n = len(pairs)
     return f"  Projected {proj:+.2f}R vs realised {real:+.2f}R over {n} trade{'s' if n != 1 else ''}{extra}"
+
+
+def _mode_label(mode, side) -> str:
+    """"intraday", "swing", or "intraday short" for a short (longs read as before)."""
+    return f"{mode.value} short" if getattr(side, "value", side) == "short" else mode.value
 
 
 def format_scoreboard(res, market_label: str) -> list[str]:
@@ -444,7 +449,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"
             dd = "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R"
             cov = "n/a" if s.pred_coverage is None else f"{s.pred_coverage * 100:.0f}%"
-            lines += [f"{s.market} {s.mode.value}: {s.verdict}",
+            lines += [f"{s.market} {_mode_label(s.mode, s.side)}: {s.verdict}",
                       f"  trades {s.n}  win {win}  mean realised {_num_r(s.mean_r)} vs predicted MC "
                       f"{_num_r(s.mean_pred_mc_r)} / history {_num_r(s.mean_pred_hist_r)}",
                       f"  95% CI of mean realised {ci}  max drawdown {dd}",
@@ -463,7 +468,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
             real = _num_r(o.realised_r) if o.realised_r is not None else (
                 f"({_num_r(o.mtm_r)})" if o.mtm_r is not None else "-")
             day = c.created_at.astimezone(ZoneInfo(_gp(c.market).tz)).date().isoformat()
-            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {c.mode.value:<9} "
+            lines.append(f"  {day:<10} {c.record:<8} {c.market:<4} {c.symbol:<12} {_mode_label(c.mode, c.side):<9} "
                          f"{o.status.value:<16} "
                          f"{fill:>14} {exit_:>14} {real:>8} {_num_r(c.mc_expectancy_r):>8}  {o.note}")
         if any(o.status.value == "open" and o.mtm_r is not None for o in res.outcomes):

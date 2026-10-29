@@ -556,7 +556,7 @@ def test_h5a_long_audit_rows_carry_no_side(tmp_path):
     assert "side" not in json.loads(path.read_text().splitlines()[-1]) and v.plan.side.value == "long"
 
 
-def test_h5a_scoreboard_does_not_score_short_rows_yet(tmp_path):
+def test_h5c_scoreboard_scores_short_rows_as_shorts(tmp_path):
     from nse_backtest.desk import scoreboard
     from nse_backtest.desk.audit import append_override
     df, _ = _breakdown_frame()
@@ -567,8 +567,11 @@ def test_h5a_scoreboard_does_not_score_short_rows_yet(tmp_path):
     path = tmp_path / "a.jsonl"
     append_override(v, path, now=now)
     row = json.loads(path.read_text().splitlines()[-1])
-    good, bad = scoreboard.load_candidates([row])
-    assert good == [] and len(bad) == 1 and "short" in bad[0][1]
+    good, bad = scoreboard.load_candidates([row])  # H5c: replayed by the mirrored rules, never as a long
+    assert bad == [] and len(good) == 1
+    c = good[0]
+    assert c.side is Side.SHORT and c.record == "override" and c.stop > c.entry > c.target_1
+    assert c.entry_limit == pytest.approx(v.plan.entry_limit) and c.key.endswith("|override")
 
 
 

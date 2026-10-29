@@ -45,7 +45,7 @@ FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 _CANDIDATE_FIELDS = ("market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars", "cost_per_share",
                      "qty", "last_bar", "last_close", "entry_limit", "record", "current_price", "quote_live",
-                     "quote_as_of")
+                     "quote_as_of", "side")
 
 
 @dataclass(frozen=True)
@@ -210,7 +210,8 @@ def _candidate_record(c: Candidate) -> dict:
             "history_expectancy_r": c.history_expectancy_r, "key": c.key, "last_bar": c.last_bar,
             "last_close": c.last_close, "entry_limit": c.entry_limit, "record": c.record,
             "current_price": c.current_price, "quote_live": c.quote_live,
-            "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of is not None else None}
+            "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of is not None else None,
+            "side": c.side.value}
 
 
 def _entry(o: Outcome) -> dict:
@@ -455,7 +456,8 @@ def _cacheable(o: Outcome, now: datetime) -> bool:
 
 def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, load_intraday,
                    on_warning: Warn = None) -> list[Outcome]:
-    """Outcomes for uncached candidates of one (market, symbol, mode); the bars are loaded at most once."""
+    """Outcomes for uncached candidates of one (market, symbol, mode), longs and shorts alike; the bars are loaded at
+    most once. A short's replay holds it only to its own square-off (scoreboard.short_hold)."""
     profile = get_profile(cs[0].market)
     symbol = cs[0].symbol
     now_l = now.astimezone(ZoneInfo(profile.tz))

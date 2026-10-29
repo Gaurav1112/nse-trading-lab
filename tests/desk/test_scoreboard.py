@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 13  # F1 r9b (13): start at the quote; F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
+    assert SCOREBOARD_VERSION == 14  # H5c (14): shorts mirrored, candidates carry the side; F1 r9b (13): start at the quote; F1 round 9 (12): the quote's own bar; F1 round 8 (11): only a live, traded price is trusted; F1 round 7 (10): plain needs the containing bar; F1 round 6 (9): the fallback is capped; F1 round 5 (8): containing-bar fills count only if they lose; F1 round 4 (7): swing restored + containing bars; round 3 (6); C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -876,7 +876,7 @@ def test_score_stats_record_is_the_last_field_defaulting_to_desk():
     from dataclasses import fields
     from nse_backtest.desk.scoreboard import ScoreStats
     f = fields(ScoreStats)
-    assert f[-1].name == "record" and f[-1].default == "desk"
+    assert f[-2].name == "record" and f[-2].default == "desk"  # H5c: side follows it (test_scoreboard_short)
     assert summarize(_outs([1.0]))[0].record == "desk"
 
 

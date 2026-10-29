@@ -19,6 +19,19 @@ that was printed. A live price outside that range contradicts the bars: data_una
 The one accepted residual optimism: a trusted live price in [entry, limit] (desk TAKE or override) fills at that
 price. A real order typed in a little later can fill worse, up to the limit (about 0.25R), and if the price runs
 above the limit while the ticket is typed it may not fill at all (about 1% of trusted rows in a simulation).
+
+Shorts (intraday ORB breakdown shorts, NSE only) are replayed by the exact mirror of every rule above: the short
+and its bars are reflected through zero (price -> -price, so High and Low swap), the long replay runs unchanged on
+the reflection and its prices are reflected back. Every comparison, min/max and R of the long rules is exact under
+negation, so a sell stop-limit fills in [limit, trigger] like fills.stop_limit_fill_short, a gap through the stop
+exits at max(Open, stop), LOST => R <= 0, WON => exit at or below the target, the containing-bar rule and its cap,
+the worst consistent fill, gaps, the entry window and quote trust all hold mirrored. A live sell price is trusted
+inside [Low - 0.5%, High] of its quote's bar. The ticket says "square off by 15:10" (plan.short_flat_by), which
+falls inside the 15:00 bar: that bar's stop counts (a gap: its Open), its target never does, and with no stop the
+time exit is at its High, the worst buy-back price before 15:10 consistent with the bar (see short_hold). This is
+more conservative than the Time Machine's short history (time exit at the 14:45 bar's Close). Short stats are
+never pooled with longs (the group key carries the side). A short row with a "safety" BLOCK (not an F&O stock,
+F&O ban, either list unverified) could never have been traded and is rejected.
 """
 from __future__ import annotations
 
@@ -35,11 +48,14 @@ import pandas as pd
 from . import calendars as cal
 from . import fills
 from .costs import round_trip_cost
+from .costs import side_cost
 from .markets import get_profile
-from .models import Mode
+from .models import Mode, Side
+from .plan import short_flat_by
 from .timemachine import _walk
+from .verdict import group_of
 
-SCOREBOARD_VERSION = 13  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 14  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -70,6 +86,7 @@ class Candidate:
     current_price: float | None = None  # the price the verdict was decided at; None in rows logged before it
     quote_live: bool | None = None  # current_price was a live quote; False: the last close; None: unknown (old row)
     quote_as_of: datetime | None = None  # the quote's own time (tz-aware); None without one (old rows: untrusted)
+    side: Side = Side.LONG      # SHORT: an intraday ORB breakdown short, replayed by the mirrored rules
 
 
 class Status(str, Enum):
@@ -116,6 +133,7 @@ class ScoreStats:
     verdict: str
     pred_coverage: float | None = None   # share of resolved trades carrying an MC prediction
     record: str = "desk"                 # which record these stats are for: "desk" or "override", never both
+    side: Side = Side.LONG               # longs and shorts are never pooled either
 
 
 # ---------------------------------------------------------------- candidates
@@ -143,8 +161,10 @@ def _parse_row(row: dict) -> Candidate:
         raise ValueError(f"not a scored action {row.get('action')!r}")
     if record == "override" and row.get("desk_action") not in ("WAIT", "SKIP"):
         raise ValueError(f"override of a TAKE verdict (desk_action {row.get('desk_action')!r})")
-    if row.get("side", "long") != "long":  # never replayed as a long; the mirrored short replay is not built yet
-        raise ValueError(f"{row.get('side')} trade: shorts are not scored yet (the short scoreboard comes later)")
+    try:
+        side = Side(row.get("side", "long"))
+    except ValueError:
+        raise ValueError(f"unknown side {row.get('side')!r}") from None
     for k in ("created_at", "market", "symbol", "mode", "input_hash"):
         if not row.get(k):
             raise ValueError(f"missing {k}")
@@ -154,7 +174,9 @@ def _parse_row(row: dict) -> Candidate:
     profile = get_profile(str(row["market"]))
     mode = Mode(row["mode"])
     entry, stop, t1 = _num(row, "entry"), _num(row, "stop"), _num(row, "target_1")
-    if not (0 < stop < entry < t1):
+    if side is Side.SHORT:
+        _check_short_row(row, profile, mode, entry, stop, t1)
+    elif not (0 < stop < entry < t1):
         raise ValueError(f"invalid geometry stop={stop} entry={entry} target_1={t1}")
     qty = int(row.get("qty") or 0)
     hold = row.get("max_hold_bars")
@@ -163,6 +185,8 @@ def _parse_row(row: dict) -> Candidate:
         raise ValueError("max_hold_bars < 1")
     if mode is Mode.INTRADAY:
         local = created.astimezone(ZoneInfo(profile.tz))
+        if side is Side.SHORT and local.time() >= short_flat_by(profile, local.date()):
+            raise ValueError("created after the short square-off")
         if local.time() >= cal.flat_by_for(profile, local.date()):  # early-close days flatten earlier
             raise ValueError("created after flat-by")
     raw_cps = row.get("cost_per_share")
@@ -172,7 +196,8 @@ def _parse_row(row: dict) -> Candidate:
             raise ValueError(f"invalid cost_per_share {raw_cps}")
     else:
         q = max(qty, 1)
-        cps = round_trip_cost(profile, mode, entry, t1, q) / q
+        cps = (side_cost(profile, mode, entry, t1, q, side=side) if side is Side.SHORT
+               else round_trip_cost(profile, mode, entry, t1, q)) / q
         if not math.isfinite(cps) or cps < 0:
             raise ValueError("invalid computed cost_per_share")
     last_bar = row.get("last_bar")
@@ -185,17 +210,40 @@ def _parse_row(row: dict) -> Candidate:
                 raw = float(raw)
             except (TypeError, ValueError):
                 raise ValueError(f"invalid entry_limit {row['entry_limit']!r}") from None
-            ceiling = fills.entry_limit(entry, stop, profile.tick) + profile.tick  # more = a corrupt value
-            if not (math.isfinite(raw) and entry <= raw <= ceiling + 1e-9):
+            if side is Side.SHORT:  # a sell limit: at or below the trigger, at most one tick under the formula
+                floor = fills.entry_limit_short(entry, stop, profile.tick) - profile.tick
+                ok = math.isfinite(raw) and floor - 1e-9 <= raw <= entry
+            else:
+                ceiling = fills.entry_limit(entry, stop, profile.tick) + profile.tick  # more = a corrupt value
+                ok = math.isfinite(raw) and entry <= raw <= ceiling + 1e-9
+            if not ok:
                 raise ValueError(f"invalid entry_limit {row['entry_limit']!r}")
-        limit = fills.limit_or_default(raw, entry, stop, profile.tick)
+        limit = (fills.short_limit_or_default(raw, entry, stop, profile.tick) if side is Side.SHORT
+                 else fills.limit_or_default(raw, entry, stop, profile.tick))
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
                      f"{row['input_hash']}|{created.isoformat()}" + ("|override" if record == "override" else ""),
                      str(last_bar) if last_bar not in (None, "") else None,
                      last_close if last_close is not None and last_close > 0 else None, limit, record,
                      cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None,
-                     _quote_live(row), _quote_as_of(row))
+                     _quote_live(row), _quote_as_of(row), side)
+
+
+def _check_short_row(row: dict, profile, mode: Mode, entry: float, stop: float, t1: float) -> None:
+    """A short row the mirrored replay can score, or ValueError: NSE intraday, 0 < target < entry < stop, and no
+    "safety" BLOCK (such a short could never have been traded: it is never replayed, not even as an override)."""
+    if mode is not Mode.INTRADAY:
+        raise ValueError("short trade in swing mode: shorts are intraday only")
+    if profile.code != "NSE":
+        raise ValueError(f"short trade on {profile.code}: shorts are NSE only")
+    if not (0 < t1 < entry < stop):
+        raise ValueError(f"invalid short geometry stop={stop} entry={entry} target_1={t1}")
+    blocks = row.get("blocks") or ()
+    safety = sorted({str(b) for b in blocks if group_of(str(b), Side.SHORT) == "safety"}) \
+        if isinstance(blocks, (list, tuple)) else []
+    if safety:
+        raise ValueError(f"short with a safety block ({', '.join(safety)}): it could never be traded, so it is "
+                         "not scored")
 
 
 def _quote_as_of(row: dict) -> datetime | None:
@@ -230,8 +278,8 @@ def default_session_of(market: str, created_at: datetime) -> date:
 def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime], date] | None = None
                     ) -> tuple[list[Candidate], list[tuple[dict, str]]]:
     """TAKE rows (record "desk") and OVERRIDE rows (record "override") only; others are silently not candidates.
-    Malformed TAKE/OVERRIDE rows come back with a reason. Deduped by (record, market, symbol, mode, session the
-    order belongs to), keeping the earliest, so a desk pick and an override never share a slot; the session
+    Malformed TAKE/OVERRIDE rows come back with a reason. Deduped by (record, market, symbol, mode, side, session
+    the order belongs to), keeping the earliest, so a desk pick and an override never share a slot; the session
     defaults to the market-local date of created_at, or is session_of(market, created_at) when given."""
     session_of = session_of or default_session_of
     good: list[Candidate] = []
@@ -246,7 +294,7 @@ def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime
     best: dict[tuple, Candidate] = {}
     for c in sorted(good, key=lambda c: c.created_at):
         d = session_of(c.market, c.created_at)
-        best.setdefault((c.record, c.market, c.symbol, c.mode, d), c)
+        best.setdefault((c.record, c.market, c.symbol, c.mode, c.side, d), c)
     return sorted(best.values(), key=lambda c: c.created_at), rejects
 
 
@@ -271,12 +319,18 @@ def unavailable(c: Candidate, note: str) -> Outcome:
 
 
 def realised_r(c: Candidate, fill: float, px: float) -> float:
-    """Realised R of an exit at px after a fill, net of cost_per_share, over the planned R."""
+    """Realised R of an exit at px after a fill, net of cost_per_share, over the planned R (mirrored for a short:
+    (fill - px - cost) / (stop - entry))."""
+    if c.side is Side.SHORT:
+        return float((fill - px - c.cost_per_share) / (c.stop - c.entry))
     return _r(c, fill, px)
 
 
 def exit_status(c: Candidate, px: float) -> Status:
-    """Final status of a filled trade exiting at px: WON at/through target, LOST at/through stop, else TIME."""
+    """Final status of a filled trade exiting at px: WON at/through target, LOST at/through stop, else TIME
+    (mirrored for a short: WON at or below the target, LOST at or above the stop)."""
+    if c.side is Side.SHORT:
+        return Status.WON if px <= c.target_1 else Status.LOST if px >= c.stop else Status.TIME
     if px >= c.target_1:
         return Status.WON
     if px <= c.stop:
@@ -488,7 +542,9 @@ def _as_logged(c: Candidate, o: Outcome) -> Outcome:
 def resolve_swing(c: Candidate, daily: pd.DataFrame, *, fill_session: date, now: datetime,
                   session_closed_today: bool = False, bars15: pd.DataFrame | None = None,
                   intraday_note: str = "") -> Outcome:
-    """See _resolve_swing_at; replayed from max(created_at, quote_as_of)."""
+    """See _resolve_swing_at; replayed from max(created_at, quote_as_of). Shorts are intraday only."""
+    if c.side is Side.SHORT:
+        raise ValueError("shorts are intraday only: a swing short cannot be replayed")
     return _as_logged(c, _resolve_swing_at(_from_quote(c), daily, fill_session=fill_session, now=now,
                                            session_closed_today=session_closed_today, bars15=bars15,
                                            intraday_note=intraday_note))
@@ -606,7 +662,8 @@ def _price_trust(c: Candidate, bars15: pd.DataFrame) -> tuple[str, object]:
         return "untrusted", None
     bar = bars15.loc[qb]
     lo, hi = float(bar["Low"]), float(bar["High"])
-    return ("trusted" if lo <= cp <= hi + PLAIN_PRICE_TOLERANCE * cp else "contradiction"), bar
+    # abs(): the long cp is positive (identical); a short's reflected cp is negative, so its band is mirrored
+    return ("trusted" if lo <= cp <= hi + PLAIN_PRICE_TOLERANCE * abs(cp) else "contradiction"), bar
 
 
 def _contradiction(c: Candidate, bar) -> Outcome:
@@ -627,7 +684,8 @@ def limit_model(c: Candidate, limit: float) -> str | None:
 
 
 def _limit_fill(c: Candidate, model: str, limit: float, frame: pd.DataFrame, profile, session_over: bool,
-                incomplete: bool, incomplete_note: str, day: date, skip_containing: bool = False) -> Outcome:
+                incomplete: bool, incomplete_note: str, day: date, skip_containing: bool = False,
+                square: time | None = None) -> Outcome:
     """Bar 0 of ``frame`` contains created_at; bars 1.. follow it (before flat-by). Plain: filled at the logged price
     at created_at. Resting: filled at the limit (the worst case: the order and the price inside a bar are unknown)
     on bar 0 if its Low reaches the limit, else on the first later bar inside the entry window that does. On the
@@ -651,24 +709,39 @@ def _limit_fill(c: Candidate, model: str, limit: float, frame: pd.DataFrame, pro
             return _outcome(c, Status.NOT_FILLED, AMBIGUOUS_FILL_NOTE if skip_containing else
                             f"not filled inside the entry window (cancel by {cal.entry_cancel_by(profile, day):%H:%M})")
     fill_at = c.created_at.isoformat() if k == 0 else str(idx[k])
-    o = _exits_after_fill(c, k, fill, fill_at, op, hi, lo, cl, idx, session_over, incomplete, incomplete_note, note)
+    o = _exits_after_fill(c, k, fill, fill_at, op, hi, lo, cl, idx, session_over, incomplete, incomplete_note, note,
+                          square=square)
     if model == "resting" and k == 0 and _only_if_it_loses(c, o) is not o:  # would win: only a later bar counts
         return _cap_fallback(c, o, _limit_fill(c, model, limit, frame, profile, session_over, incomplete,
-                                               incomplete_note, day, skip_containing=True))
+                                               incomplete_note, day, skip_containing=True, square=square))
     return o
 
 
+SQUARE_OFF_NOTE = "squared off inside the last bar: time exit at its worst price"
+
+
 def _exits_after_fill(c: Candidate, k: int, fill: float, fill_at: str, op, hi, lo, cl, idx, session_over: bool,
-                      incomplete: bool, incomplete_note: str, note: str) -> Outcome:
+                      incomplete: bool, incomplete_note: str, note: str, square: time | None = None) -> Outcome:
     """Exit of a fill on bar k: a Low at or below the stop on the fill bar is LOST at the stop (its target never
-    counts); later bars exit as usual; else a time exit at flat-by, or OPEN while the session runs."""
+    counts); later bars exit as usual; else a time exit at flat-by, or OPEN while the session runs.
+    ``square`` (shorts only: the start of the bar that spans a square-off off the 15-minute grid): when the last bar
+    starts there, only its stop counts (gap: its Open) and its target never does, since either may come after the
+    square-off; with no stop the time exit is at its worst price (Low here, the reflection of a short's High)."""
     n = len(idx)
     if lo[k] <= c.stop:  # conservative: the fill bar's low may have come after the fill; its target never counts
         return _finish(c, fill, fill_at, c.stop, idx[k], 0, "stop touched on the fill bar")
-    res = _walk(op, hi, lo, cl, k + 1, n - 1, c.stop, c.target_1) if k + 1 <= n - 1 else None
+    sq = square is not None and n - 1 > k and idx[n - 1].time() == square
+    end = n - 2 if sq else n - 1
+    res = _walk(op, hi, lo, cl, k + 1, end, c.stop, c.target_1) if k + 1 <= end else None
     if res is not None:
         px, j = res
         return _finish(c, fill, fill_at, px, idx[j], j - k, note)
+    if sq:
+        j = n - 1
+        if op[j] <= c.stop or lo[j] <= c.stop:  # a stop in the square-off bar may have come first: a loss
+            return _finish(c, fill, fill_at, min(op[j], c.stop), idx[j], j - k, note)
+        if session_over and not incomplete:
+            return _finish(c, fill, fill_at, lo[j], idx[j], j - k, SQUARE_OFF_NOTE)
     if session_over:
         if incomplete:
             return _outcome(c, Status.UNAVAILABLE, incomplete_note)
@@ -678,11 +751,64 @@ def _exits_after_fill(c: Candidate, k: int, fill: float, fill_at: str, op, hi, l
 
 
 def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
-    """See _resolve_intraday_at; replayed from max(created_at, quote_as_of)."""
+    """See _resolve_intraday_at (a short: _resolve_short_at); replayed from max(created_at, quote_as_of)."""
+    if c.side is Side.SHORT:
+        return _as_logged(c, _resolve_short_at(_from_quote(c), bars15, flat_by=flat_by, now=now))
     return _as_logged(c, _resolve_intraday_at(_from_quote(c), bars15, flat_by=flat_by, now=now))
 
 
-def _resolve_intraday_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
+def short_hold(profile, d: date) -> tuple[time, time | None]:
+    """(flat_by, square) for a short on day d. The square-off is plan.short_flat_by (15:10; earlier on an early
+    close). Bars that start before it are held, so flat_by is the square-off rounded up to the 15-minute grid. When
+    the square-off is off the grid, ``square`` is the start of the bar that spans it (15:00): only that bar's stop
+    counts and, with no stop, the time exit is at its High (the worst buy-back price consistent with the bar), so an
+    owner who squares off at any time up to 15:10 is never scored better than he could have done."""
+    sq = short_flat_by(profile, d)
+    m = sq.hour * 60 + sq.minute
+    if m % 15 == 0:
+        return sq, None
+    up, down = (m // 15 + 1) * 15, m // 15 * 15
+    return time(up // 60, up % 60), time(down // 60, down % 60)
+
+
+def _mirror_bars(bars15: pd.DataFrame) -> pd.DataFrame:
+    """The bars reflected through zero: Open/Close negated, High = -Low, Low = -High (exact in floating point)."""
+    return pd.DataFrame({"Open": -bars15["Open"].to_numpy(dtype=float), "High": -bars15["Low"].to_numpy(dtype=float),
+                         "Low": -bars15["High"].to_numpy(dtype=float), "Close": -bars15["Close"].to_numpy(dtype=float)},
+                        index=bars15.index)
+
+
+def _mirror_candidate(c: Candidate, limit: float) -> Candidate:
+    """The short as the long it reflects to: every price negated (stop below entry below target), side LONG."""
+    return replace(c, entry=-c.entry, stop=-c.stop, target_1=-c.target_1, entry_limit=-limit,
+                   current_price=None if c.current_price is None else -c.current_price,
+                   last_close=None if c.last_close is None else -c.last_close, side=Side.LONG)
+
+
+def _resolve_short_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime) -> Outcome:
+    """An intraday short: the long replay (_resolve_intraday_at) on the reflection of the short and its bars, its
+    prices reflected back. R, statuses, notes and times carry over unchanged (they are exact under negation); the
+    one note that quotes prices (a contradicting live price) is rewritten with the real ones. Held as short_hold
+    says."""
+    if c.mode is not Mode.INTRADAY:
+        raise ValueError("shorts are intraday only")
+    profile = get_profile(c.market)
+    day = c.created_at.astimezone(ZoneInfo(profile.tz)).date()
+    limit = fills.short_limit_or_default(c.entry_limit, c.entry, c.stop, profile.tick)
+    hold, square = short_hold(profile, day)
+    if flat_by < hold:  # a caller's earlier flat-by wins (it is never later than the square-off)
+        hold, square = flat_by, None
+    o = _resolve_intraday_at(_mirror_candidate(c, limit), _mirror_bars(bars15), flat_by=hold, now=now, square=square)
+    note = o.note
+    if o.status is Status.UNAVAILABLE and note.startswith("logged live price "):
+        _, bar = _price_trust(replace(c, side=Side.LONG), bars15)  # the bar the quote was tested against
+        note = _contradiction(c, bar).note
+    neg = lambda x: None if x is None else -x  # noqa: E731
+    return replace(o, candidate=c, fill_price=neg(o.fill_price), exit_price=neg(o.exit_price), note=note)
+
+
+def _resolve_intraday_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: datetime,
+                         square: time | None = None) -> Outcome:
     """A row logged at or above the trigger printed a LIMIT ticket: see limit_model and _limit_fill. Otherwise:
     BUY stop-limit (trigger = entry, limit = entry_limit, as the ticket prints it) over created_at's session, from
     the bar containing created_at to flat_by (that bar under the ambiguous-fill rule and its cap, see
@@ -735,21 +861,22 @@ def _resolve_intraday_at(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, n
     if model == "plain" and trust != "trusted":
         model = "resting"  # a price that is not a live quote the bar traded at: never a certain fill
     if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts
-        return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day)
+        return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day,
+                           square=square)
     in_win = [profile.no_entry_before <= t.time() <= profile.no_entry_after for t in frame.index]
     price = c.current_price if trust == "trusted" else None  # an untrusted price is ignored entirely
     o, ambiguous = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
-                                    incomplete, incomplete_note, skip_containing=False, price=price)
+                                    incomplete, incomplete_note, skip_containing=False, price=price, square=square)
     if ambiguous and _only_if_it_loses(c, o) is not o:  # an ambiguous containing-bar trigger that would win
         later, _ = _stop_limit_from(c, frame, op, hi, lo, cl, in_win, has_bar0, limit, profile, day, session_over,
-                                    incomplete, incomplete_note, skip_containing=True, price=price)
+                                    incomplete, incomplete_note, skip_containing=True, price=price, square=square)
         o = _cap_fallback(c, o, later)
     return o
 
 
 def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool, limit: float, profile, day: date,
                      session_over: bool, incomplete: bool, incomplete_note: str, *, skip_containing: bool,
-                     price: float | None = None) -> tuple[Outcome, bool]:
+                     price: float | None = None, square: time | None = None) -> tuple[Outcome, bool]:
     """(outcome, ambiguous): ambiguous when only the bar containing created_at triggered the fill."""
     got = None
     if (has_bar0 and not skip_containing and in_win[0] and price is None
@@ -757,7 +884,7 @@ def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool
         # no logged price, and the whole containing bar traded inside [trigger, limit]: the order was marketable
         # whenever it was placed in that bar, a certain fill; at the limit, the worst price in the bar
         return _exits_after_fill(c, 0, float(limit), c.created_at.isoformat(), op, hi, lo, cl, frame.index,
-                                 session_over, incomplete, incomplete_note, CERTAIN_FILL_NOTE), False
+                                 session_over, incomplete, incomplete_note, CERTAIN_FILL_NOTE, square=square), False
     if has_bar0 and not skip_containing and in_win[0] and hi[0] >= c.entry and lo[0] <= limit:
         # the trigger may have come in the containing bar's remainder: fill there (at the trigger, or at the limit
         # when the whole bar traded above the trigger); only its stop counts, never its target
@@ -781,7 +908,7 @@ def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool
     ambiguous = has_bar0 and k == 0  # only the bar containing created_at triggered it
     fill_at = c.created_at.isoformat() if ambiguous else str(frame.index[k])
     return _exits_after_fill(c, k, float(fill), fill_at, op, hi, lo, cl, frame.index, session_over, incomplete,
-                             incomplete_note, ""), ambiguous
+                             incomplete_note, "", square=square), ambiguous
 
 
 # ---------------------------------------------------------------- statistics
@@ -841,12 +968,17 @@ def _stats(record: str, market: str, mode: Mode, outs: list[Outcome], seed: int,
 
 
 def summarize(outcomes: Iterable[Outcome], *, seed: int = 19, resamples: int = 2000) -> list[ScoreStats]:
-    """Stats per (record, market, mode), desk picks first: a record's trades are never pooled with another's."""
-    groups: dict[tuple[str, str, Mode], list[Outcome]] = {}
+    """Stats per (record, market, mode, side), desk picks first, longs before shorts: a record's trades are never
+    pooled with another's, nor shorts with longs."""
+    groups: dict[tuple[str, str, Mode, Side], list[Outcome]] = {}
     for o in outcomes:
         c = o.candidate
-        groups.setdefault((c.record, c.market, c.mode), []).append(o)
+        groups.setdefault((c.record, c.market, c.mode, c.side), []).append(o)
     order = list(RECORD_LABELS)
-    return [_stats(r, m, md, groups[(r, m, md)], seed, resamples)
-            for r, m, md in sorted(groups, key=lambda k: (order.index(k[0]) if k[0] in order else len(order),
-                                                          k[0], k[1], k[2].value))]
+    sides = list(Side)
+    out = []
+    for r, m, md, sd in sorted(groups, key=lambda k: (order.index(k[0]) if k[0] in order else len(order),
+                                                      k[0], k[1], k[2].value, sides.index(k[3]))):
+        st = _stats(r, m, md, groups[(r, m, md, sd)], seed, resamples)
+        out.append(st if sd is Side.LONG else replace(st, side=sd))
+    return out
