@@ -23,6 +23,11 @@ class Mode(str, Enum):
     INTRADAY = "intraday"
 
 
+class Side(str, Enum):
+    LONG = "long"
+    SHORT = "short"  # intraday ORB breakdown shorts (MIS), NSE F&O stocks only
+
+
 @dataclass(frozen=True)
 class Limits:
     capital: float
@@ -48,15 +53,23 @@ class TradePlan:
     last_close: float
     last_bar: str  # ISO timestamp of last bar used
     stop_basis: str  # "2×ATR" | "10-bar swing low" | "1×ATR floor" | "user" | "opening-range mid"
-    entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (swing: None)
+    entry_limit: float | None = None  # intraday: the entry stop-limit's limit price (swing: None)
+    # LAST field: LONG plans hash as before (verdict.input_hash leaves side out unless SHORT).
+    side: Side = Side.LONG
+
+    @property
+    def is_short(self) -> bool:
+        return self.side is Side.SHORT
 
     @property
     def risk_per_share(self) -> float:
-        return self.entry - self.stop
+        """Distance from the entry to the stop: entry - stop for a long, stop - entry for a short."""
+        return self.stop - self.entry if self.is_short else self.entry - self.stop
 
     @property
     def rr_t1(self) -> float:
-        return (self.target_1 - self.entry) / self.risk_per_share
+        reward = self.entry - self.target_1 if self.is_short else self.target_1 - self.entry
+        return reward / self.risk_per_share
 
 
 @dataclass(frozen=True)

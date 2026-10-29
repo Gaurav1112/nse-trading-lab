@@ -17,7 +17,7 @@ from . import fills
 from . import models
 from .checks import REGIME_HELD_OUT_PCT, signed_pct
 from .markets import MarketProfile
-from .models import Action, DeskVerdict, Mode, Odds, Sizing, Status, TradePlan, summary_fields
+from .models import Action, DeskVerdict, Mode, Odds, Side, Sizing, Status, TradePlan, summary_fields
 from .sizing import loss_at_stop
 
 
@@ -144,8 +144,11 @@ def _plain(o):
 
 
 def input_hash(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, current_price: float) -> str:
+    plan_d = asdict(plan)
+    if plan.side is Side.LONG:  # long hashes stay what they were before shorts existed
+        plan_d.pop("side", None)
     payload = {
-        "plan": asdict(plan),
+        "plan": plan_d,
         "sizing": asdict(sizing),
         "odds": summary_fields(odds) if odds is not None else None,  # flat dataclass; mc_rs left out
         "checks": [asdict(c) for c in checks],

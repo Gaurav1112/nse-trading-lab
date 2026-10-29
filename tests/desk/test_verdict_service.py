@@ -377,3 +377,35 @@ def test_h3_fix3_check_trade_carries_the_regime_value(tmp_path):
     assert v.regime == "HOSTILE"
     assert check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=1_000_000),
                        CheckContext(NSE, Limits(capital=1_000_000), NOW), audit_path=tmp_path / "a.jsonl").regime is None
+
+
+# ---- H5a: long verdicts and their input hashes are pinned before shorts exist ----
+def _pin_ctx(**kw):
+    return replace(_ctx_ok(), **kw)
+
+
+def test_h5a_long_input_hashes_are_pinned():
+    from tests.desk.test_plan import sessions15
+    pi = replace(P, mode=Mode.INTRADAY, entry_limit=100.5)
+    assert decide(pi, S, None, OK, NSE, 100.0, NOW).input_hash == \
+        "e3b1691a5a26d4940a15cd72baa60f9828d6de3210becacfe8a12415ce4158ce"
+    assert decide(P, S, None, OK, NSE, 100.0, NOW).input_hash == \
+        "b3cfff9c411d5bc07b69bb3dc0dfbc5deb995a4ae910f09c22f927f06565d421"
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), _pin_ctx(), replays=1000, audit=False)
+    assert v.input_hash == "fcc738e95f339dfbd50c83e57018956c358a40042ce636774fe8e2eb697e8ccc"
+    now = datetime(2026, 10, 29, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    v = check_trade(sessions15(), "ABC", NSE, Mode.INTRADAY, Limits(capital=100_000),
+                    _pin_ctx(now=now, regime="HOSTILE"), replays=1000, audit=False, robustness=False)
+    assert v.input_hash == "b26390f38c88148c1a180095b75e32a18895d5b6c49bfbf85eff6ed2c856e399"
+
+
+def test_h5a_hash_includes_side_only_for_shorts():
+    from nse_backtest.desk.models import Side
+    from nse_backtest.desk.verdict import input_hash
+    import dataclasses
+    assert "side" in {f.name for f in dataclasses.fields(TradePlan)}
+    assert [f.name for f in dataclasses.fields(TradePlan)][-1] == "side"
+    short = TradePlan("ABC", "NSE", Mode.INTRADAY, 100, 102, 97, 94, 2, 15, 100, "2026-10-28T00:00:00", "user",
+                      99.5, Side.SHORT)
+    long = replace(short, side=Side.LONG)
+    assert input_hash(short, S, None, OK, 100.0) != input_hash(long, S, None, OK, 100.0)
