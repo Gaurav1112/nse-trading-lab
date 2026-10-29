@@ -460,7 +460,7 @@ def test_swing_uncovered_year_notes_say_so():
 
 def test_scoreboard_version_bumped_for_stop_limit_rule():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
-    assert SCOREBOARD_VERSION == 4  # C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record
+    assert SCOREBOARD_VERSION == 5  # C1 (3): intraday fills are a stop-limit; C2 (4): cache entries carry the record; F1 I2 (5): plain-LIMIT fills
 
 
 # ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
@@ -894,3 +894,52 @@ def test_c8_two_scans_of_the_same_take_are_one_candidate():
     cands, rejects = load_candidates([dict(base, created_at="2026-10-26T10:00:00+05:30"),
                                       dict(base, created_at="2026-10-26T10:30:00+05:30", input_hash="h2")])
     assert len(cands) == 1 and rejects == [] and cands[0].record == "desk"
+
+
+# ---------------------------------------------------------------- F1 round 2, I2: the plain-LIMIT ticket
+
+def _limit_cand(current_price, created=datetime(2026, 10, 27, 10, 7, tzinfo=IST)):
+    from dataclasses import replace as _replace
+    return _replace(cand(mode=Mode.INTRADAY, created=created), entry_limit=100.5, current_price=current_price)
+
+
+def test_i2_plain_limit_fills_at_the_logged_price_and_a_failed_breakout_is_lost():
+    """p_limit: logged at 10:07 with the price 100.2 (>= trigger 100) -> `BUY MIS LIMIT 100.50` fills at 100.2 at
+    once; the next bar breaks the stop -> LOST about -1.1R (it used to be NOT_FILLED)."""
+    bars = _session({"10:15": (99.6, 99.8, 97.9, 98.2)}, first="09:15", idle=(98.5, 99.0, 98.2, 98.6))
+    o = resolve_intraday(_limit_cand(100.2), bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.LOST and o.fill_price == pytest.approx(100.2) and o.exit_price == 98.0
+    assert o.realised_r == pytest.approx(-1.1)
+    assert o.fill_at.startswith("2026-10-27") and "10:07" in o.fill_at
+
+
+def test_i2_plain_limit_winner_from_the_logged_fill():
+    bars = _session({"10:15": (100.3, 103.2, 100.1, 103.0)}, first="09:15", idle=(100.1, 100.4, 99.9, 100.2))
+    o = resolve_intraday(_limit_cand(100.2), bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.WON and o.fill_price == pytest.approx(100.2) and o.exit_price == 103.0
+    assert o.realised_r == pytest.approx(1.4)
+    assert 100.0 <= o.fill_price <= 100.5  # the fill invariant holds
+
+
+def test_i2_stop_gap_on_the_first_bar_exits_at_its_open():
+    bars = _session({"10:15": (97.5, 97.8, 97.0, 97.2)}, first="09:15", idle=(100.1, 100.4, 99.9, 100.2))
+    o = resolve_intraday(_limit_cand(100.2), bars, flat_by=time(15, 15), now=NOW)
+    assert o.status is Status.LOST and o.exit_price == 97.5  # min(Open, stop): the fill came before this bar
+
+
+def test_i2_rows_without_a_price_or_above_the_limit_keep_the_stop_limit_model():
+    bars = _session({"10:15": (99.6, 99.8, 97.9, 98.2)}, first="09:15", idle=(98.5, 99.0, 98.2, 98.6))
+    for cp in (None, 100.6, 99.9):  # old row / above the limit (never a TAKE) / below the trigger
+        o = resolve_intraday(_limit_cand(cp), bars, flat_by=time(15, 15), now=NOW)
+        assert o.status is Status.NOT_FILLED, cp
+
+
+def test_i2_audit_rows_carry_the_current_price_into_the_candidate():
+    from nse_backtest.desk.scoreboard import load_candidates
+    row = {"created_at": "2026-10-27T10:07:00+05:30", "action": "TAKE", "symbol": "ABC", "market": "NSE",
+           "mode": "intraday", "entry": 100.0, "stop": 98.0, "target_1": 103.0, "qty": 10, "input_hash": "h",
+           "entry_limit": 100.5, "current_price": 100.2}
+    (c,), _ = load_candidates([row])
+    assert c.current_price == 100.2
+    (old,), _ = load_candidates([{k: v for k, v in row.items() if k != "current_price"}])
+    assert old.current_price is None
