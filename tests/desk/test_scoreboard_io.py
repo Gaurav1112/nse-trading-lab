@@ -584,6 +584,8 @@ def test_us_early_close_flat_by_at_io_level(paths):
     idx = pd.date_range("2026-11-27 09:30", "2026-11-27 12:45", freq="15min")
     bars = pd.DataFrame({"Open": 100.5, "High": 101.0, "Low": 99.5, "Close": 100.8}, index=idx)
     bars.loc[pd.Timestamp("2026-11-27 12:30"), "Close"] = 101.5
+    # F1 r5: the 10:00 bar contains the TAKE; below the trigger it keeps the fill on a later (confirmed) bar
+    bars.loc[pd.Timestamp("2026-11-27 10:00"), ["Open", "High", "Low", "Close"]] = (99.6, 99.9, 99.5, 99.8)
     bars.loc[pd.Timestamp("2026-11-27 12:45"), ["High", "Close"]] = (110.0, 109.0)  # at/after flat-by: ignored
     res = run(paths, intraday=Loader({"ABC": bars}), now=datetime(2026, 11, 30, 12, 0, tzinfo=ET))
     o = res.outcomes[0]

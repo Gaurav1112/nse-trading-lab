@@ -217,8 +217,8 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
 - Fills and exits are conservative. Swing: a one-session LIMIT at the entry, filled if the day's low
   reaches it; on the fill day only the stop can trigger; then up to the planned hold (15 bars by
   default) and a time exit at the last close. A swing TAKE logged while its fill session was open is
-  filled from the 15-minute bars from the one containing the verdict (the day's earlier low happened before the
-  order).
+  filled from the 15-minute bars after the verdict (the day's earlier low happened before the order; the bar
+  containing the verdict follows the ambiguous-fill rule below).
   Intraday: a BUY stop-limit, as the ticket prints it (trigger at the entry, limit = entry + the smaller
   of 0.25R and 0.5%, rounded up to the tick): 15-minute bars after the verdict; the first bar whose high
   reaches the trigger fills at its open or the trigger, whichever is higher, when it opens at or below the
@@ -227,15 +227,16 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   then); a later fill is `not_filled`. On the fill bar a stop touch exits at the stop. Flat by the
   session's flat-by time. The Time Machine's intraday history uses the same rule. When a bar touches
   both stop and target, the stop wins.
-- The 15-minute bar that contains the verdict's time counts, for swing and intraday: its remainder came after
-  the verdict, so a fill there takes the worse price, and a stop touch on it is a loss while a target never
-  counts. A missing containing bar makes the trade `data_unavailable`. Intraday rows logged at or above the
+- The 15-minute bar that contains the verdict's time counts, for swing and intraday, but a fill that only that
+  bar made possible is ambiguous: the touch may have come before the verdict. Such a fill is kept only if it
+  loses (or exits at 0R or below), and its target never counts. If it would win, the trade is scored from the
+  first later bar that fills the order for real, or `not_filled` ("fill only possible on the bar the TAKE was
+  logged in — counted only if it loses"). A missing containing bar makes the trade `data_unavailable`. Intraday rows logged at or above the
   trigger printed a LIMIT ticket: a desk TAKE priced up to the limit fills at the logged price; a desk row above
   the limit, or any override at or above the entry, is a resting limit at the limit price. A LIMIT row logged
-  outside the entry window is `not_filled`.
-- Two small optimisms are accepted: a resting limit is credited with a fill on the containing bar whenever that
-  bar reached the limit, even if its low came before the verdict; and a desk TAKE's plain limit fills at the
-  logged price, although an order typed in later could fill up to the limit (at most about 0.25R worse).
+  outside the entry window, or a stop-limit row logged after the cancel time, is `not_filled`.
+- One small optimism is accepted: a desk TAKE's plain limit fills at the logged price, although an order typed in
+  later could fill up to the limit (at most about 0.25R worse).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.
