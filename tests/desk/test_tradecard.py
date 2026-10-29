@@ -222,3 +222,26 @@ def test_a2_breach_text_never_reads_as_equal_to_the_limit():
     (risk,) = [b for b in over.breaches if b.startswith("risk per trade")]
     assert risk == f"risk per trade {over.max_loss / 1000:.2f}% of capital (limit 1.0%)"
     assert "1.0% of capital" not in risk
+
+
+# ---------------------------------------------------------------- F1 round 2, I1: the sizer's own spread everywhere
+
+@pytest.mark.parametrize("market", ["NSE", "US"])
+@pytest.mark.parametrize("mode", [Mode.SWING, Mode.INTRADAY])
+@pytest.mark.parametrize("spread", [0.0003, 0.00075, 0.0012])
+def test_headline_card_and_sizer_share_the_sizers_spread(market, mode, spread):
+    from nse_backtest.desk.markets import get_profile
+    prof = get_profile(market)
+    e = 1000.0 if market == "NSE" else 100.0
+    p = _probe_plan(mode, e, e * 0.98, e * 1.04, e * 1.08, market=market, tick=prof.tick)
+    lim = Limits(capital=1_000_000 if market == "NSE" else 10_000, max_position_pct=100, cash_buffer_pct=0)
+    budget = lim.capital / 100
+    s = size_position(p, lim, prof, spread_per_side=spread)
+    assert s.spread_per_side == spread and s.binding_limit == "max loss per trade"
+    v = decide(p, s, None, OK, prof, p.entry * 0.9995, _NOW)
+    assert v.action is Action.TAKE
+    c = build_card(v, prof, lim)
+    assert c.max_loss == pytest.approx(s.risk_amount) and c.max_loss <= budget
+    assert prof.money(s.risk_amount) in v.headline
+    assert not any(b.startswith("risk per trade") for b in build_card(v, prof, lim, qty=s.qty).breaches)
+    assert any(b.startswith("risk per trade") for b in build_card(v, prof, lim, qty=s.qty + 1).breaches)

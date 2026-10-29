@@ -120,7 +120,7 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
         headline = f"WAIT {sym} — price ran past entry; buy only on a pullback to {m(plan.entry)}"
     else:
         action, ticket = Action.TAKE, lines
-        loss = loss_at_stop(plan, profile, sizing.qty)  # worst fill + stop-exit cost: the card's max loss too
+        loss = loss_at_stop(plan, profile, sizing.qty, spread_per_side=sizing.spread_per_side)  # == card max loss
         headline = (f"TAKE {sym} — BUY {sizing.qty} @ {m(plan.entry)}, "
                     f"loss at stop ≈ {m(loss)} (a gap can lose more)")
     return DeskVerdict(action, headline, plan, sizing, odds, checks, ticket, trigger, current_price,

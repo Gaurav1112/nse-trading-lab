@@ -68,6 +68,7 @@ class Sizing:
     costs: float
     size_halved: bool
     note: str
+    spread_per_side: float = 0.00075  # the bid-ask spread per side the sizer costed (costs.DEFAULT_SPREAD by default)
 
 
 @dataclass(frozen=True)

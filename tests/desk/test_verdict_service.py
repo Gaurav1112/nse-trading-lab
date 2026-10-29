@@ -212,3 +212,20 @@ def test_c2_early_close_pulls_cancel_and_flat_by():
     assert us[1:] == ("Cancel the entry if not filled by 12:45 ET", "Flat by 12:45 ET")
     v = decide(UPI, S, None, OK, US, 99.0, datetime(2026, 11, 27, 10, 0, tzinfo=ZoneInfo("America/New_York")))
     assert v.ticket[-2:] == ("Cancel the entry if not filled by 12:45 ET", "Flat by 12:45 ET")
+
+
+@pytest.mark.parametrize("market", ["NSE", "US"])
+@pytest.mark.parametrize("volume,spread", [(1e9, 0.0003), (1e3, 0.0012)])  # thick / thin turnover frames
+def test_i1_check_trade_card_and_headline_use_the_frames_spread(market, volume, spread, tmp_path):
+    from nse_backtest.desk.tradecard import build_card
+    prof = US if market == "US" else NSE
+    df = rising().assign(Volume=volume)
+    lim = Limits(capital=1_000_000, max_position_pct=100, cash_buffer_pct=0)
+    v = check_trade(df, "ABC", prof, Mode.SWING, lim, _ctx_ok(profile=prof, limits=lim), replays=300,
+                    robustness=False, audit=False, entry=float(df["Close"].iloc[-1]),
+                    stop=float(df["Close"].iloc[-1]) * 0.95)
+    assert v.sizing.spread_per_side == spread
+    c = build_card(v, prof, lim)
+    assert c.max_loss == pytest.approx(v.sizing.risk_amount) and c.max_loss <= lim.capital / 100
+    if v.action is Action.TAKE:
+        assert prof.money(v.sizing.risk_amount) in v.headline

@@ -82,9 +82,10 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     rps = plan.entry - plan.stop
     if rps <= 0:
         raise ValueError("entry must be above stop")
-    c1 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, 1)
-    c2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, 1)
-    per_share = (loss_at_stop(plan, profile, 1), plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
+    sp = base.spread_per_side  # the spread the sizer costed: one cost basis for sizing, headline and card
+    c1 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, 1, sp)
+    c2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, 1, sp)
+    per_share = (loss_at_stop(plan, profile, 1, spread_per_side=sp), plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
     gap_note = GAP_NOTE
     if plan.mode is Mode.INTRADAY:
         gap_note += " " + LIMIT_FILL_NOTE.format(limit=profile.money(worst_entry(plan, profile)))
@@ -103,11 +104,11 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
                          expected_value=None, notional=None, pct_capital_at_risk=None,
                          pct_capital_deployed=None, breaches=(), ticket=(), ticket_header="",
                          unavailable_reason=f"The desk sized 0 shares ({why}) — enter a quantity to see the money")
-    cost = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, n)
-    cost_t2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, n)
+    cost = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, n, sp)
+    cost_t2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, n, sp)
     notional = n * plan.entry
-    max_loss = loss_at_stop(plan, profile, n)  # the same figure as the sizer and the verdict headline
-    max_loss_at_trigger = loss_at_stop(plan, profile, n, entry=plan.entry)
+    max_loss = loss_at_stop(plan, profile, n, spread_per_side=sp)  # the sizer's and the headline's figure
+    max_loss_at_trigger = loss_at_stop(plan, profile, n, entry=plan.entry, spread_per_side=sp)
     risk_pct = max_loss / limits.capital * 100  # incl. costs and the worst fill: the sizer's own rule
     deployed_pct = notional / limits.capital * 100
     ev = None if v.odds is None else v.odds.mc_expectancy_r * n * rps
