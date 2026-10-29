@@ -234,3 +234,26 @@ def test_cli_choose_always_runs_a_fresh_check_and_stamps_the_override_now(desk, 
     assert [r["verdict_created_at"] for r in rows] == ["2026-10-29T10:00:00"] * 2
     for r in rows:
         assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(r["created_at"])).total_seconds()) < 60
+
+
+@pytest.mark.parametrize("hhmm,why", [((9, 20), "before the entry window opens (09:30)"),
+                                      ((14, 40), "past the entry cutoff (14:30)")])
+def test_cli_choose_refuses_an_intraday_override_outside_the_window(desk, monkeypatch, capsys, tmp_path, hhmm, why):
+    """F1 round 3 m-a: never log an intraday override the scoreboard would score as logged outside the window."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, *hhmm, tzinfo=ZoneInfo("Asia/Kolkata")))
+    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("window", Status.BLOCK, "x"),)))
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    out = capsys.readouterr().out
+    assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
+    assert f"--choose refused: an intraday override is only taken inside the entry window; it is {why}" in out
+
+
+def test_cli_choose_inside_the_window_still_logs(desk, monkeypatch, capsys, tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
+    _fake(monkeypatch, v("ABC", Action.SKIP, mode=Mode.INTRADAY, checks=(Check("gap", Status.BLOCK, "x"),)))
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    assert "YOUR OVERRIDE" in capsys.readouterr().out and len(_audit_rows(tmp_path)) == 1

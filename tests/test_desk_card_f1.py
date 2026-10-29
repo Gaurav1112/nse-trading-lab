@@ -296,3 +296,16 @@ def test_m1_flip_conditions_failure_is_scrubbed(monkeypatch, tmp_path):
     at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
     raw = " | ".join(m.value for m in at.markdown)
     assert "Flip conditions unavailable" in raw and home not in raw and "](https://evil.test)" not in raw
+
+
+# ---------------------------------------------------------------- round 3, m-a: no override outside the window
+
+def test_ma_card_blocks_an_intraday_override_before_the_window_opens(monkeypatch, tmp_path):
+    from nse_backtest.desk.models import Action, Check, Status
+    early = datetime(2026, 10, 29, 9, 20, tzinfo=IST)
+    _clock(monkeypatch, early)
+    v = replace(_at(_intraday(_base(monkeypatch, tmp_path)), early, 2), action=Action.SKIP,
+                checks=(Check("window", Status.BLOCK, "outside"),))
+    at, _ = _card_page(monkeypatch, tmp_path, v)
+    assert "I choose this anyway" not in _boxes(at)
+    assert "before the entry window opens (09:30)" in _texts(at.warning)

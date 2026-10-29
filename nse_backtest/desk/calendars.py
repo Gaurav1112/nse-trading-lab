@@ -151,6 +151,16 @@ def entry_cancel_by(profile, d: date) -> time:
     return min(end, flat_by_for(profile, d))
 
 
+def outside_entry_window(profile, now: datetime) -> str | None:
+    """Why ``now`` (market time) is outside the entry window [no_entry_before, no_entry_after], else None."""
+    t = now.time()
+    if t < profile.no_entry_before:
+        return f"before the entry window opens ({profile.no_entry_before:%H:%M})"
+    if t > profile.no_entry_after:
+        return f"past the entry cutoff ({profile.no_entry_after:%H:%M})"
+    return None
+
+
 def _walk(profile, d: date, step: int) -> date:
     cur = _day(d)
     for _ in range(_MAX_WALK):

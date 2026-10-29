@@ -12,6 +12,7 @@ from enum import Enum
 from zoneinfo import ZoneInfo
 
 from . import audit, loaders, session
+from . import calendars as cal
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
@@ -135,6 +136,11 @@ def _limits(profile, as_json: bool = False):
 
 # ---------------------------------------------------------------- commands
 
+def market_now(profile) -> datetime:
+    """The market's wall clock (tests patch this)."""
+    return datetime.now(ZoneInfo(profile.tz))
+
+
 def _log_override(v: DeskVerdict, card) -> None:
     """The owner's override row, with the quantity they chose."""
     audit.append_override(replace(v, sizing=card.sizing))
@@ -148,6 +154,12 @@ def cmd_check(a, profile) -> int:
                           target=a.target, on_warning=_stderr_warn)
     taken = v.action is Action.TAKE
     choose = bool(a.choose) and not taken
+    refused = None
+    if choose and v.plan.mode is Mode.INTRADAY:  # the scoreboard would score it as logged outside the window
+        why = cal.outside_entry_window(profile, market_now(profile))
+        if why is not None:
+            refused = f"--choose refused: an intraday override is only taken inside the entry window; it is {why}."
+            choose = False
     card = build_card(v, profile, limits, qty=a.qty, override_confirmed=choose)
     logged = False
     if choose and card.ticket:
@@ -157,6 +169,8 @@ def cmd_check(a, profile) -> int:
         d = to_jsonable(v)
         d["card"] = {k: val for k, val in to_jsonable(card).items() if k != "verdict"}
         d["override_logged"] = logged
+        if refused:
+            d["override_refused"] = refused
         _emit_json(d)
         return 0
     lines = warn + format_verdict(v, profile, ticket=False) + [""] + format_money(card, profile)
@@ -172,6 +186,8 @@ def cmd_check(a, profile) -> int:
     elif card.ticket:
         lines += ["", f"{card.ticket_header} (type it in yourself):"] + [f"  {t}" for t in card.ticket]
         lines += ["Override logged — it is scored under \"Your overrides\", apart from the desk's picks."]
+    elif refused:
+        lines += ["", refused]
     elif choose:
         lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
     else:

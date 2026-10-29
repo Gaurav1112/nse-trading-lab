@@ -77,7 +77,7 @@ def age_minutes(v: DeskVerdict, profile, now: datetime) -> int | None:
 
 def stale_reason(v: DeskVerdict, profile, now: datetime) -> str | None:
     """Why an intraday verdict must be re-checked before it is acted on (older than 15 minutes, built on another
-    day, or now past the entry cutoff), else None. Swing verdicts are never stale here (their age is shown)."""
+    day, or now outside the entry window), else None. Swing verdicts are never stale here (their age is shown)."""
     if v.plan.mode is not Mode.INTRADAY:
         return None
     t, age = built_at(v, profile), age_minutes(v, profile, now)
@@ -85,9 +85,9 @@ def stale_reason(v: DeskVerdict, profile, now: datetime) -> str | None:
         return "This intraday verdict has no readable build time — re-check before choosing it"
     if age > STALE_INTRADAY_MIN or t.date() != now.date():
         return f"This intraday verdict is {age} min old — re-check before choosing it"
-    if now.time() > profile.no_entry_after:
-        return (f"This intraday verdict was built at {t:%H:%M} and it is now past the entry cutoff "
-                f"({profile.no_entry_after:%H:%M}) — re-check before choosing it")
+    why = cal.outside_entry_window(profile, now)
+    if why is not None:
+        return f"This intraday verdict was built at {t:%H:%M} and it is now {why} — re-check before choosing it"
     return None
 
 
