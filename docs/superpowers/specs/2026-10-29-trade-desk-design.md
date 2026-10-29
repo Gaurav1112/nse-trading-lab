@@ -31,6 +31,9 @@ Every verdict is one of **TAKE** (all hard checks pass), **WAIT** (a named trigg
 trigger price), or **SKIP** (a hard check blocks — shows which). Nothing is ever placed: TAKE produces a
 Kite-ready order ticket the user types in by hand.
 
+Positions needing action are reviewed in the **My Positions** tab. Today's Plan shows one line pointing
+there: "N positions need action" once that review has loaded, otherwise "Open My Positions to review".
+
 ## 2. Sources and what was taken from each
 
 | Source | Verdict | What we use |
@@ -103,7 +106,12 @@ Today page stays). Claude Code: project skills in `.claude/skills/nse-desk-*` wr
 - Swing: entry = last close (or user's). Stop = max(entry − 2×ATR14, lowest low of last 10 bars × 0.999)
   — the higher of the two, i.e. less risk — then clamped so entry − stop ≥ 1×ATR14 (closer is noise).
   R = entry − stop. T1 = entry + 1.5R, T2 = entry + 3R, max hold 15 bars.
-- Intraday: entry = opening-range high (first 15 min) breakout; stop = OR midpoint; T1 = 1R, T2 = 2R; flat by 15:15 IST.
+- Intraday: entry = opening-range high (first 15 min) breakout; stop = OR midpoint; T1 = entry + 1.5R,
+  T2 = max(T1, entry + 3R); flat by 15:15 IST. (T1 at 1.5R so an auto plan meets the default 1:1.5
+  minimum reward:risk; at 1R every auto intraday plan was blocked.)
+- The plan is built on completed bars only: today's daily bar is used once the session has closed and
+  dropped while it is still forming. Bars with a missing O/H/L/C are dropped, duplicate timestamps keep
+  the last bar, and out-of-order bars are an error. A non-finite last close is an error.
 - User-supplied entry/stop/target override defaults; a stop at or above entry is rejected (ValueError).
 
 ### 3.2 Sizing (`sizing.py`)
@@ -122,6 +130,9 @@ Costs: Zerodha CNC/MIS round-trip estimate included in max-loss.
    max hold, stop wins on a both-touched bar, costs included) on every past bar of the last 3 years
    (swing) / 60 days (intraday ORB days) where the same entry condition held. Swing entry condition:
    close > EMA50 > EMA200 (trend setup). Non-overlapping: after a trade, skip to its exit bar.
+   Intraday uses the live rule: the first bar inside the entry window whose High clears the OR high,
+   filled at max(that bar's Open, OR high); on that bar only the stop counts (Low ≤ stop → stop-out),
+   then later bars are walked.
    Output: n, win %, expectancy R. n < 20 → reported as "too few samples" (WARN).
 3. **Robustness (Jesse-style)**, on the setup-history trades:
    - *Trade shuffle*: 2,000 random reorderings of the historical R sequence → 5th/50th/95th percentile of
@@ -139,6 +150,20 @@ BLOCK: regime HOSTILE for swing longs (US uses the same classifier on ^GSPC); R:
 liquidity below ₹5 Cr 20-day median turnover.
 WARN: regime MIXED; earnings inside the hold window; ban list unverifiable; setup history n < 20;
 3 consecutive stop-outs in the journal (Freqtrade StoplossGuard) → also halves size; gap > 2% today.
+
+Missing data fails closed (final fix wave):
+- **No odds** (Monte Carlo could not run, e.g. too little history) → `monte_carlo` BLOCK "no trade without
+  odds" in both modes; `setup_history` BLOCK intraday (research only), WARN swing.
+- **Regime unknown** (fetch failed, index data older than 3 calendar days, or unclassifiable) → swing
+  `regime` BLOCK "treated as HOSTILE"; intraday WARN. The daily plan still lists such setups on WATCH.
+- **Robustness not run** (not requested, or no noisy replay traded) → `robustness` WARN.
+- **`live_price`** (17th check, after `freshness`): no live quote → WARN "Price is the last close of
+  <date> — confirm the live price before entering"; live price at or below the stop → BLOCK; live quote
+  more than 20 minutes old during the session → WARN; else PASS. The live quote comes from today's
+  1-minute bars and also gives today's gap (day open vs the previous completed close).
+- **PDT** (US intraday, guard on): day-trade count unknowable from the journal → WARN "confirm with your
+  broker".
+- A non-finite or non-positive current price → SKIP "current price unavailable".
 
 ### 3.5 Verdict (`verdict.py`)
 Any BLOCK → SKIP. No BLOCK but a pending trigger (entry above current price) → WAIT with trigger price.
@@ -162,7 +187,8 @@ PASS. A symbol whose data can't be fetched appears in the plan as "data unavaila
 ## 5. Testing
 TDD, offline: synthetic frames from `sample_data` plus hand-built frames for edge cases; Monte Carlo
 deterministic under the seed; NSE fetch mocked. Streamlit AppTest smoke test for `pages/0_Desk.py`.
-Fix the stale `2_Dashboard.py` smoke test. Gate: `python3.13 -m pytest` green.
+The stale `2_Dashboard.py` smoke test was deleted because that page no longer exists.
+Gate: `python3.13 -m pytest` green.
 
 ## 6. Non-goals
 Order placement of any kind; LLM text in verdicts; options; daily-scan universe beyond Nifty 50 / US

@@ -82,6 +82,7 @@ def decide(plan: TradePlan, sizing: Sizing, odds: Odds | None, checks, profile: 
         headline = f"WAIT {sym} — price ran past entry; buy only on a pullback to {m(plan.entry)}"
     else:
         action, ticket = Action.TAKE, lines
-        headline = f"TAKE {sym} — BUY {sizing.qty} @ {m(plan.entry)}, max loss {m(sizing.risk_amount)}"
+        headline = (f"TAKE {sym} — BUY {sizing.qty} @ {m(plan.entry)}, "
+                    f"loss at stop ≈ {m(sizing.risk_amount)} (a gap can lose more)")
     return DeskVerdict(action, headline, plan, sizing, odds, checks, ticket, trigger, current_price,
                        input_hash(plan, sizing, odds, checks, current_price), now.isoformat())

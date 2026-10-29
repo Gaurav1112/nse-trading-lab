@@ -367,3 +367,39 @@ def test_a11_check_cache_key_has_market_date_and_limits(monkeypatch, tmp_path):
     monkeypatch.setattr(loaders, "load_limits_with_status", lambda p: (Limits(capital=55_555), False))
     at.run()
     assert not any("Plan" == m.value.strip("*") for m in at.markdown)
+
+
+# ---------------------------------------------------------------- final fix wave C1/C4
+
+def test_c1_page_noise_label(monkeypatch, tmp_path):
+    _patch_ok(monkeypatch, tmp_path)
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    at.text_input(key="desk_symbol").set_value("ABC")
+    at.button(key="desk_check").click().run()
+    labels = [m.label for m in at.metric]
+    assert "Candle-noise expectancy range" in labels and not any("shuffled" in l for l in labels)
+
+
+def _pos_rows():
+    return [{"symbol": "ABC", "buy_price": 100, "stop_loss": 95, "quantity": 10, "status": "open"},
+            {"symbol": "NODATA", "buy_price": 50, "stop_loss": 45, "quantity": 1, "status": "open"}]
+
+
+def test_c4_plan_tab_counts_positions_needing_action(monkeypatch, tmp_path):
+    loaders = _patch_ok(monkeypatch, tmp_path)
+    from nse_backtest.desk import session
+    monkeypatch.setattr(loaders, "load_positions", _pos_rows)
+    real = loaders.load_daily
+    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: (_ for _ in ()).throw(ValueError("none"))
+                        if s == "NODATA" else real(p, s))
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: _plan_with())
+    from types import SimpleNamespace
+    from nse_backtest import position_monitor  # its scorer would call yfinance for earnings
+    monkeypatch.setattr(position_monitor, "daily_check", lambda p, df: SimpleNamespace(
+        action="HOLD", current_price=float(df["Close"].iloc[-1]), suggested_sl=None, pnl_pct=1.0, reason="ok"))
+    at = AppTest.from_file("pages/0_Desk.py", default_timeout=120).run()
+    first = " ".join(m.value for m in at.markdown) + " ".join(i.value for i in at.info)
+    assert "Open My Positions to review" in first  # positions are loaded after the plan tab on the first run
+    at.run()
+    text = " ".join(m.value for m in at.markdown)
+    assert "1 position needs action" in text  # NODATA (DATA UNAVAILABLE); ABC is HOLD

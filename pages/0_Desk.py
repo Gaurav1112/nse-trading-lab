@@ -132,7 +132,7 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None) -> 
         row3[0].metric("P(5 losses in a row)",
                        "n/a" if o.p_5_loss_streak is None else f"{o.p_5_loss_streak * 100:.1f}%")
         noisy = o.noise_expectancy_min is not None and o.noise_expectancy_max is not None
-        row3[1].metric("Noise range (shuffled data)",
+        row3[1].metric("Candle-noise expectancy range",
                        f"{_r(o.noise_expectancy_min)} to {_r(o.noise_expectancy_max)}" if noisy else "n/a")
         st.caption(f"{o.replays} replays, seed {o.seed}.")
         if o.history_n > 0 and o.history_rs:
@@ -236,7 +236,17 @@ tab_plan, tab_check, tab_pos, tab_intra = st.tabs(["Today's Plan", "Check a Trad
 
 # ---------------------------------------------------------------- Today's Plan
 
+def _positions_line(market: str) -> str:
+    """'N positions need action' from the My Positions review when it is loaded; otherwise a pointer."""
+    state = st.session_state.get(("positions", market))
+    if not state or "error" in state:
+        return "Open My Positions to review" + (" — the last review failed" if state else "")
+    n = sum(1 for a in (state.get("ok") or []) if a.action != "HOLD")
+    return f"{n} position{'' if n == 1 else 's'} need{'s' if n == 1 else ''} action — see My Positions"
+
+
 with tab_plan:
+    st.markdown(f"**{_positions_line(market)}**")
     plan_key = ("plan", market, _today(profile), _limits_key(limits))
     if st.button("Build today's plan", key="desk_build_plan"):
         with st.spinner("Scanning the universe — this can take a few minutes the first time..."):

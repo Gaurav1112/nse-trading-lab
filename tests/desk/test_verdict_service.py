@@ -19,7 +19,8 @@ OK = (Check("regime", Status.PASS, ""),)
 def test_take_ticket_nse_swing():
     v = decide(P, S, None, OK, NSE, 100.0, NOW)
     assert v.action is Action.TAKE and v.ticket == ("BUY 250 ABC CNC LIMIT 100.00", "GTT OCO ABC: stop-loss 98.00 / target 103.00")
-    assert v.headline == "TAKE ABC — BUY 250 @ ₹100.00, max loss ₹640.00" and len(v.input_hash) == 64
+    assert v.headline == "TAKE ABC — BUY 250 @ ₹100.00, loss at stop ≈ ₹640.00 (a gap can lose more)"  # C2
+    assert len(v.input_hash) == 64
 
 
 def test_block_means_skip():

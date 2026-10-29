@@ -215,7 +215,7 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     elif mc < 0.1:
         out.append(_ck("monte_carlo", W, f"Simulated expectancy {mc:+.2f}R is thin (under +0.10R)"))
     else:
-        out.append(_ck("monte_carlo", P, f"Simulated expectancy {mc:+.2f}R is healthy"))
+        out.append(_ck("monte_carlo", P, f"Simulated expectancy {mc:+.2f}R is positive (above +0.10R)"))
 
     # 8 freshness
     tz = ZoneInfo(prof.tz)

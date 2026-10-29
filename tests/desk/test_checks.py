@@ -488,3 +488,9 @@ def test_a10_pdt_unknown_count_warns():
     c = _pdt(day_trades_5d=None)
     assert c.status is Status.WARN and c.reason == "Day-trade count not tracked — confirm with your broker"
     assert _pdt(day_trades_5d=2).status is Status.PASS and _pdt(day_trades_5d=3).status is Status.BLOCK
+
+
+# ---- Final fix wave C3 ----
+def test_c3_monte_carlo_pass_wording():
+    c = _c("monte_carlo")
+    assert c.status is Status.PASS and c.reason == "Simulated expectancy +0.40R is positive (above +0.10R)"

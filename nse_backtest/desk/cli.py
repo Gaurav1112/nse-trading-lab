@@ -75,7 +75,7 @@ def format_verdict(v: DeskVerdict, profile) -> list[str]:
         streak = "n/a" if o.p_5_loss_streak is None else f"{o.p_5_loss_streak * 100:.1f}%"
         lines.append(f"Worst drawdown (p95): {dd}  P(5 losses in a row): {streak}")
         if o.noise_expectancy_min is not None and o.noise_expectancy_max is not None:
-            lines.append(f"Noise range (shuffled data): {_r(o.noise_expectancy_min)} to {_r(o.noise_expectancy_max)}")
+            lines.append(f"Candle-noise expectancy range: {_r(o.noise_expectancy_min)} to {_r(o.noise_expectancy_max)}")
     lines += ["", "Checks:"]
     lines += [f"  {c.status.value} {c.name} — {c.reason}" for c in v.checks]
     if v.ticket:

@@ -50,3 +50,15 @@ def test_cli_check_corrupt_journal_never_passes_daily_loss(tmp_path, capsys):
     assert cli.main(["check", "ABC"]) == 0
     out = capsys.readouterr().out
     assert "PASS daily_loss" not in out and "WARN daily_loss" in out
+
+
+def test_c1_noise_label_in_cli():
+    from dataclasses import replace
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from nse_backtest.desk.verdict import decide
+    from tests.desk.test_checks import ODDS, SIZE, plan
+    v = decide(plan(), SIZE, replace(ODDS, noise_expectancy_min=-0.1, noise_expectancy_max=0.3), (), NSE, 100.0,
+               datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo(NSE.tz)))
+    text = "\n".join(cli.format_verdict(v, NSE))
+    assert "Candle-noise expectancy range: -0.10R to +0.30R" in text and "shuffled" not in text
