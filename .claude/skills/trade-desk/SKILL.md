@@ -7,7 +7,7 @@ description: >-
   "size this trade", "what should I trade today", "review my positions", "any intraday setups",
   "set my capital / max loss", "is the desk working?", "how have the desk's picks done?". Never places
   orders.
-argument-hint: "[check SYMBOL [--qty N] [--choose] | plan | positions | intraday | settings | scoreboard] [--market NSE|US]"
+argument-hint: "[check SYMBOL [--qty N] [--choose] [--side short] | plan | positions | intraday | settings | scoreboard | shortcheck] [--market NSE|US]"
 ---
 
 # trade-desk
@@ -17,6 +17,8 @@ Run from the repo root with `python3.13 -m nse_backtest.desk <command>`:
     check RELIANCE --market NSE                     # default swing plan at last close
     check AAPL --market US --entry 231 --stop 226   # the user's own plan
     check INFY --mode intraday                      # opening-range breakout (stop-limit entry)
+    check INFY --mode intraday --side short         # ORB breakdown short (NSE F&O, HOSTILE days, MIS)
+    shortcheck                                      # pooled ORB-short history: may shorts be a TAKE today?
     check RELIANCE --qty 20                         # money for the user's own quantity
     check RELIANCE --choose                         # user takes a WAIT/SKIP anyway; logged as an override
     check RELIANCE --desk-entry                     # swing at the plan's own entry (breakout above the 20-day high)
@@ -27,6 +29,10 @@ Run from the repo root with `python3.13 -m nse_backtest.desk <command>`:
     settings --market NSE --capital 750000 --risk-pct 1
     scoreboard                                      # paper record of logged TAKEs, all markets
     scoreboard --market US --json
+
+A short is at most WAIT unless `shortcheck` (cached for the day in the data dir) shows at least 200 pooled ORB-short
+trades on HOSTILE days with a positive expectancy at 2× slippage; without today's figure the short_edge check reads
+"edge check unavailable". Run `shortcheck` before calling a short a TAKE.
 
 Use `scoreboard` when the user asks whether the desk is working or whether its odds hold up. It is
 read-only: it replays the TAKEs in `desk_audit.jsonl` against later prices (conservative fills) and
