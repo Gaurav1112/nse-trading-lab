@@ -258,8 +258,12 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         as_of = ctx.quote_as_of.astimezone(tz)
         age_min = (now - as_of).total_seconds() / 60
         in_session = now.weekday() < 5 and prof.session_open <= now.time() <= prof.session_close
-        if in_session and age_min > _QUOTE_MAX_AGE_MIN:
+        if as_of.date() != now.date():
+            out.append(_ck("live_price", W, f"Last trade was {as_of:%Y-%m-%d %H:%M} — market not open today yet; confirm the live price before entering"))
+        elif in_session and age_min > _QUOTE_MAX_AGE_MIN:
             out.append(_ck("live_price", W, f"Live price is {age_min:.0f} min old"))
+        elif not in_session:
+            out.append(_ck("live_price", P, f"Last trade today at {as_of:%H:%M} (market closed)"))
         else:
             out.append(_ck("live_price", P, f"Live price {prof.money(cp)} as of {as_of:%H:%M}"))
 

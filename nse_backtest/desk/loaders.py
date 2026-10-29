@@ -62,6 +62,11 @@ def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: date
     today = now.date()
     start = (today - timedelta(days=int(365.25 * years))).isoformat()
     df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange)
+    if (now.weekday() < 5 and pd.Timestamp(df.index[-1]).date() == today
+            and timedelta() <= datetime.combine(today, now.time()) - datetime.combine(today, profile.session_close) < timedelta(hours=3)):
+        # just after the close a cached frame may hold a mid-session partial bar: re-fetch once, uncached
+        df = fetch_nse(symbol, start, end=(today + timedelta(days=1)).isoformat(), exchange=profile.exchange,
+                       use_cache=False)
     df = _clean_bars(df, f"daily bars for {symbol}")
     if pd.Timestamp(df.index[-1]).date() == today and now.time() < profile.session_close:
         df = df.iloc[:-1]  # partial bar: plans are built on completed bars

@@ -494,3 +494,37 @@ def test_a10_pdt_unknown_count_warns():
 def test_c3_monte_carlo_pass_wording():
     c = _c("monte_carlo")
     assert c.status is Status.PASS and c.reason == "Simulated expectancy +0.40R is positive (above +0.10R)"
+
+
+# ---- Last round: a previous-session quote never counts as today's ----
+def _lpq(price, quote_as_of, now, profile=NSE):
+    cs = run_checks(plan(), SIZE, ODDS, ctx(profile=profile, price_is_live=True, quote_as_of=quote_as_of, now=now), current_price=price)
+    return [c for c in cs if c.name == "live_price"][0]
+
+
+def test_lr_preopen_quote_from_yesterday_warns():
+    now = datetime(2026, 10, 29, 8, 45, tzinfo=IST)
+    c = _lpq(100.0, datetime(2026, 10, 28, 15, 29, tzinfo=IST), now)
+    assert c.status is Status.WARN
+    assert "Last trade was 2026-10-28 15:29" in c.reason and "market not open today yet" in c.reason
+
+
+def test_lr_in_session_quote_from_yesterday_warns_and_same_day_passes():
+    assert _lpq(100.0, datetime(2026, 10, 28, 15, 29, tzinfo=IST), NOW).status is Status.WARN
+    assert _lpq(100.0, NOW, NOW).status is Status.PASS
+
+
+def test_lr_after_close_same_day_quote_passes_with_closed_reason():
+    now = datetime(2026, 10, 29, 19, 0, tzinfo=IST)
+    c = _lpq(100.0, datetime(2026, 10, 29, 15, 29, tzinfo=IST), now)
+    assert c.status is Status.PASS and c.reason == "Last trade today at 15:29 (market closed)"
+
+
+def test_lr_us_variants_use_et_dates():
+    ET = ZoneInfo("America/New_York")
+    pre = datetime(2026, 10, 29, 8, 0, tzinfo=ET)
+    prev = datetime(2026, 10, 28, 15, 59, tzinfo=ET)
+    assert _lpq(100.0, prev, pre, US).status is Status.WARN
+    cs = run_checks(plan(market="US"), SIZE, ODDS, ctx(profile=US, price_is_live=True, quote_as_of=datetime(2026, 10, 29, 11, 0, tzinfo=ET),
+                    now=datetime(2026, 10, 29, 11, 5, tzinfo=ET)), current_price=100.0)
+    assert [c for c in cs if c.name == "live_price"][0].status is Status.PASS

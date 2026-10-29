@@ -123,7 +123,7 @@ def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, s
     ctx = context_for(profile, limits, daily, regime)
     nxt, checked = loaders.next_earnings(profile, sym)
     quote = quote_for(profile, sym, on_warning)
-    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote))
+    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now))
     return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target, quote=quote)
 
 
@@ -165,7 +165,7 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
         try:  # daily bars give the liquidity (turnover) and gap checks something to read
             daily = loaders.load_daily(profile, s)
             per_symbol[s] = replace(ctx, turnover_20d=turnover_20d(daily),
-                                    today_gap_pct=today_gap_pct(daily, quotes[s]))
+                                    today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)

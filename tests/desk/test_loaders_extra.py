@@ -538,3 +538,39 @@ def test_b1_vendored_skills_do_not_point_at_a_broker():
         assert "/trader-broker" not in text
         assert "This repo never places orders; there is no broker skill." in text
     assert "N8" in (root / "VENDORED.md").read_text()
+
+
+# ---- Last round: partial bar via cache ----
+def _recording_fetch(monkeypatch, frame):
+    import nse_backtest.data as data
+    calls = []
+    def fake(sym, start, end=None, exchange="NS", use_cache=True, **k):
+        calls.append(use_cache)
+        return frame.copy()
+    monkeypatch.setattr(data, "fetch_nse", fake)
+    return calls
+
+
+def test_lr_load_daily_after_close_refetches_without_cache(monkeypatch):
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-10-29"))
+    tz = loaders.ZoneInfo(NSE.tz)
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz))
+    assert calls == [True, False]
+
+
+def test_lr_load_daily_no_refetch_in_session_late_or_weekend(monkeypatch):
+    tz = loaders.ZoneInfo(NSE.tz)
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-10-29"))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 20, 0, tzinfo=tz))  # >3h after close
+    assert calls == [True, True]
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-10-28"))  # last bar not today
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz))
+    assert calls == [True]
+
+
+def test_lr_load_daily_us_after_close_uses_market_tz(monkeypatch):
+    et = loaders.ZoneInfo(US.tz)
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-10-29"))
+    loaders.load_daily(US, "AAPL", now=datetime(2026, 10, 29, 16, 30, tzinfo=et))
+    assert calls == [True, False]

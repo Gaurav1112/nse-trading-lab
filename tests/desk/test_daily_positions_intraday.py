@@ -172,3 +172,23 @@ def test_d3_initial_stop_none_never_masks_exit(monkeypatch):
     out = review_positions([{"symbol": "AAA", "buy_price": 100, "stop_loss": 95, "initial_stop": None}],
                            {"AAA": series()}, NSE)
     assert out[0].action == "EXIT" and out[0].r_so_far == pytest.approx((90 - 100) / 5)
+
+
+# ---- Last round: gap needs a quote from market-today ----
+def test_lr_today_gap_pct_requires_quote_dated_market_today():
+    import numpy as np, pandas as pd
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from nse_backtest.desk.daily import today_gap_pct
+    from nse_backtest.desk.models import LiveQuote
+    IST, ET = ZoneInfo("Asia/Kolkata"), ZoneInfo("America/New_York")
+    df = pd.DataFrame({"Close": [100.0, 101.0]}, index=pd.to_datetime(["2026-10-27", "2026-10-28"]))
+    old = LiveQuote(price=101.0, day_open=103.02, as_of=datetime(2026, 10, 28, 15, 29, tzinfo=IST))
+    assert today_gap_pct(df, old, datetime(2026, 10, 29, 8, 45, tzinfo=IST)) is None
+    assert today_gap_pct(df, old, datetime(2026, 10, 29, 10, 0, tzinfo=IST)) is None
+    fresh = LiveQuote(price=102.0, day_open=102.02, as_of=datetime(2026, 10, 29, 9, 20, tzinfo=IST))
+    g = today_gap_pct(df, fresh, datetime(2026, 10, 29, 10, 0, tzinfo=IST))
+    assert g == pytest.approx(1.01, abs=0.001)
+    # US: quote at 15:59 ET 10-28 is stale at 8:45 IST 10-29 evaluated in ET-aware now
+    usq = LiveQuote(price=101.0, day_open=101.0, as_of=datetime(2026, 10, 28, 15, 59, tzinfo=ET))
+    assert today_gap_pct(df, usq, datetime(2026, 10, 29, 8, 0, tzinfo=ET)) is None
