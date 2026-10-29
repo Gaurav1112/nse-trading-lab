@@ -36,6 +36,19 @@ class DailyPlan:
     # turns, never a trade. Empty with a reason in holding_up_note when the index can't anchor it.
     holding_up: tuple[tuple[str, float], ...] = ()
     holding_up_note: str | None = None
+    # LAST field: the skips whose exception is not a ValueError (the desk's "unusable data" signal) — a code bug,
+    # never a quiet day. Also in ``skipped``; shown in red by the page and the CLI (plan_errors_line).
+    errors: tuple[tuple[str, str], ...] = ()
+
+
+def plan_errors_line(plan) -> str | None:
+    """The red line for a plan whose checks hit unexpected errors (DailyPlan.errors), else None."""
+    errs = tuple(getattr(plan, "errors", ()) or ())
+    if not errs:
+        return None
+    sym, why = errs[0]
+    return f"The plan hit errors for {len(errs)} symbol(s): {sym}: {why}"
+
 
 def turnover_20d(df) -> float | None:
     """Median Close*Volume over the last 20 bars; None when it cannot be computed. Never raises."""
@@ -164,6 +177,7 @@ class _Pass1:
     watch: list[DeskVerdict]
     others: list[DeskVerdict]
     skipped: list[tuple[str, str]]
+    errors: list[tuple[str, str]]
     unavailable: list[str]
     entries: dict[str, float | None]
     sym_ctx: dict[str, CheckContext]
@@ -174,7 +188,7 @@ def _first_pass(profile, frames: dict[str, pd.DataFrame], ctx: CheckContext, lim
     """Every symbol on its last close (no quote, no robustness, never audited). Near a setup -> TAKE/WATCH
     candidates; far symbols are priced at the plan's breakout trigger and kept in `others`; any exception is
     that symbol's `skipped` reason."""
-    out = _Pass1([], [], [], [], [], {}, {})
+    out = _Pass1([], [], [], [], [], [], {}, {})
     for sym, df in frames.items():
         if df is None or len(df) < 220:
             out.unavailable.append(sym)
@@ -187,6 +201,8 @@ def _first_pass(profile, frames: dict[str, pd.DataFrame], ctx: CheckContext, lim
                             robustness=False, replays=replays, audit=False)
         except Exception as err:  # noqa: BLE001 - one symbol never stops the plan
             out.skipped.append((sym, _err(err)))
+            if not isinstance(err, ValueError):
+                out.errors.append((sym, _err(err)))
             continue
         v = replace(v, first_pass=True, ticket=())  # quick: no ticket until a full check (not hashed)
         if kind == "far":
@@ -204,13 +220,15 @@ def _first_pass(profile, frames: dict[str, pd.DataFrame], ctx: CheckContext, lim
 
 def _second_pass(profile, frames, p1: _Pass1, candidates: list[DeskVerdict], limits: Limits, replays: int,
                  audit_path: Path | None, earnings_lookup, quote_lookup
-                 ) -> tuple[list[DeskVerdict], list[DeskVerdict], list[DeskVerdict], list[tuple[str, str]]]:
-    """(takes, watch, others, skipped): the candidates re-checked with the live quote, earnings date and
+                 ) -> tuple[list[DeskVerdict], list[DeskVerdict], list[DeskVerdict], list[tuple[str, str]],
+                            list[tuple[str, str]]]:
+    """(takes, watch, others, skipped, errors): the candidates re-checked with the live quote, earnings date and
     robustness, audited. One network call of each kind per candidate."""
     takes: list[DeskVerdict] = []
     watch: list[DeskVerdict] = []
     others: list[DeskVerdict] = []
     skipped: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
     for v in candidates:
         sym = v.plan.symbol
         c2 = p1.sym_ctx[sym]
@@ -232,6 +250,8 @@ def _second_pass(profile, frames, p1: _Pass1, candidates: list[DeskVerdict], lim
                              robustness=True, replays=replays, audit=True, audit_path=audit_path, quote=quote)
         except Exception as err:  # noqa: BLE001 - one symbol never stops the plan
             skipped.append((sym, _err(err)))
+            if not isinstance(err, ValueError):
+                errors.append((sym, _err(err)))
             continue
         if v2.action is Action.TAKE:
             takes.append(v2)
@@ -239,7 +259,7 @@ def _second_pass(profile, frames, p1: _Pass1, candidates: list[DeskVerdict], lim
             watch.append(v2)
         else:
             others.append(v2)
-    return takes, watch, others, skipped
+    return takes, watch, others, skipped, errors
 
 
 def _sat_out_sessions(path: Path) -> set[tuple[str, str, date]] | None:
@@ -320,7 +340,7 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
     p1 = _first_pass(profile, frames, ctx, limits, replays)
     takes, takes_rest = _overflow(p1.takes, top_take, _neg_exp)
     watch, watch_rest = _overflow(p1.watch, top_watch, _closeness)
-    t2, w2, o2, s2 = _second_pass(profile, frames, p1, takes + watch, limits, replays, audit_path,
+    t2, w2, o2, s2, e2 = _second_pass(profile, frames, p1, takes + watch, limits, replays, audit_path,
                                   earnings_lookup, quote_lookup)
     final_take, take_over = _overflow(t2, top_take, _neg_exp)
     final_watch, watch_over = _overflow(w2, top_watch, _closeness)
@@ -330,4 +350,4 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
     held, held_note = _holding_up(frames, regime_df)
     return DailyPlan(profile.code, regime, regime_text, flip_conditions(regime_df, profile),
                      tuple(final_take), tuple(final_watch), tuple(p1.skipped + s2),
-                     tuple(p1.unavailable), tuple(others), held, held_note)
+                     tuple(p1.unavailable), tuple(others), held, held_note, errors=tuple(p1.errors + e2))

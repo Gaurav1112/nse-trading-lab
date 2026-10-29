@@ -98,3 +98,68 @@ def test_i2_entry_basis_leaves_long_hashes_alone():
     from nse_backtest.desk.models import TradePlan
     assert [f.name for f in dataclasses.fields(TradePlan)][-1] == "side"
     assert "or_low" in {f.name for f in dataclasses.fields(CheckContext)}
+
+
+# ---------------------------------------------------------------- I3: a code bug never looks like a quiet day
+
+def _bug_plan(monkeypatch, exc=TypeError("unsupported operand type(s) for -: 'NoneType' and 'float'")):
+    import tests.desk.test_daily as td
+    from nse_backtest.desk import daily
+
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(daily, "check_trade", boom)
+    return td._plan()
+
+
+def test_i3_non_value_errors_are_recorded_as_plan_errors(monkeypatch):
+    dp = _bug_plan(monkeypatch)
+    assert not dp.take and not dp.watch
+    assert dp.errors and len(dp.errors) == len(dp.skipped)
+    assert all(why.startswith("TypeError") for _, why in dp.errors)
+    import dataclasses
+    from nse_backtest.desk.daily import DailyPlan, plan_errors_line
+    assert [f.name for f in dataclasses.fields(DailyPlan)][-1] == "errors"
+    sym = dp.errors[0][0]
+    assert plan_errors_line(dp) == (f"The plan hit errors for {len(dp.errors)} symbol(s): {sym}: "
+                                    "TypeError: unsupported operand type(s) for -: 'NoneType' and 'float'")
+
+
+def test_i3_value_errors_are_unusable_data_not_errors(monkeypatch):
+    from nse_backtest.desk.daily import plan_errors_line
+    dp = _bug_plan(monkeypatch, ValueError("need at least 20 bars"))
+    assert dp.skipped and dp.errors == () and plan_errors_line(dp) is None
+
+
+def test_i3_cli_prints_the_errors_line_even_when_some_symbols_worked(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    from argparse import Namespace
+    from nse_backtest.desk import cli, session
+    import tests.desk.test_daily as td
+    from nse_backtest.desk.markets import NSE
+    good = td._plan()
+    plan = dataclasses_replace(good, errors=(("ZZZ", "KeyError: 'Close'"),),
+                               skipped=good.skipped + (("ZZZ", "KeyError: 'Close'"),))
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: plan)
+    rc = cli.cmd_plan(Namespace(json=False, all=False), NSE)
+    out = capsys.readouterr()
+    assert rc == 0  # some symbols worked: not PLAN FAILED
+    assert "The plan hit errors for 1 symbol(s): ZZZ: KeyError: 'Close'" in out.out
+    assert "The plan hit errors for 1 symbol(s)" in out.err
+
+
+def test_i3_cli_every_symbol_failing_is_still_plan_failed(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    from argparse import Namespace
+    from nse_backtest.desk import cli, session
+    from nse_backtest.desk.markets import NSE
+    dp = _bug_plan(monkeypatch)
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: dp)
+    assert cli.cmd_plan(Namespace(json=False, all=False), NSE) == 1
+    out = capsys.readouterr().out
+    assert "PLAN FAILED for every symbol" in out and "The plan hit errors for" in out
+
+
+def dataclasses_replace(x, **kw):
+    from dataclasses import replace
+    return replace(x, **kw)

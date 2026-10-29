@@ -107,3 +107,29 @@ def test_i1_full_check_uses_the_same_args(monkeypatch):
     calls = _capture(monkeypatch)
     desk_card._full_check(v, NSE, lim, "choose", "w")
     assert calls == [desk_card._check_args(v)] == [{"entry": v.plan.entry}]
+
+
+# ---------------------------------------------------------------- I3: plan errors are red on the page
+
+def _patch_page(monkeypatch, tmp_path):
+    from tests.test_desk_page_smoke import _patch_ok
+    return _patch_ok(monkeypatch, tmp_path)
+
+
+def _error_plan():
+    from nse_backtest.desk.daily import DailyPlan
+    bad = (("ABC", "TypeError: boom"), ("XYZ", "TypeError: boom"))
+    return DailyPlan("NSE", None, "", (), (), (), bad, (), errors=bad)
+
+
+def test_i3_page_plan_and_choose_tabs_show_plan_errors(monkeypatch, tmp_path):
+    from streamlit.testing.v1 import AppTest
+    from tests.test_desk_page_smoke import _REPO, _plain
+    _patch_page(monkeypatch, tmp_path)
+    monkeypatch.setattr(session, "run_daily_plan", lambda *a, **k: _error_plan())
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    at.button(key="desk_build_plan").click().run()
+    assert not at.exception
+    errs = [_plain(e.value) for e in at.error]
+    want = "The plan hit errors for 2 symbol(s): ABC: TypeError: boom"
+    assert sum(want in e for e in errs) == 2  # Today's Plan and Choose a Trade

@@ -22,7 +22,7 @@ from nse_backtest.desk.charts import projected_vs_real_chart
 from nse_backtest.desk.projections import projected_vs_real, resolved_without_r
 from nse_backtest.desk.scoreboard import RECORD_LABELS
 from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
-from nse_backtest.desk.daily import flip_conditions
+from nse_backtest.desk.daily import flip_conditions, plan_errors_line
 from nse_backtest.desk.markets import get_profile, universe
 from nse_backtest.desk.models import Action, DeskVerdict, Mode, Side
 from nse_backtest.desk.shortcheck import edge_line
@@ -270,6 +270,13 @@ def _positions_line(market: str) -> str:
     return f"{n} position{'' if n == 1 else 's'} need{'s' if n == 1 else ''} action — see My Positions"
 
 
+def _plan_errors(plan_now) -> None:
+    """A code bug on some symbols is red, never an empty list that looks like a quiet day."""
+    line = plan_errors_line(plan_now)
+    if line:
+        st.error(shown(line))
+
+
 with tab_plan:
     st.markdown(f"**{_positions_line(market)}**")
     plan_key = PLAN_KEY
@@ -288,6 +295,7 @@ with tab_plan:
         st.info("Press the button to build today's plan. No trade is a valid answer.")
     else:
         st.caption(f"Built at {pstate['at']} (market time)")
+        _plan_errors(plan)
         st.subheader(f"TAKE ({len(plan.take)})")
         if not plan.take:
             st.info("Nothing qualifies today — no trade is a valid answer.")
@@ -786,6 +794,8 @@ with tab_choose:
         missing = [n for n, ok in (("today's plan", have_plan), ("the intraday scan", have_scan)) if not ok]
         if missing:
             st.caption(f"Not loaded yet: {' and '.join(missing)} — press Load candidates to add it.")
+        if have_plan:
+            _plan_errors(pstate["ok"])
         try:
             plan_now = pstate["ok"] if have_plan else None
             verdicts = session.merge_candidates(plan_now, istate["ok"][0] if have_scan else ())

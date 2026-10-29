@@ -14,11 +14,12 @@ from zoneinfo import ZoneInfo
 
 from . import audit, loaders, session, strength
 from . import calendars as cal
+from .checks import short_edge_check
+from .daily import plan_errors_line
 from .markets import get_profile, universe
 from .models import Action, DeskVerdict, Mode, Side, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
-from .checks import short_edge_check
 from .shortcheck import edge_line, skipped_line
 from .tradecard import DAILY_LOSS_NOTE, build_card
 from .verdict import data_broken, is_quick, safety_blocked
@@ -237,12 +238,16 @@ def cmd_plan(a, profile) -> int:
     syms = universe(profile)[:PLAN_UNIVERSE_LIMIT]
     plan = session.run_daily_plan(profile, limits, syms, _stderr_warn)
     failed = _plan_failed(plan)
+    errline = plan_errors_line(plan)  # a code bug on some symbols is red even when others got verdicts
     if a.json:
-        if failed:
-            print(failed, file=sys.stderr)
+        for msg in (failed, errline):
+            if msg:
+                print(msg, file=sys.stderr)
         print(json.dumps(_plan_json(plan), indent=2))
         return 1 if failed else 0
-    lines = warn + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
+    if errline:
+        print(errline, file=sys.stderr)
+    lines = warn + ([errline, ""] if errline else []) + [f"Daily plan {profile.code} — regime {plan.regime or 'UNKNOWN'}: {plan.regime_text}"]
     if plan.flip_conditions:
         lines += ["Regime flips if:"] + [f"  - {c}" for c in plan.flip_conditions]
     lines += ["", "TAKE:"] + ([_format_row(v) for v in plan.take] or ["  none today — no trade is a valid answer"])
