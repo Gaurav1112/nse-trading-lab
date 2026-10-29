@@ -10,13 +10,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - name: Check pipeline secrets
+        id: gate
+        env:
+          SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
+          DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
+        run: |
+          # Nothing to watch until the signals repo is configured: skip cleanly instead of failing every 15 minutes.
+          if [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::heartbeat skipped: set the SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY secrets to enable it"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Setup Python
+        if: steps.gate.outputs.configured == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install pywebpush
+        if: steps.gate.outputs.configured == 'true'
         run: pip install pywebpush py-vapid requests
       - name: Setup SSH for signals repo
+        if: steps.gate.outputs.configured == 'true'
         env:
           DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
         run: |
@@ -25,12 +41,14 @@ jobs:
           chmod 600 ~/.ssh/signals_key
           printf "Host github-signals\n  HostName github.com\n  IdentityFile ~/.ssh/signals_key\n  StrictHostKeyChecking no\n" >> ~/.ssh/config
       - name: Clone signals repo
+        if: steps.gate.outputs.configured == 'true'
         env:
           SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
         run: |
           SSH_URL="${SIGNALS_REPO_URL/git@github.com/git@github-signals}"
           git clone "$SSH_URL" /tmp/signals
       - name: Check + alert
+        if: steps.gate.outputs.configured == 'true'
         env:
           VAPID_PRIVATE_KEY_PEM: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_CONTACT: ${{ secrets.VAPID_CONTACT }}

@@ -14,19 +14,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
+      - name: Check pipeline secrets
+        id: gate
+        env:
+          SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
+          DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
+        run: |
+          # Without the signals repo there is nothing to run: skip cleanly instead of failing every 5 minutes.
+          if [ -z "$SIGNALS_REPO_URL" ] || [ -z "$DEPLOY_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::signal-pipeline skipped: set the SIGNALS_REPO_URL and SIGNALS_DEPLOY_KEY secrets to enable it"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout code repo
+        if: steps.gate.outputs.configured == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: steps.gate.outputs.configured == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
 
       - name: Install dependencies
+        if: steps.gate.outputs.configured == 'true'
         run: pip install -r requirements.txt
 
       - name: Setup SSH for signals repo
+        if: steps.gate.outputs.configured == 'true'
         env:
           DEPLOY_KEY: ${{ secrets.SIGNALS_DEPLOY_KEY }}
         run: |
@@ -39,6 +57,7 @@ jobs:
           echo "  StrictHostKeyChecking no" >> ~/.ssh/config
 
       - name: Clone signals repo
+        if: steps.gate.outputs.configured == 'true'
         env:
           SIGNALS_REPO_URL: ${{ secrets.SIGNALS_REPO_URL }}
         run: |
@@ -47,6 +66,7 @@ jobs:
           git clone "$SIGNALS_SSH" /tmp/signals
 
       - name: Run pipeline
+        if: steps.gate.outputs.configured == 'true'
         env:
           FYERS_APP_ID: ${{ secrets.FYERS_APP_ID }}
           FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
