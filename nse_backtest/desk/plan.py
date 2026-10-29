@@ -1,6 +1,7 @@
 """Trade plan geometry: ATR, swing stop, opening-range plan."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -18,6 +19,12 @@ def _validate(df: pd.DataFrame) -> None:
         raise ValueError(f"missing columns: {', '.join(missing)}")
     if len(df) == 0:
         raise ValueError("empty frame")
+
+
+def _require_finite(**values: float) -> None:
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite price data: {name}={value}")
 
 
 def _true_range(df: pd.DataFrame) -> pd.Series:
@@ -79,10 +86,11 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
         r_mult2, r1 = 2.0, 1.0
         flat_dt = datetime.combine(last_ts.date(), profile.flat_by)
         hold = max(1, int((flat_dt - last_ts.to_pydatetime().replace(tzinfo=None)) / _BAR))
-    if s >= e:
-        raise ValueError("stop must be below entry")
     r = e - s
     t1 = target if target is not None else e + r1 * r
+    _require_finite(entry=e, stop=s, target_1=t1, atr=a)
+    if s >= e:
+        raise ValueError("stop must be below entry")
     if t1 <= e:
         raise ValueError("target must be above entry")
     t2 = max(t1, e + r_mult2 * r)

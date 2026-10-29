@@ -67,6 +67,59 @@ def test_atr_series_matches_atr_and_has_early_values():
     assert s.iloc[-1] == pytest.approx(atr(df)) and not s.isna().any()
 
 
+def test_atr_series_early_values_use_available_bars():
+    df = pd.DataFrame({"Open": [9.0, 11.0, 12.0], "High": [10.0, 12.0, 13.0],
+                       "Low": [8.0, 9.0, 11.0], "Close": [9.0, 11.0, 12.0], "Volume": 1e6},
+                      index=pd.bdate_range("2026-01-01", periods=3))
+    s = atr_series(df)
+    # TR0 = H-L = 2 (no prev close); TR1 = max(3, |12-9|, |9-9|) = 3
+    assert s.iloc[0] == pytest.approx(df.High.iloc[0] - df.Low.iloc[0]) == pytest.approx(2.0)
+    assert s.iloc[1] == pytest.approx((2.0 + 3.0) / 2)
+
+
+def test_swing_nan_close_raises():
+    df = flat()
+    df.iloc[-1, df.columns.get_loc("Close")] = np.nan
+    with pytest.raises(ValueError, match="non-finite price data: entry"):
+        build_plan(df, "X", Mode.SWING, NSE)
+
+
+def test_swing_nan_lows_make_stop_nan_raises():
+    df = flat()
+    df.iloc[-10:, df.columns.get_loc("Low")] = np.nan  # min() of the last 10 lows is NaN
+    with pytest.raises(ValueError, match="non-finite price data: stop"):
+        build_plan(df, "X", Mode.SWING, NSE, entry=100)
+
+
+def test_intraday_nan_opening_range_high_raises():
+    idx = pd.date_range("2026-10-28 09:15", periods=6, freq="15min")
+    df = pd.DataFrame({"Open": 100.0, "High": [102, 103, 103, 104, 104, 104], "Low": 99.0,
+                       "Close": 101.0, "Volume": 1e5}, index=idx)
+    df.iloc[0, df.columns.get_loc("High")] = np.nan
+    with pytest.raises(ValueError, match="non-finite price data"):
+        build_plan(df, "X", Mode.INTRADAY, NSE)
+
+
+def test_intraday_ignores_previous_session_bars():
+    prev = pd.date_range("2026-10-27 09:15", periods=4, freq="15min")
+    today = pd.date_range("2026-10-28 09:15", periods=4, freq="15min")
+    idx = prev.append(today)
+    high = [500.0] * 4 + [102.0, 103.0, 103.0, 104.0]
+    low = [1.0] * 4 + [99.0, 100.0, 101.0, 101.0]
+    df = pd.DataFrame({"Open": 100.0, "High": high, "Low": low, "Close": 101.0, "Volume": 1e5}, index=idx)
+    p = build_plan(df, "X", Mode.INTRADAY, NSE)
+    # opening range comes from 2026-10-28 09:15 only, not the 500/1 previous-day bars
+    assert p.entry == 102 and p.stop == pytest.approx((102 + 99) / 2)
+
+
+@pytest.mark.parametrize("last", ["2026-10-28 15:15", "2026-10-28 15:30"])
+def test_intraday_hold_is_at_least_one_bar_at_or_after_flat_by(last):
+    idx = pd.date_range(end=last, periods=3, freq="15min")
+    df = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0, "Volume": 1e5}, index=idx)
+    p = build_plan(df, "X", Mode.INTRADAY, NSE)
+    assert p.max_hold_bars == 1
+
+
 def test_validation_errors():
     with pytest.raises(ValueError, match="Low"):
         atr(flat().drop(columns=["Low"]))
