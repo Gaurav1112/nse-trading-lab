@@ -5,8 +5,10 @@ never an empty-looking chart. Money axes take their prefix from ``profile.curren
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from .markets import MarketProfile
 
@@ -31,6 +33,13 @@ def _band_axis(bars: pd.DataFrame, band) -> pd.DatetimeIndex:
     if pd.isna(step) or step >= _ONE_DAY:
         return pd.bdate_range(start, periods=band.steps + 1)[1:]
     return pd.DatetimeIndex([start + step * (i + 1) for i in range(band.steps)])
+
+
+def _money_axis(values, profile: MarketProfile) -> dict:
+    """Axis settings whose tick labels put the sign before the currency ("-$500", not "$-500")."""
+    vals = [float(v) for v in values]
+    ticks = [float(t) for t in np.linspace(min(vals), max(vals), 6)]
+    return {"tickmode": "array", "tickvals": ticks, "ticktext": [profile.money(t) for t in ticks]}
 
 
 def _hline(fig: go.Figure, y: float, label: str, color: str, dash: str = "solid") -> None:
@@ -67,16 +76,26 @@ def price_chart(bars: pd.DataFrame, card, band, profile: MarketProfile) -> go.Fi
 
 
 def outcome_chart(om, card, profile: MarketProfile) -> go.Figure:
-    """Histogram of money outcomes per replay with vertical lines at p5, median and p95."""
+    """Histogram of money outcomes per replay. Dashed lines mark p5, median and p95; solid lines mark the plan:
+    the stop (``-card.max_loss``), T1 and, when different, T2.
+
+    Raises ValueError for ``card.qty == 0``: there are no money figures then (``outcome_money`` returns None),
+    so the caller is expected not to ask for this chart."""
     if card.qty == 0:
         raise ValueError("no outcome chart for a zero-quantity card")
     fig = go.Figure(go.Histogram(x=list(om.pnl), name="Outcomes"))
-    for x, label in ((om.p5, "p5"), (om.median, "Median"), (om.p95, "p95")):
-        fig.add_shape(type="line", xref="x", x0=x, x1=x, yref="paper", y0=0, y1=1, line={"dash": "dash", "width": 1.5})
+    marks = [(om.p5, "p5", "dash", "#7f7f7f"), (om.median, "Median", "dash", "#7f7f7f"),
+             (om.p95, "p95", "dash", "#7f7f7f"), (-card.max_loss, "stop: max loss", "solid", "#d62728"),
+             (card.profit_t1, "T1", "solid", "#2ca02c")]
+    if card.profit_t2 is not None and card.profit_t2 != card.profit_t1:
+        marks.append((card.profit_t2, "T2", "dot", "#2ca02c"))
+    for n, (x, label, dash, color) in enumerate(marks):
+        fig.add_shape(type="line", xref="x", x0=x, x1=x, yref="paper", y0=0, y1=1,
+                      line={"dash": dash, "width": 1.5, "color": color})
         fig.add_annotation(text=f"{label} {profile.money(x)}", xref="x", x=x, yref="paper", y=1, showarrow=False,
-                           yanchor="bottom")
-    fig.update_layout(title=f"Money outcome per trade ({NOT_A_FORECAST})", xaxis={"tickprefix": profile.currency},
-                      margin={"t": 90})
+                           yanchor="bottom", yshift=14 * (n % 2), font={"color": color, "size": 11})
+    fig.update_layout(title=f"Money outcome per trade ({NOT_A_FORECAST})",
+                      xaxis=_money_axis([*om.pnl, *(m[0] for m in marks)], profile), margin={"t": 100})
     return fig
 
 
@@ -89,23 +108,37 @@ def account_chart(ap, profile: MarketProfile) -> go.Figure:
     _note(fig, f"{ap.p_dd_10:.0%} of paths fall 10% or more from the start; "
                f"{ap.p_finish_down:.0%} finish below it ({ap.source})", y=1.0)
     fig.update_layout(title=f"Account after {ap.n_trades} trades ({NOT_A_FORECAST})",
-                      xaxis={"title": "Trades"}, yaxis={"tickprefix": profile.currency}, margin={"t": 110})
+                      xaxis={"title": "Trades"}, yaxis=_money_axis([*ap.p5, *ap.p50, *ap.p95], profile), margin={"t": 110})
     return fig
 
 
-def projected_vs_real_chart(cum_proj, cum_real, pairs) -> go.Figure:
-    """Cumulative projected R against cumulative realised R, in trade order."""
-    fig = go.Figure()
+def projected_vs_real_chart(cum_proj, cum_real, pairs, n_unpredicted) -> go.Figure:
+    """Left: cumulative projected vs realised R over the SAME trades (those with a projection, in order).
+    Right: projected R (x) against realised R (y) per trade, with a y = x reference. Arguments are the four values
+    of ``projections.projected_vs_real``; trades without a projection are summarised in the title only."""
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Cumulative R", "Per trade"))
     if len(cum_real) == 0:
         _note(fig, "no resolved trades yet")
-    else:
-        fig.add_trace(go.Scatter(x=list(range(1, len(cum_real) + 1)), y=list(cum_real), mode="lines+markers",
-                                 name="Realised R"))
-        if len(cum_proj) == 0:
-            _note(fig, "no projections were recorded for these trades")
-        else:
-            fig.add_trace(go.Scatter(x=list(range(1, len(cum_proj) + 1)), y=list(cum_proj), mode="lines+markers",
-                                     name="Projected R"))
-    fig.update_layout(title=f"Cumulative R: projected vs what happened ({len(pairs)} predicted trades)",
-                      xaxis={"title": "Resolved trades"}, yaxis={"title": "Cumulative R"})
+        fig.update_layout(title="Projected vs what happened")
+        return fig
+    if len(pairs) == 0:
+        _note(fig, "no projections were recorded for these trades")
+        fig.update_layout(title=f"Projected vs what happened ({n_unpredicted} trades without a projection)")
+        return fig
+    proj = [float(p) for p, _ in pairs]
+    real = [float(r) for _, r in pairs]
+    n = len(pairs)
+    x = list(range(1, n + 1))
+    fig.add_trace(go.Scatter(x=x, y=np.cumsum(proj).tolist(), mode="lines+markers", name="Projected R"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=np.cumsum(real).tolist(), mode="lines+markers", name="Realised R"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=proj, y=real, mode="markers", name="Trades"), row=1, col=2)
+    lo, hi = min(proj + real), max(proj + real)
+    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line={"dash": "dot", "color": "#7f7f7f"},
+                             name="projected = realised"), row=1, col=2)
+    fig.update_xaxes(title_text="Trade with a projection", row=1, col=1)
+    fig.update_xaxes(title_text="Projected R", row=1, col=2)
+    fig.update_yaxes(title_text="Realised R", row=1, col=2)
+    other = float(cum_real[-1]) - sum(real)
+    fig.update_layout(title=f"Projected vs what happened: {n} trades with a projection; {n_unpredicted} without one "
+                            f"not shown (their realised total {other:+.2f}R)", margin={"t": 110})
     return fig
