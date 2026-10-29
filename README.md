@@ -305,6 +305,10 @@ python3.13 -m pytest -o addopts=""
 Dependencies are pinned to yfinance 1.x and pandas 3.x in `requirements.txt`; install from it in a fresh
 virtual environment and run the same command there before relying on a change.
 
+**Known accepted risk:** `requests` stays at 2.31.0, because every fyers-apiv3 release (3.1.7 to 3.2.0) pins
+`requests==2.31.0`. That version has CVE-2024-35195 and CVE-2024-47081, fixed in 2.32.4. The heartbeat workflow,
+which does not install fyers, uses `requests>=2.32.4`. Revisit when fyers-apiv3 relaxes its pin.
+
 ## Project Structure
 
 ```

@@ -37,7 +37,7 @@ jobs:
           python-version: '3.11'
       - name: Install pywebpush
         if: steps.gate.outputs.configured == 'true'
-        run: pip install "pywebpush>=1.14.0,<3" "py-vapid>=1.9.0,<2" "requests>=2.31,<3"  # same ranges as requirements.txt
+        run: pip install "pywebpush>=1.14.0,<3" "py-vapid>=1.9.0,<2" "requests>=2.32.4,<3"  # same ranges as requirements.txt, except requests: no fyers pin here
       - name: Setup SSH for signals repo
         if: steps.gate.outputs.configured == 'true'
         env:

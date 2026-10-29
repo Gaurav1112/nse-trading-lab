@@ -118,5 +118,12 @@ def test_heartbeat_installs_the_requirements_ranges():
     req = {m.group(1): m.group(2) for m in _re.finditer(r"^([a-zA-Z0-9_.\-]+)(>=[^\s#]+)", (REPO / "requirements.txt")
                                                           .read_text(), _re.M)}
     text = (WF / "heartbeat.yml").read_text()
-    for pkg in ("pywebpush", "py-vapid", "requests"):
+    for pkg in ("pywebpush", "py-vapid"):
         assert f'"{pkg}{req[pkg]}"' in text, pkg
+    # F1 round 3 m-d: the heartbeat installs no fyers-apiv3 (which pins requests==2.31.0), so it takes the fixed one
+    assert '"requests>=2.32.4,<3"' in text
+
+
+def test_readme_records_the_requests_pin_as_a_known_accepted_risk():
+    text = (REPO / "README.md").read_text()
+    assert "Known accepted risk" in text and "CVE-2024-35195" in text and "CVE-2024-47081" in text
