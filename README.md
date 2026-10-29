@@ -233,13 +233,16 @@ Open the **Scoreboard** tab and press "Load scoreboard", or run
   later bars, and a later fill counts only if its R is no better than the containing-bar fill's: a counted
   result is never better than either possible history. Otherwise it is `not_filled` ("fill only possible on the
   bar the TAKE was logged in — counted only if it loses"). A missing containing bar makes the trade
-  `data_unavailable`. A row with no logged price whose containing bar traded wholly between the trigger and the
-  limit is a certain fill there, at the limit.
+  `data_unavailable`. A stop-limit row with no logged price whose containing bar is inside the entry window and
+  traded wholly between the trigger and the limit is a certain fill there, at the limit; one whose containing bar
+  only straddles the trigger fills at the worst consistent price, the lower of that bar's high and the limit.
 - Intraday rows logged at or above the trigger printed a LIMIT ticket. Priced up to the limit (desk TAKE or
-  override), it fills at the logged price. Priced above the limit, it is a resting limit at the limit price. A
+  override), it fills at the logged price, but only when the TAKE's bar traded at that price (within 0.5% of its
+  range) and reached the limit: a stale logged price (for example the last close, used when there is no live
+  quote) is treated as a resting limit instead. Priced above the limit, it is a resting limit at the limit price. A
   LIMIT row logged outside the entry window, or a stop-limit row logged after the cancel time, is `not_filled`.
-- One small optimism is accepted: a plain limit fills at the logged price, although an order typed in later
-  could fill up to the limit (at most about 0.25R worse).
+- One small optimism is accepted: a plain limit (desk TAKE or override) fills at the logged price, although an
+  order typed in later could fill up to the limit (at most about 0.25R worse).
 - Swing trades are replayed on unadjusted daily bars. A missing trading session in the bars used, or
   prices re-scaled since the ticket (a split or bonus: the logged last close no longer matches), makes
   the trade `data_unavailable` instead of a guess.

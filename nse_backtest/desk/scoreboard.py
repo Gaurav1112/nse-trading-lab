@@ -10,8 +10,9 @@ possible is ambiguous (the touch may have come before the TAKE): it is kept when
 target never counts, and when it would win the order is replayed from the later bars: a later fill counts only if
 its R is at most the containing-bar fill's (a counted result is never better than either possible history), else
 NOT_FILLED ("fill only possible on the bar the TAKE was logged in — counted only if it loses").
-The one accepted residual optimism: the plain-LIMIT model fills a desk TAKE at the logged price, although an order
-typed in later could fill up to the limit (at most about 0.25R worse).
+The one accepted residual optimism: the plain-LIMIT model fills a row priced in [entry, limit] (desk TAKE or
+override) at the logged price, when that price is consistent with the TAKE's bar, although an order typed in later
+could fill up to the limit (at most about 0.25R worse).
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
-SCOREBOARD_VERSION = 9  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
+SCOREBOARD_VERSION = 10  # bump when a resolution rule or the cache entry shape changes: other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
@@ -527,6 +528,16 @@ def _gap_after(index: pd.DatetimeIndex, after: datetime) -> datetime | None:
     return None
 
 
+PLAIN_PRICE_TOLERANCE = 0.005  # a logged price within 0.5% of the TAKE bar's range counts as traded there
+
+
+def _logged_price_traded(cp: float, bar0, limit: float) -> bool:
+    """A plain LIMIT is a certain fill at the logged price only when that price lies within the containing bar's
+    [Low, High] widened by 0.5% of the price, and that bar's Low reached the limit."""
+    tol = PLAIN_PRICE_TOLERANCE * cp
+    return float(bar0["Low"]) - tol <= cp <= float(bar0["High"]) + tol and float(bar0["Low"]) <= limit
+
+
 def limit_model(c: Candidate, limit: float) -> str | None:
     """Which entry the printed ticket was, from the logged price: "plain" (priced in [entry, limit], desk TAKE or
     override: a marketable `BUY ... LIMIT` filled at about that price), "resting" (priced above the limit: a buy
@@ -637,6 +648,8 @@ def resolve_intraday(c: Candidate, bars15: pd.DataFrame, *, flat_by: time, now: 
     last_start = frame.index[-1]
     incomplete = session_over and last_start.to_pydatetime() < datetime.combine(day, flat_by) - timedelta(minutes=15)
     incomplete_note = f"incomplete session bars (last bar {last_start:%H:%M})"
+    if model == "plain" and not _logged_price_traded(c.current_price, frame.iloc[0], limit):
+        model = "resting"  # a stale logged price (e.g. the last close without a quote): never a certain fill
     if model is not None:  # the ticket was a LIMIT: the bar containing created_at counts
         return _limit_fill(c, model, limit, frame, profile, session_over, incomplete, incomplete_note, day)
     in_win = [profile.no_entry_before <= t.time() <= profile.no_entry_after for t in frame.index]
@@ -663,7 +676,10 @@ def _stop_limit_from(c: Candidate, frame, op, hi, lo, cl, in_win, has_bar0: bool
     if has_bar0 and not skip_containing and in_win[0] and hi[0] >= c.entry and lo[0] <= limit:
         # the trigger may have come in the containing bar's remainder: fill there (at the trigger, or at the limit
         # when the whole bar traded above the trigger); only its stop counts, never its target
-        got = (0, float(c.entry if lo[0] <= c.entry else limit))
+        # no logged price: the worst price consistent with the bar (it may have been above the trigger at the
+        # TAKE); a logged price below the trigger: the trigger itself
+        fill0 = min(hi[0], limit) if c.current_price is None else (c.entry if lo[0] <= c.entry else limit)
+        got = (0, float(fill0))
     else:
         first = 1 if has_bar0 else 0
         window = [p for p in range(first, len(frame)) if in_win[p]]
