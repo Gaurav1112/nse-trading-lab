@@ -33,6 +33,10 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
         "mc_expectancy_r": o.mc_expectancy_r if o is not None else None,
         "blocks": [c.name for c in v.blocks()], "warns": [c.name for c in v.warns()],
         "input_hash": v.input_hash,
+        "max_hold_bars": p.max_hold_bars, "cost_per_share": v.cost_per_share,
+        "history_expectancy_r": o.history_expectancy_r if o is not None else None,
+        "target_2": p.target_2, "last_bar": p.last_bar, "current_price": v.current_price,
+        "stop_basis": p.stop_basis,
     }
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:

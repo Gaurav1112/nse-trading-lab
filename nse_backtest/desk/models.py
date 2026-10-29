@@ -118,6 +118,7 @@ class DeskVerdict:
     current_price: float
     input_hash: str
     created_at: str
+    cost_per_share: float | None = None  # per-share round-trip cost the odds used (None: no odds computed)
 
     def blocks(self) -> list[Check]:
         return [c for c in self.checks if c.status is Status.BLOCK]
