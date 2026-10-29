@@ -52,6 +52,74 @@ python app.py batch RELIANCE TCS INFY SBIN
 python app.py demo
 ```
 
+## Trade Desk
+
+The Trade Desk turns a stock you are looking at into one sized decision: **TAKE**, **WAIT** or **SKIP**,
+for **NSE** (₹, IST) and **US** (US$, ET) stocks. Each market keeps its own settings, journal rows and
+money formatting; amounts are never mixed across markets.
+
+Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Today's Plan, Check a Trade,
+My Positions, Intraday), or from the terminal:
+
+```bash
+python3.13 -m nse_backtest.desk check RELIANCE            # one stock, swing
+python3.13 -m nse_backtest.desk check AAPL --market US --mode intraday
+python3.13 -m nse_backtest.desk plan                      # today's TAKE / WATCH lists
+python3.13 -m nse_backtest.desk positions                 # HOLD / TIGHTEN_STOP / EXIT
+```
+
+- **TAKE**: no check blocks and the current price (live quote, else the last close with a WARN) is
+  within about 1% of the planned entry. You get a ticket to type into your broker yourself.
+- **WAIT**: nothing blocks, but the price is below the entry (buy only above the trigger) or has run more
+  than 1% past it (buy only on a pullback). The ticket is shown as "IF TRIGGERED".
+- **SKIP**: at least one check BLOCKs (named in the headline), or there is no usable current price.
+
+### The 17 checks
+
+Missing or failed data is never a PASS: it becomes a WARN or a BLOCK.
+
+| # | Check | BLOCK when | WARN when |
+|---|---|---|---|
+| 1 | `regime` | swing and the index regime is HOSTILE or unknown | swing MIXED; intraday HOSTILE or unknown |
+| 2 | `reward_risk` | reward:risk to T1 is below the minimum (default 1:1.5) | — |
+| 3 | `size` | sizing gives less than one share | — |
+| 4 | `risk_governor` | the portfolio governor says no new trades | the governor could not be evaluated |
+| 5 | `daily_loss` | today's realised loss reached the daily limit, or no limit is set | the journal (or today's P&L) is unreadable |
+| 6 | `ban_list` | NSE: the stock is in the F&O ban list | the ban list could not be verified or is stale |
+| 7 | `monte_carlo` | no odds could be computed, or simulated expectancy is below 0R | expectancy is under +0.10R |
+| 8 | `freshness` | last daily bar older than 3 days, or last 15-min bar older than 30 min | the last bar is in the future |
+| 9 | `live_price` | the live price is at or below the stop | no live quote (last close used), or the quote is over 20 min old in session |
+| 10 | `entry_window` | intraday outside the entry window, or a weekend | — |
+| 11 | `liquidity` | 20-day median turnover below the market minimum | turnover unknown |
+| 12 | `earnings` | — | earnings inside the swing hold window, today (intraday), or unknown |
+| 13 | `setup_history` | intraday: under 20 past sessions, or under +0.2R, or no history | swing: under 20 samples, or negative expectancy |
+| 14 | `stoploss_streak` | — | 3 losses in a row (size is halved), or the journal is unreadable |
+| 15 | `gap` | — | today's gap is over 2%, or unknown (no live day-open) |
+| 16 | `robustness` | — | over 25% of candle-noise replays lose, or the test was not run |
+| 17 | `pdt` | US intraday with the PDT guard on: 3+ day trades in the last 5 weekdays | the day-trade count is unknown |
+
+### The Time Machine
+
+The odds come from the stock's own bars, not from a model. A block-bootstrap Monte Carlo replays the exact
+entry, stop, target and hold thousands of times (fixed seed, stop wins a bar that touches both), giving
+P(target), P(stop) and expectancy in R after costs. A setup history replays every past time the same setup
+fired on that stock. Robustness tests shuffle the trade order (drawdown, losing streaks) and jitter the
+candles to see whether the edge survives noise.
+
+### What the desk never does
+
+- **Nothing is ever placed.** There is no order API anywhere in this repo; you type every order yourself.
+- `.mcp.json` points Claude sessions at the hosted Kite MCP for **read-only** use (holdings, quotes).
+  The desk does not use it to trade.
+- `.claude/skills/trader-news` and `trader-analyst` are vendored research skills (MIT, audited, see
+  `.claude/skills/VENDORED.md`). They are never inputs to a desk verdict.
+
+Example (fictional): a TAKE might read `TAKE ABC — BUY 40 @ ₹1,000.00, loss at stop ≈ ₹980.00 (a gap
+can lose more)`: the loss at the stop includes costs, and a gap through the stop can lose more.
+
+> **Disclaimer:** the Trade Desk is a paper-trading and education tool, not financial advice. Its odds
+> are a reality check, not a forecast. Paper-trade until your record matches the odds.
+
 ## Project Structure
 
 ```
