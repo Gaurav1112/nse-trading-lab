@@ -23,20 +23,22 @@ class TradeCard:
     target_2: float
     entry_limit: float | None
     risk_per_share: float
-    cost: float  # round trip at T1, for qty
-    max_loss: float  # qty*(entry-stop) + cost; positive = money lost
-    profit_t1: float
-    profit_t2: float  # cost computed with the exit at T2
+    cost: float | None  # round trip at T1, for qty; None when qty is 0
+    max_loss: float | None  # qty*(entry-stop) + cost; positive = money lost
+    profit_t1: float | None
+    profit_t2: float | None  # cost computed with the exit at T2
     rr_t1: float
     expected_value: float | None  # mc_expectancy_r * qty * risk_per_share; None without odds
-    notional: float
-    pct_capital_at_risk: float  # qty*risk_per_share (before costs) as % of capital
-    pct_capital_deployed: float
+    notional: float | None
+    pct_capital_at_risk: float | None  # qty*risk_per_share (before costs) as % of capital
+    pct_capital_deployed: float | None
     breaches: tuple[str, ...]
     gap_note: str
     ticket: tuple[str, ...]
     ticket_header: str
     reasons: tuple[str, ...]
+    per_share: tuple[float, float, float]  # (loss incl. cost, profit at T1, profit at T2) at qty 1
+    unavailable_reason: str = ""
 
 
 def _check_qty(qty) -> int:
@@ -65,6 +67,24 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     n = base.qty if qty is None else qty
     is_override = qty is not None and qty != base.qty
     rps = plan.entry - plan.stop
+    if rps <= 0:
+        raise ValueError("entry must be above stop")
+    c1 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, 1)
+    c2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, 1)
+    per_share = (rps + c1, plan.target_1 - plan.entry - c1, plan.target_2 - plan.entry - c2)
+    taken = v.action is Action.TAKE
+    reasons = () if taken else tuple(f"{c.status.value} {c.name} — {c.reason}"
+                                     for c in v.checks if c.status in (Status.BLOCK, Status.WARN))
+    common = dict(verdict=v, qty=n, qty_is_override=is_override, entry=plan.entry, stop=plan.stop,
+                  target_1=plan.target_1, target_2=plan.target_2, entry_limit=plan.entry_limit,
+                  risk_per_share=rps, rr_t1=(plan.target_1 - plan.entry) / rps, gap_note=GAP_NOTE,
+                  reasons=reasons, per_share=per_share)
+    if n == 0:
+        why = base.note or base.binding_limit
+        return TradeCard(**common, cost=None, max_loss=None, profit_t1=None, profit_t2=None,
+                         expected_value=None, notional=None, pct_capital_at_risk=None,
+                         pct_capital_deployed=None, breaches=(), ticket=(), ticket_header="",
+                         unavailable_reason=f"The desk sized 0 shares ({why}) — enter a quantity to see the money")
     cost = round_trip_cost(profile, plan.mode, plan.entry, plan.target_1, n)
     cost_t2 = round_trip_cost(profile, plan.mode, plan.entry, plan.target_2, n)
     notional = n * plan.entry
@@ -73,21 +93,14 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     max_loss = n * rps + cost
     ev = None if v.odds is None else v.odds.mc_expectancy_r * n * rps
     breaches = _breaches(limits, risk_pct, deployed_pct, max_loss / limits.capital * 100) if is_override else ()
-
-    sizing = base if n == base.qty else replace(base, qty=n, notional=notional)
-    taken = v.action is Action.TAKE
+    sizing = base if n == base.qty else replace(base, qty=n, risk_amount=n * rps, notional=notional,
+                                                costs=cost, note=f"{n} shares (your quantity)")
     shown = taken or override_confirmed
-    reasons = () if taken else tuple(f"{c.status.value} {c.name} — {c.reason}"
-                                     for c in v.checks if c.status in (Status.BLOCK, Status.WARN))
     return TradeCard(
-        verdict=v, qty=n, qty_is_override=is_override,
-        entry=plan.entry, stop=plan.stop, target_1=plan.target_1, target_2=plan.target_2,
-        entry_limit=plan.entry_limit, risk_per_share=rps, cost=cost, max_loss=max_loss,
+        **common, cost=cost, max_loss=max_loss,
         profit_t1=n * (plan.target_1 - plan.entry) - cost,
         profit_t2=n * (plan.target_2 - plan.entry) - cost_t2,
-        rr_t1=(plan.target_1 - plan.entry) / rps, expected_value=ev, notional=notional,
-        pct_capital_at_risk=risk_pct, pct_capital_deployed=deployed_pct,
-        breaches=breaches, gap_note=GAP_NOTE,
+        expected_value=ev, notional=notional,
+        pct_capital_at_risk=risk_pct, pct_capital_deployed=deployed_pct, breaches=breaches,
         ticket=ticket_lines(plan, sizing, profile) if shown else (),
-        ticket_header=(f"YOUR OVERRIDE — the desk said {v.action.value}" if shown and not taken else ""),
-        reasons=reasons)
+        ticket_header=(f"YOUR OVERRIDE — the desk said {v.action.value}" if shown and not taken else ""))

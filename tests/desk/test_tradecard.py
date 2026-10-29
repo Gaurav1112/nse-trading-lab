@@ -75,3 +75,51 @@ def test_skip_is_gated_until_override_confirmed():
 def test_intraday_entry_limit_copied():
     plan = replace(PLAN, mode=Mode.INTRADAY, entry_limit=100.5)
     assert build_card(verdict(plan=plan), NSE, LIMITS).entry_limit == 100.5
+
+
+ZERO = Sizing(0, "risk", 0.0, 0.0, 0.0, False, "0 shares: stop too wide")
+
+
+def test_zero_qty_card_has_no_money_and_no_ticket():
+    v = verdict(Action.SKIP, checks=OK + (Check("gap", Status.BLOCK, "too wide"),), sizing=ZERO)
+    for confirmed in (False, True):
+        c = build_card(v, NSE, LIMITS, override_confirmed=confirmed)
+        assert c.qty == 0 and c.ticket == () and c.ticket_header == ""
+        for f in ("cost", "max_loss", "profit_t1", "profit_t2", "expected_value", "notional",
+                  "pct_capital_at_risk", "pct_capital_deployed"):
+            assert getattr(c, f) is None, f
+        assert c.risk_per_share == 5 and c.rr_t1 == 2.0
+        assert c.unavailable_reason == ("The desk sized 0 shares (0 shares: stop too wide) — "
+                                        "enter a quantity to see the money")
+    loss, p1, p2 = c.per_share
+    assert loss == pytest.approx(5 + round_trip_cost(NSE, Mode.SWING, 100, 110, 1))
+    assert p1 == pytest.approx(10 - round_trip_cost(NSE, Mode.SWING, 100, 110, 1))
+    assert p2 == pytest.approx(15 - round_trip_cost(NSE, Mode.SWING, 100, 115, 1))
+
+
+def test_zero_sized_skip_with_qty_gets_full_money_and_override_ticket():
+    v = verdict(Action.SKIP, sizing=ZERO)
+    c = build_card(v, NSE, LIMITS, qty=5, override_confirmed=True)
+    assert c.max_loss == pytest.approx(25 + round_trip_cost(NSE, Mode.SWING, 100, 110, 5))
+    assert c.unavailable_reason == "" and c.qty_is_override
+    assert c.ticket[0] == "BUY 5 ABC CNC LIMIT 100.00"
+    assert c.ticket_header == "YOUR OVERRIDE — the desk said SKIP"
+
+
+def test_override_sizing_is_rebuilt_honestly():
+    c = build_card(verdict(), NSE, LIMITS, qty=40)
+    expected = Sizing(40, SIZING.binding_limit, 200.0, 4_000.0, c.cost, SIZING.size_halved, "40 shares (your quantity)")
+    assert c.ticket == ticket_lines(PLAN, expected, NSE)
+
+
+def test_wait_reasons_and_same_qty_not_override_and_take_override_ticket():
+    w = build_card(verdict(Action.WAIT, checks=(Check("gap", Status.WARN, "wide"),)), NSE, LIMITS)
+    assert w.reasons == ("WARN gap — wide",) and w.ticket == ()
+    assert build_card(verdict(), NSE, LIMITS, qty=10).qty_is_override is False
+    t = build_card(verdict(), NSE, LIMITS, qty=20)
+    assert t.ticket[0] == "BUY 20 ABC CNC LIMIT 100.00" and t.ticket_header == ""
+
+
+def test_entry_must_be_above_stop():
+    with pytest.raises(ValueError, match="entry must be above stop"):
+        build_card(verdict(plan=replace(PLAN, stop=100)), NSE, LIMITS)
