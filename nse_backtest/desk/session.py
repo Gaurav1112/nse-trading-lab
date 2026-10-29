@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -16,9 +17,12 @@ from nse_backtest import tape_monitor
 
 from . import calendars as cal
 from . import loaders
+from . import scoreboard_io
+from .audit import data_dir
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .models import DeskVerdict, Limits, Mode
+from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 
 Warn = Callable[[str], None] | None
@@ -191,3 +195,18 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
             _warn(on_warning, f"no daily data for {s}: {e}")
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)
     return verdicts, load_failures + list(failures)
+
+
+def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,
+                   cache_path: Path | None = None, on_warning: Warn = None,
+                   load_daily=None, load_intraday=None) -> ScoreboardResult:
+    """Paper record of every logged TAKE (market None or "ALL" = all markets; unknown market -> ValueError).
+    Bars come from loaders.load_daily / loaders.load_intraday unless fakes are passed; resolved final
+    outcomes are cached in desk_scoreboard.json so they are never refetched."""
+    return scoreboard_io.build_scoreboard(
+        market, now=now or datetime.now(timezone.utc),
+        audit_path=Path(audit_path) if audit_path is not None else data_dir() / scoreboard_io.AUDIT_FILE,
+        cache_path=Path(cache_path) if cache_path is not None else data_dir() / scoreboard_io.CACHE_FILE,
+        on_warning=on_warning,
+        load_daily=load_daily if load_daily is not None else loaders.load_daily,
+        load_intraday=load_intraday if load_intraday is not None else loaders.load_intraday)

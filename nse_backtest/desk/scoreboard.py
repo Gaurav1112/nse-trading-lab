@@ -21,6 +21,7 @@ from .markets import get_profile
 from .models import Mode
 from .timemachine import _walk
 
+SCOREBOARD_VERSION = 1  # bump whenever a resolution rule changes: cached outcomes of other versions are ignored
 MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
@@ -183,13 +184,27 @@ def _mtm(c: Candidate, fill: float, px: float) -> float:
     return _r(c, fill, px)
 
 
-def _finish(c: Candidate, fill: float, fill_at, px: float, exit_at, held: int, note: str) -> Outcome:
+def unavailable(c: Candidate, note: str) -> Outcome:
+    """An UNAVAILABLE outcome for a candidate whose bars could not be loaded (never dropped)."""
+    return _outcome(c, Status.UNAVAILABLE, note)
+
+
+def realised_r(c: Candidate, fill: float, px: float) -> float:
+    """Realised R of an exit at px after a fill, net of cost_per_share, over the planned R."""
+    return _r(c, fill, px)
+
+
+def exit_status(c: Candidate, px: float) -> Status:
+    """Final status of a filled trade exiting at px: WON at/through target, LOST at/through stop, else TIME."""
     if px >= c.target_1:
-        st = Status.WON
-    elif px <= c.stop:
-        st = Status.LOST
-    else:
-        st = Status.TIME
+        return Status.WON
+    if px <= c.stop:
+        return Status.LOST
+    return Status.TIME
+
+
+def _finish(c: Candidate, fill: float, fill_at, px: float, exit_at, held: int, note: str) -> Outcome:
+    st = exit_status(c, px)
     return _outcome(c, st, note, fill=float(fill), fill_at=str(fill_at), exit_px=float(px), exit_at=str(exit_at),
                     r=_r(c, fill, px), held=held)
 
