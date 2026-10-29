@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+from .markets import get_profile
 from .models import Action, DeskVerdict
 
 
@@ -58,9 +61,16 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
     return _append(_row(v), path)
 
 
-def append_override(v: DeskVerdict, path: Path | None = None) -> Path:
+def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime | None = None) -> Path:
     """The owner chose a WAIT/SKIP verdict anyway: the verdict's row with action OVERRIDE, the desk's own action
-    as desk_action and chosen_by "owner". The scoreboard scores these apart from the desk's TAKEs."""
+    as desk_action and chosen_by "owner". The scoreboard scores these apart from the desk's TAKEs.
+
+    created_at is when the owner chose (``now``, default the wall clock, in the market's time zone), and the
+    verdict's own time is kept as verdict_created_at: the scoreboard replays an override from created_at, so a
+    move that ran before the decision is never credited to it."""
     if v.action is Action.TAKE:
         raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
-    return _append({**_row(v), "action": "OVERRIDE", "desk_action": v.action.value, "chosen_by": "owner"}, path)
+    tz = ZoneInfo(get_profile(v.plan.market).tz)
+    at = (now.astimezone(tz) if now is not None else datetime.now(tz)).isoformat()
+    return _append({**_row(v), "created_at": at, "verdict_created_at": v.created_at, "action": "OVERRIDE",
+                    "desk_action": v.action.value, "chosen_by": "owner"}, path)

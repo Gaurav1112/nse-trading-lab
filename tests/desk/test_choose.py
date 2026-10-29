@@ -243,3 +243,16 @@ def test_cli_check_json_carries_card_without_bulky_fields(desk, monkeypatch, cap
     assert d["card"]["ticket_header"] == "YOUR OVERRIDE — the desk said WAIT"
     assert d["override_logged"] is True and len(_audit_rows(tmp_path)) == 1
     assert "mc_rs" not in d["odds"]
+
+
+def test_cli_choose_always_runs_a_fresh_check_and_stamps_the_override_now(desk, monkeypatch, capsys, tmp_path):
+    """F1 B1: --choose never reuses an old verdict: each call checks again, and the row is stamped when chosen."""
+    from datetime import datetime, timezone
+    calls = _fake(monkeypatch, v("ABC", Action.SKIP, checks=(Check("gap", Status.BLOCK, "too wide"),)))
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    assert len(calls) == 2
+    rows = _audit_rows(tmp_path)
+    assert [r["verdict_created_at"] for r in rows] == ["2026-10-29T10:00:00"] * 2
+    for r in rows:
+        assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(r["created_at"])).total_seconds()) < 60

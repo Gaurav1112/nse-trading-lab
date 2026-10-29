@@ -545,7 +545,9 @@ def _candidate_row(v: DeskVerdict) -> dict:
     except Exception:  # noqa: BLE001 - bad geometry: the card itself says why
         card = None
     blocks = ", ".join(c.name for c in v.blocks())
+    built = desk_card.built_at(v, profile)
     return {"Symbol": p.symbol, "Mode": p.mode.value, "Desk says": v.action.value,
+            "Built": "—" if built is None else f"{built:%H:%M}",
             "Entry": profile.money(p.entry), "Stop": profile.money(p.stop), "T1": profile.money(p.target_1),
             "T2": profile.money(p.target_2), "Qty": str(card.qty if card else v.sizing.qty),
             "Max loss": _dash(card.max_loss if card else None), "Profit T1": _dash(card.profit_t1 if card else None),
@@ -560,7 +562,7 @@ def _warn_scan_failures(istate, have_scan: bool) -> None:
 
 
 def _skipped_row(sym: str, why: str) -> dict:
-    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Entry": "—", "Stop": "—", "T1": "—",
+    return {"Symbol": sym, "Mode": "swing", "Desk says": "SKIP", "Built": "—", "Entry": "—", "Stop": "—", "T1": "—",
             "T2": "—", "Qty": "—", "Max loss": "—", "Profit T1": "—", "Win odds": "—", "Why": why}
 
 

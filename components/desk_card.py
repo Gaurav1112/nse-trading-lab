@@ -12,12 +12,13 @@ import re
 import time
 from dataclasses import replace
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from nse_backtest.desk import audit, charts, loaders, projections, research
+from nse_backtest.desk import audit, charts, loaders, projections, research, session
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
 
@@ -30,6 +31,8 @@ BAR_15M = pd.Timedelta(minutes=15)
 SWING_BARS_SHOWN = 120
 OVERRIDES_KEY = "desk_overrides_logged"  # {input_hash: qty at the first confirmation}: one audit row per verdict
 ACCOUNT_N = (10, 20, 50)
+STALE_INTRADAY_MIN = 15  # an intraday verdict older than this cannot be acted on from the card: re-check first
+RECHECK_KEY = "card_recheck"  # (RECHECK_KEY, key, input_hash) -> {"ok": fresh verdict} | {"error": reason}
 
 
 def _msg(e: Exception) -> str:
@@ -49,6 +52,46 @@ def _pct(x) -> str:
 
 
 # ---------------------------------------------------------------- data helpers (pure-ish, unit-testable)
+
+def market_now(profile) -> datetime:
+    """The market's wall clock (tests patch this)."""
+    return datetime.now(ZoneInfo(profile.tz))
+
+
+def built_at(v: DeskVerdict, profile) -> datetime | None:
+    """The verdict's created_at in market time (a naive stamp is read as market time); None if unreadable."""
+    try:
+        t = datetime.fromisoformat(str(v.created_at))
+    except ValueError:
+        return None
+    tz = ZoneInfo(profile.tz)
+    return t.replace(tzinfo=tz) if t.tzinfo is None else t.astimezone(tz)
+
+
+def age_minutes(v: DeskVerdict, profile, now: datetime) -> int | None:
+    t = built_at(v, profile)
+    return None if t is None else max(0, int((now - t).total_seconds() // 60))
+
+
+def stale_reason(v: DeskVerdict, profile, now: datetime) -> str | None:
+    """Why an intraday verdict must be re-checked before it is acted on (older than 15 minutes, built on another
+    day, or now past the entry cutoff), else None. Swing verdicts are never stale here (their age is shown)."""
+    if v.plan.mode is not Mode.INTRADAY:
+        return None
+    t, age = built_at(v, profile), age_minutes(v, profile, now)
+    if t is None or age is None:
+        return "This intraday verdict has no readable build time — re-check before choosing it"
+    if age > STALE_INTRADAY_MIN or t.date() != now.date():
+        return f"This intraday verdict is {age} min old — re-check before choosing it"
+    if now.time() > profile.no_entry_after:
+        return (f"This intraday verdict was built at {t:%H:%M} and it is now past the entry cutoff "
+                f"({profile.no_entry_after:%H:%M}) — re-check before choosing it")
+    return None
+
+
+def age_line(v: DeskVerdict, profile, now: datetime) -> str:
+    t, age = built_at(v, profile), age_minutes(v, profile, now)
+    return "built at an unknown time" if t is None else f"built {t:%H:%M} ({age} min ago)"
 
 def md_escape(text) -> str:
     """Backslash-escape Markdown punctuation so fetched text is shown as text, never as links or formatting."""
@@ -197,7 +240,32 @@ def _log_once(v: DeskVerdict, card) -> None:
                "apart from the desk's picks.")
 
 
-def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str) -> None:
+def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) -> None:
+    """The stale-verdict prompt: no ticket and no override box, only a Re-check that runs the full desk check for
+    this symbol and mode and replaces the card's verdict."""
+    st.warning(reason)
+    rk = (RECHECK_KEY, key, v.input_hash)
+    if st.button("Re-check", key=f"{wkey}_recheck"):
+        p = v.plan
+        levels = (dict(entry=p.entry, stop=p.stop, target=p.target_1) if p.stop_basis == "user" else {})
+        with st.spinner(f"Re-checking {p.symbol}..."):
+            try:
+                st.session_state[rk] = {"ok": session.run_check(profile, p.symbol, p.mode, limits, **levels)}
+            except Exception as e:  # noqa: BLE001 - shown under the prompt
+                st.session_state[rk] = {"error": _msg(e)}
+        if "ok" in st.session_state[rk]:
+            st.rerun()
+    hit = st.session_state.get(rk)
+    if hit is not None and "error" in hit:
+        st.error(f"Re-check failed: {hit['error']}")
+
+
+def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = "", now: datetime | None = None
+            ) -> None:
+    reason = stale_reason(v, profile, now or market_now(profile))
+    if reason is not None:
+        _recheck(v, profile, limits, key, wkey, reason)
+        return
     if v.action is Action.TAKE:
         if card.ticket:
             st.markdown("**Ticket** (type it in yourself — the desk places nothing)")
@@ -338,10 +406,18 @@ def _research_panel(profile, v: DeskVerdict, wkey: str) -> None:
 
 def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header: bool = True) -> None:
     """One trade card. ``key`` namespaces the widgets; they are also keyed by the verdict's input hash so a new
-    verdict starts from the desk's own quantity and an unticked override box."""
+    verdict starts from the desk's own quantity and an unticked override box. A Re-check of a stale intraday
+    verdict replaces it here (session state), until the page builds a new verdict for the row."""
+    for _ in range(8):  # follow re-checks: each replaces the verdict it was made from
+        hit = st.session_state.get((RECHECK_KEY, key, v.input_hash))
+        if not (hit and "ok" in hit) or hit["ok"].input_hash == v.input_hash:
+            break
+        v = hit["ok"]
     wkey = f"{key}_{v.input_hash[:12]}"
+    now = market_now(profile)
     if header:
         _section("Header", _header, v)
+    _section("Age", lambda: st.caption(f"Verdict {age_line(v, profile, now)} (market time)"))
     sized = v.sizing.qty
     qty_in = st.number_input("Quantity", min_value=1, value=sized if sized > 0 else None, step=1,
                              key=f"{wkey}_qty", help="Defaults to the desk's size; a bigger quantity lists the "
@@ -357,7 +433,7 @@ def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header
     _section("Levels", _levels, card, profile)
     st.markdown("**Money**")
     _section("Money", _money, card, profile)
-    _section("Ticket", _ticket, v, card, profile, limits, qty, wkey)
+    _section("Ticket", _ticket, v, card, profile, limits, qty, wkey, key, now)
     _section("Outcome chart", _outcome, card, profile, wkey)
     _section("Price chart", _price, card, profile, today, wkey)
     _section("Account projection", _account, card, profile, limits, wkey)

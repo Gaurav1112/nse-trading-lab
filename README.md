@@ -105,8 +105,14 @@ to open its trade card:
 - **The override gate**: for a WAIT or SKIP the ticket stays hidden until you tick "I choose this anyway". The
   ticket is then headed "YOUR OVERRIDE — the desk said SKIP" and the choice is logged once per verdict (one
   row, with the quantity at the first tick; changing the quantity afterwards adds no rows). The CLI does the
-  same with `check --choose`. A WAIT also shows the desk's own conditional ticket ("IF TRIGGERED") without
-  needing an override.
+  same with `check --choose` (which always runs a fresh check). The override row is stamped with the time you
+  chose (the verdict's own time is kept as `verdict_created_at`), and the scoreboard replays it from then, so a
+  move that ran before your decision is never credited to it. A WAIT also shows the desk's own conditional
+  ticket ("IF TRIGGERED") without needing an override.
+- **Age**: the candidates table has a "Built" column and every card says "built HH:MM (n min ago)". An intraday
+  verdict older than 15 minutes, or shown past the entry cutoff, has no ticket and no override box: it shows a
+  Re-check button that runs the full check again and replaces the card's verdict. Swing tickets stay, with the
+  age shown.
 - **Outcome money**: the Monte Carlo replays turned into money (5th to 95th percentile, median, P(target),
   P(stop), P(time exit)) and a histogram marking the stop and targets.
 - **Price chart**: recent candles with entry, stop and targets, plus a band built from the stock's own past
