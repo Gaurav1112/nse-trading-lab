@@ -81,8 +81,9 @@ def test_a6_resolve_tape_reports_stale(monkeypatch):
 def test_a5_run_check_fetches_live_quote_and_gap(offline_desk, monkeypatch):
     seen = []
     daily = series()
-    prev_close = float(daily["Close"].iloc[-1])
     now = datetime.now(ZoneInfo(NSE.tz))
+    # The gap is measured against the last close before market-today (after the close, today's bar exists).
+    prev_close = float(daily["Close"][daily.index.date < now.date()].iloc[-1])
     q = LiveQuote(price=prev_close, day_open=prev_close * 1.03, as_of=now)
     monkeypatch.setattr(loaders, "live_quote", lambda p, s: seen.append(s) or q)
     v = session.run_check(NSE, "abc", Mode.SWING, Limits(capital=100_000))
