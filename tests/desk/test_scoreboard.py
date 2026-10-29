@@ -446,3 +446,86 @@ def test_swing_uncovered_year_notes_say_so():
 def test_scoreboard_version_bumped_for_r1_rules():
     from nse_backtest.desk.scoreboard import SCOREBOARD_VERSION
     assert SCOREBOARD_VERSION == 2  # gap, price-scale and fill rules changed: version-1 caches are not served
+
+
+# ---- price scale: a split/bonus after the ticket must never be replayed on re-scaled prices
+from nse_backtest.desk.scoreboard import check_price_scale  # noqa: E402
+
+
+def _adj_cand(last_close=101.0, last_bar="2026-09-01T00:00:00"):
+    return Candidate(datetime(2026, 9, 1, 18, 0, tzinfo=IST), "NSE", "FAKE", Mode.SWING, 100.0, 95.0, 110.0, 15,
+                     0.1, 10, 0.3, None, "h|x", last_bar, last_close)
+
+
+def _adj_raw():
+    days = pd.bdate_range("2026-09-01", periods=7)
+    return pd.DataFrame({"Open": [100, 101, 102, 105, 108, 56, 57], "High": [101.5, 102, 104, 108, 112, 57, 58],
+                         "Low": [99.5, 99.5, 101, 104, 107, 55, 56],
+                         "Close": [101, 101, 103, 107, 111, 56.5, 57.5]}, index=days)
+
+
+def test_price_scale_bonus_after_ticket_is_unavailable():
+    raw = _adj_raw()
+    assert check_price_scale(_adj_cand(), raw) is None
+    assert resolve_swing(_adj_cand(), raw, fill_session=date(2026, 9, 2), now=NOW).status is Status.WON
+    adj = raw.astype(float)
+    adj.iloc[:5] = adj.iloc[:5] / 2  # 1:1 bonus ex on day 6: history halved, as yfinance serves it
+    assert resolve_swing(_adj_cand(), adj, fill_session=date(2026, 9, 2), now=NOW).status is Status.LOST  # the lie
+    o = check_price_scale(_adj_cand(), adj)
+    assert o.status is Status.UNAVAILABLE
+    assert o.note == "prices re-scaled since the ticket (split/bonus?): logged close ₹101.00, now ₹50.50"
+
+
+def test_price_scale_dividend_under_unadjusted_bars_unchanged():
+    raw = _adj_raw()
+    raw.loc[raw.index[1], "Low"] = 100.4  # would really not fill
+    o = resolve_swing(_adj_cand(), raw, fill_session=date(2026, 9, 2), now=NOW)
+    assert check_price_scale(_adj_cand(), raw) is None and o.status is Status.NOT_FILLED
+    # dividend-adjusted (x0.985) history would fill a trade that never filled: the scale check catches it
+    assert check_price_scale(_adj_cand(), raw * 0.985).status is Status.UNAVAILABLE
+    assert resolve_swing(_adj_cand(), raw * 0.985, fill_session=date(2026, 9, 2), now=NOW).status \
+        is not Status.NOT_FILLED
+
+
+def test_price_scale_tolerance_half_percent():
+    raw = _adj_raw()
+    assert check_price_scale(_adj_cand(last_close=101.0 * 1.0049), raw) is None
+    assert check_price_scale(_adj_cand(last_close=101.0 * 1.0051), raw).status is Status.UNAVAILABLE
+
+
+def test_price_scale_old_row_without_last_close_uses_entry_band():
+    adj = _adj_raw().astype(float)
+    adj.iloc[:5] = adj.iloc[:5] / 2
+    assert check_price_scale(_adj_cand(last_close=None), _adj_raw()) is None
+    o = check_price_scale(_adj_cand(last_close=None), adj)
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("prices re-scaled since the ticket (split/bonus?)")
+
+
+def test_price_scale_missing_last_bar_is_unavailable():
+    raw = _adj_raw()
+    o = check_price_scale(_adj_cand(), raw.drop(raw.index[0]))
+    assert o.status is Status.UNAVAILABLE and o.note == "no daily bar for the ticket's last bar 2026-09-01"
+    o = check_price_scale(_adj_cand(last_bar=None), raw)
+    assert o.status is Status.UNAVAILABLE and "last_bar" in o.note
+    assert check_price_scale(_adj_cand(last_bar="garbage"), raw).status is Status.UNAVAILABLE
+
+
+def test_load_candidates_reads_last_bar_and_last_close():
+    row = dict(action="TAKE", market="NSE", symbol="ABC", mode="swing", entry=100, stop=98, target_1=103,
+               qty=10, input_hash="h", created_at="2026-10-26T18:00:00+05:30", last_bar="2026-10-26T00:00:00",
+               last_close=100.5)
+    (c,), _ = load_candidates([row])
+    assert c.last_bar == "2026-10-26T00:00:00" and c.last_close == 100.5
+    (c,), _ = load_candidates([{k: v for k, v in row.items() if k not in ("last_bar", "last_close")}])
+    assert c.last_bar is None and c.last_close is None
+
+
+def test_audit_writes_last_close(tmp_path):
+    from dataclasses import replace
+    from nse_backtest.desk import audit
+    from nse_backtest.desk.markets import NSE
+    from nse_backtest.desk.verdict import decide
+    from tests.desk.test_verdict_service import NOW as VNOW, OK, P, S
+    v = replace(decide(P, S, None, OK, NSE, 100.0, VNOW), cost_per_share=0.37)
+    rec = json.loads(audit.append_verdict(v, tmp_path / "a.jsonl").read_text())
+    assert rec["last_close"] == P.last_close

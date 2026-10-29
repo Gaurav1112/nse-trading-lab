@@ -44,6 +44,8 @@ class Candidate:
     mc_expectancy_r: float | None
     history_expectancy_r: float | None
     key: str                    # f"{input_hash}|{created_at.isoformat()}"
+    last_bar: str | None = None     # the plan's last bar (ISO); None in rows logged before it was recorded
+    last_close: float | None = None  # the plan's last daily Close; None in rows logged before R1
 
 
 class Status(str, Enum):
@@ -139,9 +141,13 @@ def _parse_row(row: dict) -> Candidate:
         cps = round_trip_cost(profile, mode, entry, t1, q) / q
         if not math.isfinite(cps) or cps < 0:
             raise ValueError("invalid computed cost_per_share")
+    last_bar = row.get("last_bar")
+    last_close = _opt(row, "last_close")
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
-                     f"{row['input_hash']}|{created.isoformat()}")
+                     f"{row['input_hash']}|{created.isoformat()}",
+                     str(last_bar) if last_bar not in (None, "") else None,
+                     last_close if last_close is not None and last_close > 0 else None)
 
 
 def default_session_of(market: str, created_at: datetime) -> date:
@@ -216,6 +222,40 @@ def _all_finite(*arrs) -> bool:
 
 
 NO_CALENDAR = "(holiday calendar not available)"
+SCALE_TOLERANCE = 0.005      # logged last close vs the same bar now: more than 0.5% apart -> re-scaled prices
+SCALE_ENTRY_BAND = 0.20      # rows without last_close: entry more than 20% from that close -> re-scaled prices
+
+
+def check_price_scale(c: Candidate, daily: pd.DataFrame) -> Outcome | None:
+    """UNAVAILABLE when today's (unadjusted) bars are not on the ticket's price scale, else None.
+
+    yfinance's unadjusted bars are still split-adjusted, so a split or bonus after the ticket re-scales the
+    whole history; replaying the ticket's entry/stop/target on such bars would be a fiction. The plan's last
+    daily Close (logged as last_close) must match the loaded Close on last_bar within 0.5%. Rows logged before
+    last_close existed fall back to: entry within 20% of that Close. Without last_bar nothing can be checked."""
+    money = get_profile(c.market).money
+    if not c.last_bar:
+        return unavailable(c, "audit row has no last_bar, so the price scale cannot be checked")
+    try:
+        day = pd.Timestamp(c.last_bar)
+        if pd.isna(day):
+            raise ValueError("not a time")
+    except (ValueError, TypeError, OverflowError):
+        return unavailable(c, f"unreadable last_bar {c.last_bar!r}, so the price scale cannot be checked")
+    hits = np.flatnonzero(daily.index.normalize() == pd.Timestamp(day.date()))
+    if len(hits) == 0:
+        return unavailable(c, f"no daily bar for the ticket's last bar {day.date().isoformat()}")
+    now_close = float(daily["Close"].to_numpy(dtype=float)[hits[-1]])
+    if not math.isfinite(now_close) or now_close <= 0:
+        return unavailable(c, "bad price data")
+    if c.last_close is not None:
+        if abs(now_close / c.last_close - 1) > SCALE_TOLERANCE:
+            return unavailable(c, f"prices re-scaled since the ticket (split/bonus?): logged close "
+                                  f"{money(c.last_close)}, now {money(now_close)}")
+    elif abs(c.entry / now_close - 1) > SCALE_ENTRY_BAND:
+        return unavailable(c, f"prices re-scaled since the ticket (split/bonus?): logged entry {money(c.entry)}, "
+                              f"close on the ticket's last bar now {money(now_close)}")
+    return None
 
 
 def _missing_session(market: str, dates: list[date]) -> date | None:

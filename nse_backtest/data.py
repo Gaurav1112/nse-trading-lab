@@ -66,9 +66,10 @@ def _validate_exchange(exchange: str) -> str:
     return e
 
 
-def _cache_path(symbol: str, exchange: str, start: str, end: str) -> str:
+def _cache_path(symbol: str, exchange: str, start: str, end: str, adjusted: bool = True) -> str:
+    """Cache file for one download. Adjusted bars keep the historical key; unadjusted ones get their own."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    raw = f"{symbol}|{exchange}|{start}|{end}"
+    raw = f"{symbol}|{exchange}|{start}|{end}" + ("" if adjusted else "|unadjusted")
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     safe_sym = re.sub(r"[^A-Z0-9]", "_", symbol)[:20]
     fname = f"{safe_sym}_{digest}.parquet"
@@ -161,11 +162,11 @@ def _yf_retry(call, label: str, timeout: float = 30.0, retries: int = 3,
 
 
 def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
-                 retries: int = 3) -> pd.DataFrame:
+                 retries: int = 3, adjusted: bool = True) -> pd.DataFrame:
     # backoff policy (1.5s, then 60s for yfinance 429 bans) lives in _yf_retry
     return _yf_retry(
         lambda: yf.download(ticker, start=start, end=end, progress=False,
-                            auto_adjust=True, threads=False),
+                            auto_adjust=adjusted, threads=False),
         ticker, timeout=timeout, retries=retries, rate_limit_backoff=60,
     )
 
@@ -259,8 +260,12 @@ def fetch_nse(
     end: Optional[str] = None,
     exchange: str = "NS",
     use_cache: bool = True,
+    adjusted: bool = True,
 ) -> pd.DataFrame:
-    """Fetch historical OHLCV for an Indian stock.  Symbols are validated."""
+    """Fetch historical OHLCV for an Indian stock.  Symbols are validated.
+
+    ``adjusted=False`` asks yfinance for unadjusted bars (``auto_adjust=False``: no dividend adjustment;
+    yfinance still applies split adjustment) and caches them under their own key."""
     symbol = _validate_symbol(symbol)
     exchange = _validate_exchange(exchange)
 
@@ -268,7 +273,7 @@ def fetch_nse(
         end = datetime.now().strftime("%Y-%m-%d")
     _check_dates(start, end)
 
-    cache_file = _cache_path(symbol, exchange, start, end)
+    cache_file = _cache_path(symbol, exchange, start, end, adjusted)
     if use_cache:
         cached = _read_fresh_cache(cache_file, _cache_max_age(end))
         if cached is not None:
@@ -276,7 +281,7 @@ def fetch_nse(
 
     ticker = f"{symbol}.{exchange}" if exchange else symbol
     log.info("Fetching %s from %s to %s", ticker, start, end)
-    df = _clean_download(_yf_download(ticker, start, end), ticker, start, end)
+    df = _clean_download(_yf_download(ticker, start, end, adjusted=adjusted), ticker, start, end)
 
     if use_cache:
         _write_cache(df, cache_file, symbol)
@@ -320,6 +325,7 @@ def fetch_many_daily(
     exchange: str = "NS",
     use_cache: bool = True,
     refetch_if=None,
+    adjusted: bool = True,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     """Daily OHLCV for many symbols with ONE yfinance call for the uncached ones.
 
@@ -359,7 +365,7 @@ def fetch_many_daily(
     forced: set[str] = set()
     max_age = _cache_max_age(end)
     for sym in by_symbol:
-        cached = _read_fresh_cache(_cache_path(sym, exchange, start, end), max_age) if use_cache else None
+        cached = _read_fresh_cache(_cache_path(sym, exchange, start, end, adjusted), max_age) if use_cache else None
         if cached is not None and refetch_if is not None:
             try:
                 refetch = bool(refetch_if(sym, cached))
@@ -382,7 +388,7 @@ def fetch_many_daily(
         try:
             data = _yf_retry(
                 lambda: yf.download(tickers=tickers, start=start, end=end, group_by="ticker",
-                                    auto_adjust=True, threads=False, progress=False),
+                                    auto_adjust=adjusted, threads=False, progress=False),
                 label, rate_limit_backoff=60,
             )
             if data is None or data.empty:
@@ -408,14 +414,15 @@ def fetch_many_daily(
                     bad[sym] = f"{sym}: {e}"
                     continue
                 if use_cache:
-                    _write_cache(df, _cache_path(sym, exchange, start, end), sym)
+                    _write_cache(df, _cache_path(sym, exchange, start, end, adjusted), sym)
                 got[sym] = df
             if retry:
                 log.warning("No bars for %s in the batch download — retrying one by one", ", ".join(retry))
         batch_failed = len(retry) == len(pending) and not got.keys() & set(pending)
         for sym in retry:
             try:
-                got[sym] = fetch_nse(sym, start, end, exchange, use_cache=use_cache and sym not in forced)
+                got[sym] = fetch_nse(sym, start, end, exchange, use_cache=use_cache and sym not in forced,
+                                     adjusted=adjusted)
             except Exception as e2:  # noqa: BLE001
                 where = "the batch download failed" if batch_failed else (
                     f"no bars for {ticker_of[sym]} in the batch download")

@@ -137,7 +137,7 @@ def test_batch_raises_falls_back_to_fetch_nse_per_symbol(monkeypatch):
     _record(monkeypatch, RuntimeError("rate limited"))
     seen = []
 
-    def per_symbol(sym, start, end=None, exchange="NS", use_cache=True):
+    def per_symbol(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
         seen.append((sym, start, end, exchange, use_cache))
         if sym == "CCC":
             raise ValueError("No data found for CCC.NS")
@@ -273,7 +273,7 @@ def test_missing_ticker_is_retried_per_symbol(monkeypatch):
     _record(monkeypatch, multi({"BBB.NS": b}))
     seen = []
     monkeypatch.setattr(data_mod, "fetch_nse",
-                        lambda sym, start, end=None, exchange="NS", use_cache=True: seen.append((sym, use_cache)) or c)
+                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True: seen.append((sym, use_cache)) or c)
     frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS")
     assert errors == {} and seen == [("CCC", True)] and frames["CCC"] is c
 
@@ -290,3 +290,43 @@ def test_unreadable_cache_only_affects_its_symbol(monkeypatch):
     assert errors == {} and set(frames) == {"GOOD", "BAD"}
     assert sorted(t for t in calls[0][1]["tickers"]) == ["BAD.NS", "GOOD.NS"]
     assert frames["BAD"]["Close"].iloc[0] == 50.0  # downloaded, the bad cache file ignored
+
+
+# ---- review round R1: unadjusted daily bars for the scoreboard (adjusted=False)
+
+def test_adjusted_true_keeps_the_existing_cache_key():
+    import hashlib
+    raw = f"BBB|NS|{START}|{END}"
+    old = f"BBB_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}.parquet"
+    assert os.path.basename(data_mod._cache_path("BBB", "NS", START, END)) == old
+    assert data_mod._cache_path("BBB", "NS", START, END, adjusted=True) == data_mod._cache_path("BBB", "NS", START, END)
+    assert data_mod._cache_path("BBB", "NS", START, END, adjusted=False) != data_mod._cache_path("BBB", "NS", START, END)
+
+
+def test_fetch_nse_unadjusted_uses_its_own_cache_and_auto_adjust_false(monkeypatch):
+    b = _bars(base=200)
+    calls = _record(monkeypatch, single(b, "BBB.NS"))
+    data_mod.fetch_nse("BBB", START, END, "NS", adjusted=False)
+    assert calls[-1][1]["auto_adjust"] is False
+    assert os.path.exists(data_mod._cache_path("BBB", "NS", START, END, adjusted=False))
+    assert not os.path.exists(data_mod._cache_path("BBB", "NS", START, END))
+    data_mod.fetch_nse("BBB", START, END, "NS")
+    assert calls[-1][1]["auto_adjust"] is True and len(calls) == 2  # an adjusted read never serves raw bars
+
+
+def test_fetch_many_daily_unadjusted(monkeypatch):
+    b, c = _bars(base=200), _bars(base=300)
+    calls = _record(monkeypatch, multi({"BBB.NS": b, "CCC.NS": c}))
+    frames, errors = data_mod.fetch_many_daily(["BBB", "CCC"], START, END, "NS", adjusted=False)
+    assert errors == {} and calls[0][1]["auto_adjust"] is False
+    assert os.path.exists(data_mod._cache_path("CCC", "NS", START, END, adjusted=False))
+    assert not os.path.exists(data_mod._cache_path("CCC", "NS", START, END))
+
+
+def test_fetch_many_daily_unadjusted_retry_stays_unadjusted(monkeypatch):
+    _record(monkeypatch, RuntimeError("rate limited"))
+    seen = []
+    monkeypatch.setattr(data_mod, "fetch_nse", lambda sym, start, end=None, exchange="NS", use_cache=True,
+                        adjusted=True: seen.append(adjusted) or _bars(base=200))
+    data_mod.fetch_many_daily(["BBB"], START, END, "NS", adjusted=False)
+    assert seen == [False]

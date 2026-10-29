@@ -18,11 +18,21 @@ ET = ZoneInfo("America/New_York")
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=IST)
 
 
+LAST_CLOSE = 100.0  # every frame() starts with a bar closing here on the trading day before its first date
+
+
 def row(created, symbol="ABC", market="NSE", mode="swing", entry=100.0, stop=98.0, target_1=103.0, h="h1",
         action="TAKE", **kw):
+    """An audit TAKE row. last_bar defaults to the trading day before created_at's market-local date, which is
+    the bar frame() prepends when the frame starts on that date (the fill session in most tests)."""
+    from nse_backtest.desk import calendars
+    from nse_backtest.desk.markets import get_profile
+    p = get_profile(market)
+    prior = calendars.previous_trading_day(p, created.astimezone(ZoneInfo(p.tz)).date())
     r = {"created_at": created.isoformat(), "action": action, "symbol": symbol, "market": market, "mode": mode,
          "entry": entry, "stop": stop, "target_1": target_1, "qty": 10, "mc_expectancy_r": 0.3,
-         "history_expectancy_r": 0.2, "input_hash": h, "max_hold_bars": 15, "cost_per_share": 0.0}
+         "history_expectancy_r": 0.2, "input_hash": h, "max_hold_bars": 15, "cost_per_share": 0.0,
+         "last_bar": f"{prior.isoformat()}T00:00:00", "last_close": LAST_CLOSE}
     r.update(kw)
     return r
 
@@ -31,13 +41,22 @@ def write_audit(path, rows):
     path.write_text("".join((x if isinstance(x, str) else json.dumps(x)) + "\n" for x in rows), encoding="utf-8")
 
 
-def frame(bars: dict) -> pd.DataFrame:
-    """{date-string: (open, high, low, close)} -> daily OHLC frame."""
+def frame(bars: dict, market="NSE", prior=True) -> pd.DataFrame:
+    """{date-string: (open, high, low, close)} -> daily OHLC frame. prior=True prepends the ticket's last bar:
+    the trading day before the first date, closing at LAST_CLOSE (what row() logs), so the price scale checks."""
+    from nse_backtest.desk import calendars
+    from nse_backtest.desk.markets import get_profile
+    bars = dict(bars)
+    if prior and bars:
+        first = pd.Timestamp(next(iter(bars))).date()
+        before = calendars.previous_trading_day(get_profile(market), first)
+        bars = {before.isoformat(): (LAST_CLOSE,) * 4, **bars}
     idx = pd.DatetimeIndex([pd.Timestamp(d) for d in bars])
     return pd.DataFrame(list(bars.values()), index=idx, columns=["Open", "High", "Low", "Close"])
 
 
 WIN_BARS = {"2026-10-16": (101, 101.5, 99.5, 100.5), "2026-10-19": (100.5, 103.2, 100.1, 103)}
+PRE_OPEN_16 = datetime(2026, 10, 16, 9, 0, tzinfo=IST)  # before the open: the daily fill rule applies
 
 
 class Loader:
@@ -588,3 +607,56 @@ def test_cli_rejects_only_message(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "No valid TAKE verdicts for NSE (2 unreadable — see below)" in out
     assert "No TAKE verdicts logged yet" not in out
+
+
+# ---------------------------------------------------------------- review round R1
+
+class KwLoader(Loader):
+    """Loader that also records keyword arguments."""
+
+    def __call__(self, profile, symbol, *a, **k):
+        self.kwargs = getattr(self, "kwargs", []) + [k]
+        return super().__call__(profile, symbol, *a, **k)
+
+
+def test_r1_scoreboard_asks_for_unadjusted_daily_bars(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    ld = KwLoader({"ABC": frame(WIN_BARS)})
+    res = run(paths, ld)
+    assert ld.kwargs == [{"adjusted": False}] and res.outcomes[0].status is Status.WON
+
+
+def test_r1_bonus_after_ticket_is_unavailable_not_lost(paths):
+    # probe_adj: a 1:1 bonus after the ticket halves the history yfinance serves, even unadjusted
+    write_audit(paths[0], [row(datetime(2026, 9, 1, 18, 0, tzinfo=IST), entry=100.0, stop=95.0, target_1=110.0,
+                               last_bar="2026-09-01T00:00:00", last_close=101.0)])
+    days = pd.bdate_range("2026-09-01", periods=7)
+    raw = pd.DataFrame({"Open": [100, 101, 102, 105, 108, 56, 57], "High": [101.5, 102, 104, 108, 112, 57, 58],
+                        "Low": [99.5, 99.5, 101, 104, 107, 55, 56], "Close": [101, 101, 103, 107, 111, 56.5, 57.5]},
+                       index=days)
+    adj = raw.astype(float)
+    adj.iloc[:5] = adj.iloc[:5] / 2
+    o = run(paths, Loader({"ABC": adj})).outcomes[0]
+    assert o.status is Status.UNAVAILABLE and o.note.startswith("prices re-scaled since the ticket (split/bonus?)")
+    assert _cached(paths) == {}
+    paths[1].unlink(missing_ok=True)
+    assert run(paths, Loader({"ABC": raw})).outcomes[0].status is Status.WON
+
+
+def test_r1_row_without_last_bar_is_unavailable(paths):
+    r = row(PRE_OPEN_16)
+    del r["last_bar"], r["last_close"]
+    write_audit(paths[0], [r])
+    o = run(paths, Loader({"ABC": frame(WIN_BARS)})).outcomes[0]
+    assert o.status is Status.UNAVAILABLE and "last_bar" in o.note
+
+
+def test_r1_cache_matches_on_last_bar_and_last_close(paths):
+    write_audit(paths[0], [row(PRE_OPEN_16)])
+    run(paths, Loader({"ABC": frame(WIN_BARS)}))
+    (entry,) = _cached(paths).values()
+    assert entry["candidate"]["last_close"] == LAST_CLOSE and entry["candidate"]["last_bar"].startswith("2026-10-15")
+    write_audit(paths[0], [row(PRE_OPEN_16, last_close=50.0)])  # same key, different ticket scale
+    ld = Loader({"ABC": frame(WIN_BARS)})
+    o = run(paths, ld).outcomes[0]
+    assert ld.calls and o.status is Status.UNAVAILABLE

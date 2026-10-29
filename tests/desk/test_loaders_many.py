@@ -119,7 +119,7 @@ def test_after_close_fallback_does_not_reread_the_stale_cache(monkeypatch, cache
     _record(monkeypatch, pd.DataFrame())  # batch empty -> fallback
     seen = []
     monkeypatch.setattr(data_mod, "fetch_nse",
-                        lambda sym, start, end=None, exchange="NS", use_cache=True: seen.append(use_cache)
+                        lambda sym, start, end=None, exchange="NS", use_cache=True, adjusted=True: seen.append(use_cache)
                         or _daily_to("2026-11-09"))
     frames, errors = loaders.load_daily_many(NSE, ["INFY"], now=now)
     assert errors == {} and seen == [False]

@@ -82,16 +82,18 @@ def _finalise_daily(profile: MarketProfile, symbol: str, df: pd.DataFrame, now: 
     return df
 
 
-def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: datetime | None = None) -> pd.DataFrame:
-    """Completed daily bars. Today's bar is fetched when it exists and dropped while the session is open."""
+def load_daily(profile: MarketProfile, symbol: str, years: int = 4, *, now: datetime | None = None,
+               adjusted: bool = True) -> pd.DataFrame:
+    """Completed daily bars. Today's bar is fetched when it exists and dropped while the session is open.
+    adjusted=False: unadjusted bars (no dividend adjustment), as the scoreboard replays printed tickets."""
     from nse_backtest.data import fetch_nse
     now = _market_now(profile, now)
     today = now.date()
     start = (today - timedelta(days=int(365.25 * years))).isoformat()
     end = (today + timedelta(days=1)).isoformat()
-    df = fetch_nse(symbol, start, end=end, exchange=profile.exchange)
+    df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, adjusted=adjusted)
     if _needs_refetch(profile, df, now):
-        df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, use_cache=False)
+        df = fetch_nse(symbol, start, end=end, exchange=profile.exchange, use_cache=False, adjusted=adjusted)
     return _finalise_daily(profile, symbol, df, now)
 
 

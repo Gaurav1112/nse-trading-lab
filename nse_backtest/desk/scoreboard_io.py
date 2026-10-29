@@ -23,8 +23,8 @@ from . import calendars as cal
 from .markets import get_profile
 from .models import Mode
 from .scoreboard import (
-    SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, exit_status, load_candidates, realised_r,
-    resolve_intraday, resolve_swing, summarize, unavailable,
+    SCOREBOARD_VERSION, Candidate, Outcome, ScoreStats, Status, check_price_scale, exit_status, load_candidates,
+    realised_r, resolve_intraday, resolve_swing, summarize, unavailable,
 )
 
 Warn = Callable[[str], None] | None
@@ -37,7 +37,7 @@ INTRADAY_MAX_AGE_DAYS = 58  # yfinance serves 15-minute bars for the last 60 day
 FINAL = (Status.WON, Status.LOST, Status.TIME, Status.NOT_FILLED)
 _RESOLVED = (Status.WON, Status.LOST, Status.TIME)
 _CANDIDATE_FIELDS = ("market", "symbol", "mode", "entry", "stop", "target_1", "max_hold_bars", "cost_per_share",
-                     "qty")
+                     "qty", "last_bar", "last_close")
 
 
 @dataclass(frozen=True)
@@ -168,7 +168,8 @@ def _candidate_record(c: Candidate) -> dict:
     return {"market": c.market, "symbol": c.symbol, "mode": c.mode.value, "entry": c.entry, "stop": c.stop,
             "target_1": c.target_1, "max_hold_bars": c.max_hold_bars, "cost_per_share": c.cost_per_share,
             "qty": c.qty, "created_at": c.created_at.isoformat(), "mc_expectancy_r": c.mc_expectancy_r,
-            "history_expectancy_r": c.history_expectancy_r, "key": c.key}
+            "history_expectancy_r": c.history_expectancy_r, "key": c.key, "last_bar": c.last_bar,
+            "last_close": c.last_close}
 
 
 def _entry(o: Outcome) -> dict:
@@ -363,6 +364,11 @@ def _replay(c: Candidate, on_warning: Warn, fn, *args, **kw) -> Outcome:
         return unavailable(c, note)
 
 
+def _replay_swing(c: Candidate, daily: pd.DataFrame, **kw) -> Outcome:
+    """The swing replay, refused when the bars are no longer on the ticket's price scale."""
+    return check_price_scale(c, daily) or resolve_swing(c, daily, **kw)
+
+
 def _decided_on(o: Outcome) -> date | None:
     """The market-local date whose bars decided a final outcome (None when it cannot be told)."""
     c = o.candidate
@@ -411,13 +417,13 @@ def _resolve_group(cs: list[Candidate], mode: Mode, now: datetime, load_daily, l
     else:
         closed = cal.is_trading_day(profile, today) and now_l.time() >= cal.session_close_for(profile, today)
         try:
-            daily = load_daily(profile, symbol)
+            daily = load_daily(profile, symbol, adjusted=False)  # dividend-adjusted bars are not what was printed
         except Exception as e:  # noqa: BLE001
             for i, c in enumerate(cs):
                 out[i] = unavailable(c, f"daily bars unavailable: {_err(e)}")
         else:
             for i, c in enumerate(cs):  # fill_session_of cannot fail here: candidates_from screened it
-                out[i] = _replay(c, on_warning, resolve_swing, daily, fill_session=fill_session_of(c.market, c.created_at),
+                out[i] = _replay(c, on_warning, _replay_swing, daily, fill_session=fill_session_of(c.market, c.created_at),
                                  now=now, session_closed_today=closed)
     return [out[i] for i in range(len(cs))]
 

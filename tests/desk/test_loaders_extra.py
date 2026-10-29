@@ -625,3 +625,22 @@ def test_s2_fix1_pdt_walk_failure_is_unknown_not_a_crash(tmp_path, monkeypatch):
     _journal(tmp_path, [])
     ctx = loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW)
     assert ctx.day_trades_5d is None
+
+
+# ---- review round R1: load_daily passes `adjusted` through (the scoreboard asks for unadjusted bars)
+def test_r1_load_daily_adjusted_passthrough(monkeypatch):
+    import nse_backtest.data as data
+    seen = []
+
+    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
+        seen.append(adjusted)
+        return _daily_to("2026-10-28")
+    monkeypatch.setattr(data, "fetch_nse", fake)
+    tz = loaders.ZoneInfo(NSE.tz)
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz), adjusted=False)
+    assert seen == [True, False]
+    seen.clear()
+    monkeypatch.setattr(data, "fetch_nse", lambda *a, adjusted=True, **k: seen.append(adjusted) or _daily_to("2026-10-29"))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz), adjusted=False)
+    assert seen == [False, False]  # the after-close uncached refetch stays unadjusted
