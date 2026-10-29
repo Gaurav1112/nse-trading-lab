@@ -6,7 +6,13 @@
       "mcp__kite__cancel_order",
       "mcp__kite__place_gtt_order",
       "mcp__kite__modify_gtt_order",
-      "mcp__kite__delete_gtt_order"
+      "mcp__kite__delete_gtt_order",
+      "mcp__kite__place_*",
+      "mcp__kite__modify_*",
+      "mcp__kite__cancel_*",
+      "mcp__kite__delete_*",
+      "mcp__kite__exit_*",
+      "mcp__kite__convert_*"
     ]
   }
 }
