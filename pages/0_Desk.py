@@ -127,7 +127,9 @@ def render_verdict(v: DeskVerdict, profile, key: str, at: str | None = None, *, 
                f"notional {m(s.notional)} · costs {m(s.costs)}. {s.note}")
 
     st.markdown("**Odds** (expectancy in R first)")
-    if o is None:
+    if o is None and p.is_short:  # H5b replaces this with the short odds
+        st.info("Odds unavailable — short odds model arrives in the next update")
+    elif o is None:
         st.info("Odds unavailable — not enough history for a reliable estimate.")
     else:
         row1 = st.columns(4)
@@ -432,7 +434,8 @@ with tab_intra:
             for v in verdicts:
                 cur = desk_card.current_verdict(v, "intra")
                 stale = desk_card.stale_reason(cur, profile, now_m)
-                shown_v = (replace(cur, headline=f"{cur.action.value} {cur.plan.symbol} (stale — re-check)")
+                shown_v = (replace(cur, headline=f"{cur.action.value} {cur.plan.symbol}"
+                                   f"{' SHORT' if cur.plan.is_short else ''} (stale — re-check)")
                            if stale is not None else cur)
                 rows.append((cur, shown_v, stale))
             st.dataframe(pd.DataFrame([{

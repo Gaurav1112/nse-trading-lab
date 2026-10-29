@@ -17,7 +17,7 @@ from .checks import CheckContext, run_checks, stoploss_streak
 from .costs import DEFAULT_SPREAD, side_cost
 from .markets import MarketProfile
 from .models import DeskVerdict, LiveQuote, Limits, Mode, Side
-from .plan import build_plan, or_relative_volume
+from .plan import build_plan, or_volume
 from .sizing import size_position
 from .verdict import decide
 
@@ -58,7 +58,8 @@ def check_trade(df: pd.DataFrame, symbol: str, profile: MarketProfile, mode: Mod
     plan = build_plan(df, symbol, mode, profile, entry=entry, stop=stop, target=target, side=side)
     ctx = replace(ctx, price_is_live=quote is not None, quote_as_of=quote.as_of if quote is not None else None)
     if side is Side.SHORT:
-        ctx = replace(ctx, or_rel_volume=or_relative_volume(df))
+        ratio, why = or_volume(df)
+        ctx = replace(ctx, or_rel_volume=ratio, or_rel_volume_why=why)
     current_price = quote.price if quote is not None else plan.last_close
     halve = stoploss_streak(ctx.journal, profile.code)
     spread = spread_pct_for_df(df) if mode is Mode.SWING else DEFAULT_SPREAD

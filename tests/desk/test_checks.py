@@ -705,10 +705,10 @@ def sby(cs):
 def test_short_checks_baseline():
     cs = run_checks(splan(), SIZE, None, sctx(), current_price=100.0)
     names = [c.name for c in cs]
-    assert len(cs) == 17
-    for gone in ("monte_carlo", "setup_history", "robustness"):  # long-only odds: replaced by short_edge
-        assert gone not in names
-    assert {"short_edge", "short_eligibility", "relative_volume"} <= set(names)
+    assert len(cs) == 18
+    for gone in ("monte_carlo", "setup_history", "robustness", "short_eligibility"):
+        assert gone not in names  # long-only odds replaced by short_edge; eligibility split in two
+    assert names[-3:] == ["short_regime", "short_fno", "relative_volume"] and "short_edge" in names
     bad = [c for c in cs if c.status is not Status.PASS]
     assert [c.name for c in bad] == ["short_edge"]  # every short is capped until the edge is proven
     assert bad[0].status is Status.WARN and bad[0].reason == SHORT_EDGE_UNPROVEN
@@ -726,23 +726,33 @@ def test_short_edge_hook_is_a_warn_until_the_gate_lands():
     (dict(regime="TRENDING"), "ORB shorts are for HOSTILE days only (regime TRENDING)"),
     (dict(regime="MIXED"), "ORB shorts are for HOSTILE days only (regime MIXED)"),
     (dict(regime=None), "ORB shorts are for HOSTILE days only (regime unknown)"),
+])
+def test_short_regime_blocks_off_hostile_days(override, reason):
+    c = sby(run_checks(splan(), SIZE, None, sctx(**override), current_price=100.0))
+    assert c["short_regime"].status is Status.BLOCK and c["short_regime"].reason == reason
+    assert c["short_fno"].status is Status.PASS  # F&O membership is a separate question
+
+
+@pytest.mark.parametrize("override, reason", [
     (dict(fno=None), "could not verify F&O eligibility"),
     (dict(fno=frozenset({"XYZ"})), "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
 ])
-def test_short_eligibility_blocks(override, reason):
-    c = sby(run_checks(splan(), SIZE, None, sctx(**override), current_price=100.0))["short_eligibility"]
-    assert c.status is Status.BLOCK and c.reason == reason
+def test_short_fno_blocks(override, reason):
+    c = sby(run_checks(splan(), SIZE, None, sctx(**override), current_price=100.0))
+    assert c["short_fno"].status is Status.BLOCK and c["short_fno"].reason == reason
+    assert c["short_regime"].status is Status.PASS
 
 
-def test_short_eligibility_is_nse_only():
-    c = sby(run_checks(splan(market="US"), SIZE, None, sctx(profile=US), current_price=100.0))["short_eligibility"]
-    assert c.status is Status.BLOCK and c.reason == "Shorts are NSE only"
+def test_short_regime_and_fno_are_nse_only():
+    c = sby(run_checks(splan(market="US"), SIZE, None, sctx(profile=US), current_price=100.0))
+    assert (c["short_regime"].status, c["short_regime"].reason) == (Status.BLOCK, "Shorts are NSE only")
+    assert (c["short_fno"].status, c["short_fno"].reason) == (Status.BLOCK, "Shorts are NSE only (no F&O list)")
 
 
-def test_short_eligibility_pass_reason_and_symbol_suffix():
+def test_short_pass_reasons_and_symbol_suffix():
     c = sby(run_checks(replace(splan(), symbol="ABC.NS"), SIZE, None, sctx(), current_price=100.0))
-    assert c["short_eligibility"].status is Status.PASS
-    assert c["short_eligibility"].reason == "ABC is an F&O stock on a HOSTILE NSE day"
+    assert (c["short_regime"].status, c["short_regime"].reason) == (Status.PASS, "HOSTILE NSE day: ORB shorts allowed")
+    assert (c["short_fno"].status, c["short_fno"].reason) == (Status.PASS, "ABC is an F&O stock")
 
 
 @pytest.mark.parametrize("ban, status, reason", [
@@ -770,6 +780,13 @@ def test_short_ban_list_fails_closed(ban, status, reason):
 def test_short_relative_volume(ratio, status, reason):
     c = sby(run_checks(splan(), SIZE, None, sctx(or_rel_volume=ratio), current_price=100.0))["relative_volume"]
     assert (c.status, c.reason) == (status, reason)
+
+
+def test_short_relative_volume_says_why_it_is_missing():
+    c = sby(run_checks(splan(), SIZE, None, sctx(or_rel_volume=None, or_rel_volume_why="opening volume unavailable"),
+                       current_price=100.0))["relative_volume"]
+    assert (c.status, c.reason) == (
+        Status.WARN, "Relative volume of the opening bar could not be measured (opening volume unavailable)")
 
 
 def test_short_live_price_at_or_above_the_stop_blocks():

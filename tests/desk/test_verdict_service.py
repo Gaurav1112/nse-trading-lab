@@ -309,14 +309,15 @@ def _emitted_names() -> set[str]:
 
 def test_h3_every_check_name_is_mapped_to_exactly_one_group():
     names = _emitted_names()
-    assert len(names) == 20  # the 17 long checks + the short-only short_edge, short_eligibility, relative_volume
+    assert len(names) == 21  # the 17 long checks + short_edge, short_regime, short_fno, relative_volume
     assert set(_verdict.CHECK_GROUPS) == names  # mapped explicitly, nothing left to the "limits" default
-    assert set(_verdict.CHECK_GROUPS.values()) == {"market", "odds", "data", "limits"}
+    assert set(_verdict.CHECK_GROUPS.values()) == {"market", "odds", "data", "safety", "limits"}
+    assert _verdict.CHECK_GROUPS["short_regime"] == "market" and _verdict.CHECK_GROUPS["short_fno"] == "safety"
     assert _verdict.CHECK_GROUPS["regime"] == "market"
     assert {n for n, g in _verdict.CHECK_GROUPS.items() if g == "data"} == {"freshness", "live_price", "gap"}
     for n in ("monte_carlo", "setup_history", "robustness", "short_edge", "relative_volume"):
         assert _verdict.CHECK_GROUPS[n] == "odds"
-    for n in ("short_eligibility", "size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
+    for n in ("size", "risk_governor", "daily_loss", "pdt", "ban_list", "stoploss_streak", "liquidity",
               "entry_window", "reward_risk"):
         assert _verdict.CHECK_GROUPS[n] == "limits"
 
@@ -327,7 +328,7 @@ def test_h3_block_groups_splits_non_pass_checks_and_unknown_names_go_to_limits()
               Check("size", Status.PASS, "ok"), Check("window", Status.BLOCK, "w"))
     v = decide(P, S, None, checks, NSE, 100.0, NOW)
     g = _verdict.block_groups(v)
-    assert list(g) == ["market", "odds", "data", "limits"]
+    assert list(g) == ["market", "odds", "data", "safety", "limits"]
     assert [c.name for c in g["market"]] == ["regime"] and [c.name for c in g["odds"]] == ["monte_carlo"]
     assert [c.name for c in g["data"]] == ["freshness"]
     assert [c.name for c in g["limits"]] == ["liquidity", "window"]  # PASS left out; unknown -> limits
@@ -535,7 +536,7 @@ def test_h5a_check_trade_short_end_to_end(tmp_path):
     assert v.plan.stop == pytest.approx(101 * k) and v.odds is None
     assert v.action is Action.WAIT and v.headline == f"WAIT ABC SHORT — {SHORT_EDGE_UNPROVEN}"
     names = {ck.name: ck for ck in v.checks}
-    assert names["short_eligibility"].status is Status.PASS
+    assert names["short_fno"].status is Status.PASS and names["short_regime"].status is Status.PASS
     assert names["relative_volume"].status is Status.WARN  # every opening bar trades the same volume here
     assert "1.00×" in names["relative_volume"].reason
     assert v.cost_per_share == pytest.approx(
@@ -564,3 +565,40 @@ def test_h5a_scoreboard_does_not_score_short_rows_yet(tmp_path):
     row = json.loads(path.read_text().splitlines()[-1])
     good, bad = scoreboard.load_candidates([row])
     assert good == [] and len(bad) == 1 and "short" in bad[0][1]
+
+
+
+# ---- H5a fix round 1: shorts on non-F&O or banned stocks are a "safety" BLOCK, never overridable ----
+@pytest.mark.parametrize("check", [
+    Check("short_fno", Status.BLOCK, "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
+    Check("short_fno", Status.BLOCK, "could not verify F&O eligibility"),
+    Check("ban_list", Status.BLOCK, "ABC is in the F&O ban — no intraday shorts"),
+    Check("ban_list", Status.BLOCK, "F&O ban list is stale (last fetched 2026-10-28) — no intraday shorts without today's list"),
+])
+def test_h5a_fix_safety_blocks_of_a_short(check):
+    v = decide(_short_plan(), S, None, EDGE_WARN + (check,), NSE, 99.8, NOW)
+    g = _verdict.block_groups(v)
+    assert [c.name for c in g["safety"]] == [check.name] and g["limits"] == []
+    assert _verdict.safety_blocked(v) == (check.reason,)
+
+
+def test_h5a_fix_a_long_ban_list_stays_a_limit_warn():
+    v = decide(P, S, None, (Check("ban_list", Status.WARN, "ABC is in the F&O ban — derivatives only"),), NSE,
+               100.0, NOW)
+    g = _verdict.block_groups(v)
+    assert [c.name for c in g["limits"]] == ["ban_list"] and g["safety"] == [] and _verdict.safety_blocked(v) == ()
+    assert _verdict.group_of("ban_list") == "limits"
+
+
+def test_h5a_fix_short_regime_is_market_advice():
+    v = decide(_short_plan(), S, None, EDGE_WARN + (Check("short_regime", Status.BLOCK, "r"),), NSE, 99.8, NOW)
+    g = _verdict.block_groups(v)
+    assert [c.name for c in g["market"]] == ["short_regime"] and _verdict.safety_blocked(v) == ()
+
+
+def test_h5a_fix_audit_refuses_a_safety_blocked_override(tmp_path):
+    from nse_backtest.desk.audit import append_override
+    v = decide(_short_plan(), S, None, EDGE_WARN + (Check("short_fno", Status.BLOCK, "x"),), NSE, 99.8, NOW)
+    with pytest.raises(ValueError, match="can't be taken"):
+        append_override(v, tmp_path / "a.jsonl", now=NOW)
+    assert not (tmp_path / "a.jsonl").exists()

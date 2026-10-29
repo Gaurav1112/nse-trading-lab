@@ -341,4 +341,13 @@ def test_short_card_ticket_only_on_confirmed_override():
     assert build_card(v, NSE, SHORT_LIMITS).ticket == ()
     c = build_card(v, NSE, SHORT_LIMITS, override_confirmed=True)
     assert c.ticket[0] == "SELL 362 X MIS SL trigger 100.00 limit 99.50"
-    assert c.ticket_header == "YOUR OVERRIDE — the desk said WAIT"
+    assert c.ticket_header == "YOUR OVERRIDE (SHORT) — the desk said WAIT"
+
+
+
+def test_short_card_safety_block_never_gives_an_override_ticket():
+    v = replace(_short_verdict(action=Action.SKIP),
+                checks=(Check("ban_list", Status.BLOCK, "ABC is in the F&O ban — no intraday shorts"),))
+    c = build_card(v, NSE, SHORT_LIMITS, override_confirmed=True)
+    assert c.ticket == () and c.ticket_header == ""
+    assert c.max_loss is not None  # the money is still shown

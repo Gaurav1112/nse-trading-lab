@@ -311,3 +311,45 @@ def test_h5a_merge_keeps_a_long_and_a_short_of_the_same_symbol():
                     plan=replace(long_.plan, side=Side.SHORT))
     out = session.merge_candidates(None, [long_, short, short])
     assert [(c.plan.symbol, c.plan.side) for c in out] == [("I1", Side.LONG), ("I1", Side.SHORT)]
+
+
+
+# ---- H5a fix round 1: CLI --choose refuses a short the exchange's rules forbid ----
+def _short_v(checks):
+    from nse_backtest.desk.models import Side
+    p = replace(PLAN, mode=Mode.INTRADAY, entry=100.0, stop=102.0, target_1=97.0, target_2=94.0, entry_limit=99.5,
+                side=Side.SHORT)
+    return DeskVerdict(Action.SKIP, "SKIP ABC SHORT — blocked", p, SIZING, None, checks, (), None, 99.8,
+                       "short".ljust(64, "y"), "2026-10-29T10:00:00+05:30")
+
+
+@pytest.mark.parametrize("check", [
+    Check("short_fno", Status.BLOCK, "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
+    Check("short_fno", Status.BLOCK, "could not verify F&O eligibility"),
+    Check("ban_list", Status.BLOCK, "ABC is in the F&O ban — no intraday shorts"),
+    Check("ban_list", Status.BLOCK, "F&O ban list is stale (last fetched 2026-10-28) — no intraday shorts without today's list"),
+])
+def test_h5a_fix_cli_choose_refuses_a_safety_blocked_short(desk, monkeypatch, capsys, tmp_path, check):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
+    _fake(monkeypatch, _short_v((check,)))
+    assert cli.main(["check", "ABC", "--choose"]) == 1
+    out = capsys.readouterr().out
+    assert f"--choose refused: this short can't be taken ({check.reason})." in out
+    assert "YOUR OVERRIDE" not in out and _audit_rows(tmp_path) == []
+    assert "Plan (intraday, short)" in out
+    assert cli.main(["check", "ABC"]) == 0
+    out = capsys.readouterr().out
+    assert f"This short can't be taken: {check.reason}" in out and "Add --choose" not in out
+
+
+def test_h5a_fix_cli_choose_allows_a_short_off_hostile_days(desk, monkeypatch, capsys, tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(cli, "market_now", lambda p: datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")))
+    _fake(monkeypatch, _short_v((Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only"),)))
+    assert cli.main(["check", "ABC", "--choose"]) == 0
+    out = capsys.readouterr().out
+    assert "YOUR OVERRIDE (SHORT) — the desk said SKIP" in out and len(_audit_rows(tmp_path)) == 1
+    assert "Odds: unavailable — short odds model arrives in the next update" in out

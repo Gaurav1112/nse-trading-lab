@@ -258,3 +258,19 @@ def test_or_relative_volume():
     zero = sessions15(n_days=25)
     zero["Volume"] = 0.0
     assert or_relative_volume(zero) is None
+
+
+
+def test_or_volume_nan_opening_bar_is_missing_not_the_second_bar():
+    from nse_backtest.desk.plan import or_relative_volume, or_volume
+    df = sessions15(n_days=25)
+    first_today = df.index[df.index.normalize() == df.index[-1].normalize()][0]
+    df.loc[first_today, "Volume"] = float("nan")
+    assert or_relative_volume(df) is None
+    assert or_volume(df) == (None, "opening volume unavailable")
+    assert or_volume(sessions15(n_days=25)) == (pytest.approx(1.0), "")
+    assert or_volume(sessions15(n_days=20)) == (None, "need 20 earlier sessions")
+    old = sessions15(n_days=21)  # 20 earlier sessions, one of them without an opening volume
+    first_old = old.index[old.index.normalize() == old.index[0].normalize()][0]
+    old.loc[first_old, "Volume"] = float("nan")  # an earlier session's missing opening volume is not the 2nd bar
+    assert or_volume(old) == (None, "need 20 earlier sessions")

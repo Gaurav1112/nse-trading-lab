@@ -161,16 +161,27 @@ def _short_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfil
 OR_VOLUME_SESSIONS = 20
 
 
-def or_relative_volume(df: pd.DataFrame, sessions: int = OR_VOLUME_SESSIONS) -> float | None:
-    """The last session's opening (first) bar volume over the median opening-bar volume of the ``sessions``
-    sessions before it; None when there is no Volume, fewer earlier sessions, or a non-positive median."""
+def or_volume(df: pd.DataFrame, sessions: int = OR_VOLUME_SESSIONS) -> tuple[float | None, str]:
+    """(ratio, why): the last session's opening-bar volume over the median opening-bar volume of the ``sessions``
+    sessions before it, or (None, the reason). The opening bar is each session's FIRST bar: a missing (NaN) volume
+    there is missing, never replaced by the second bar's; earlier sessions with a missing opening volume do not
+    count towards the ``sessions``."""
     if "Volume" not in df.columns or len(df) == 0:
-        return None
-    first = df.groupby(df.index.normalize(), sort=True)["Volume"].first()
-    if len(first) < sessions + 1:
-        return None
-    today, prior = float(first.iloc[-1]), first.iloc[-(sessions + 1):-1].astype(float)
+        return None, "opening volume unavailable"
+    vol = pd.to_numeric(df["Volume"], errors="coerce").astype(float)
+    first = vol.groupby(df.index.normalize(), sort=True).nth(0)
+    today = float(first.iloc[-1])
+    if not (math.isfinite(today) and today >= 0):
+        return None, "opening volume unavailable"
+    prior = first.iloc[:-1].dropna().tail(sessions)
+    if len(prior) < sessions:
+        return None, f"need {sessions} earlier sessions"
     med = float(prior.median())
-    if not (math.isfinite(today) and math.isfinite(med) and med > 0 and today >= 0):
-        return None
-    return today / med
+    if not (math.isfinite(med) and med > 0):
+        return None, "opening volume unavailable"
+    return today / med, ""
+
+
+def or_relative_volume(df: pd.DataFrame, sessions: int = OR_VOLUME_SESSIONS) -> float | None:
+    """or_volume's ratio alone (None when it cannot be measured)."""
+    return or_volume(df, sessions)[0]

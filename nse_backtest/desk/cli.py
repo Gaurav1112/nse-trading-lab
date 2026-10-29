@@ -18,7 +18,7 @@ from .models import Action, DeskVerdict, Mode, summary_fields
 from .positions import review_positions
 from .scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER, AuditReadError
 from .tradecard import DAILY_LOSS_NOTE, build_card
-from .verdict import data_broken, is_quick
+from .verdict import data_broken, is_quick, safety_blocked
 
 FOOTER = "Not financial advice. Nothing was placed. Paper-trade until your record matches the odds."
 PLAN_UNIVERSE_LIMIT: int | None = None  # None = whole universe
@@ -65,11 +65,13 @@ def _r(x) -> str:
 def format_verdict(v: DeskVerdict, profile, *, ticket: bool = True) -> list[str]:
     m, p, s, o = profile.money, v.plan, v.sizing, v.odds
     lines = [v.headline, ""]
-    lines.append(f"Plan ({p.mode.value}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
+    lines.append(f"Plan ({p.mode.value}{', short' if p.is_short else ''}): entry {m(p.entry)}  stop {m(p.stop)}  T1 {m(p.target_1)}  "
                  f"T2 {m(p.target_2)}  R {m(p.risk_per_share)}/share  basis: {p.stop_basis}")
     lines.append(f"Sizing: qty {s.qty}, binding limit {s.binding_limit}, risk {m(s.risk_amount)}, "
                  f"notional {m(s.notional)}, costs {m(s.costs)}. {s.note}")
-    if o is None:
+    if o is None and p.is_short:  # H5b replaces this with the short odds
+        lines.append("Odds: unavailable — short odds model arrives in the next update")
+    elif o is None:
         lines.append("Odds: unavailable (not enough history for a reliable estimate)")
     else:
         lines.append(f"Odds ({o.replays} replays): P(target) {_pct(o.p_target)}  P(stop) {_pct(o.p_stop)}  "
@@ -166,6 +168,10 @@ def cmd_check(a, profile) -> int:
     if broken:  # broken inputs are not an opinion to override: check again once the data is fixed
         refused = f"--choose refused: data is broken ({'; '.join(broken)}) — re-check before choosing."
         choose = False
+    unsafe = safety_blocked(v) if choose else ()
+    if unsafe:  # the exchange's rules, not the desk's opinion: never overridden
+        refused = f"--choose refused: this short can't be taken ({'; '.join(unsafe)})."
+        choose = False
     card = build_card(v, profile, limits, qty=a.qty, override_confirmed=choose)
     logged = False
     if choose and card.ticket:
@@ -200,6 +206,8 @@ def cmd_check(a, profile) -> int:
         lines += ["", "No ticket: the desk sized 0 shares — add --qty N to choose this trade."]
     elif (broken_now := data_broken(v)):  # no override is offered on broken data
         lines += ["", f"Data is broken ({'; '.join(broken_now)}) — re-check before choosing."]
+    elif (unsafe_now := safety_blocked(v)):  # nor on a short the exchange's rules forbid
+        lines += [""] + [f"This short can't be taken: {r}" for r in unsafe_now]
     else:
         now = " now" if v.action is Action.WAIT else ""
         lines += ["", f"The desk says {v.action.value}. Add --choose to take it{now} anyway "

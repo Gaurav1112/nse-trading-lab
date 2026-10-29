@@ -33,10 +33,11 @@ class CheckContext:
     journal_readable: bool = True
     quote_as_of: datetime | None = None  # tz-aware time of the live quote
     price_is_live: bool = False  # True only when the current price came from a live quote
-    # Shorts only (longs never read these): NSE's F&O underlyings (None = could not verify -> short_eligibility
+    # Shorts only (longs never read these): NSE's F&O underlyings (None = could not verify -> short_fno
     # BLOCKs) and the opening bar's volume over its 20-session median (None = not measured -> relative_volume WARNs).
     fno: frozenset[str] | None = None
     or_rel_volume: float | None = None
+    or_rel_volume_why: str = ""  # why or_rel_volume is None (shown in the WARN)
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -173,24 +174,32 @@ def short_edge_check(ctx: CheckContext) -> Check:
     return _ck("short_edge", Status.WARN, SHORT_EDGE_UNPROVEN)
 
 
-def _short_eligibility(prof: MarketProfile, regime: str, sym: str, fno: frozenset[str] | None) -> Check:
+def _short_regime(prof: MarketProfile, regime: str) -> Check:
+    """NSE and HOSTILE: market advice (overridable as the owner's call)."""
+    if prof.code != "NSE":
+        return _ck("short_regime", Status.BLOCK, "Shorts are NSE only")
+    if regime != "HOSTILE":
+        return _ck("short_regime", Status.BLOCK, f"ORB shorts are for HOSTILE days only (regime {regime or 'unknown'})")
+    return _ck("short_regime", Status.PASS, "HOSTILE NSE day: ORB shorts allowed")
+
+
+def _short_fno(prof: MarketProfile, sym: str, fno: frozenset[str] | None) -> Check:
+    """F&O membership (circuit-lock / auction risk outside it): a safety BLOCK, never overridable."""
     B = Status.BLOCK
     if prof.code != "NSE":
-        return _ck("short_eligibility", B, "Shorts are NSE only")
-    if regime != "HOSTILE":
-        return _ck("short_eligibility", B, f"ORB shorts are for HOSTILE days only (regime {regime or 'unknown'})")
+        return _ck("short_fno", B, "Shorts are NSE only (no F&O list)")
     if fno is None:
-        return _ck("short_eligibility", B, "could not verify F&O eligibility")
+        return _ck("short_fno", B, "could not verify F&O eligibility")
     if sym not in fno:
-        return _ck("short_eligibility", B, f"{sym} is not an F&O stock: intraday shorts are F&O stocks only")
-    return _ck("short_eligibility", Status.PASS, f"{sym} is an F&O stock on a HOSTILE NSE day")
+        return _ck("short_fno", B, f"{sym} is not an F&O stock: intraday shorts are F&O stocks only")
+    return _ck("short_fno", Status.PASS, f"{sym} is an F&O stock")
 
 
-def _relative_volume(ratio) -> Check:
+def _relative_volume(ratio, why: str = "") -> Check:
     r = _num(ratio)
     if r is None:
         return _ck("relative_volume", Status.WARN,
-                   "Relative volume of the opening bar could not be measured (need 20 earlier sessions)")
+                   f"Relative volume of the opening bar could not be measured ({why or 'need 20 earlier sessions'})")
     if r < SHORT_REL_VOLUME_MIN - 1e-12:
         return _ck("relative_volume", Status.WARN,
                    f"Opening bar volume is only {r:.2f}× its 20-session median (want at least {SHORT_REL_VOLUME_MIN}×)")
@@ -502,9 +511,10 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     else:
         out.append(_ck("pdt", P, "Pattern day trader guard does not apply or is within limits"))
 
-    # 18-19 shorts only: who may be shorted today, and whether the breakdown has volume behind it
+    # 18-20 shorts only: is it a short day, may this stock be shorted, and has the breakdown volume behind it
     if short:
-        out.append(_short_eligibility(prof, r, sym, ctx.fno))
-        out.append(_relative_volume(ctx.or_rel_volume))
+        out.append(_short_regime(prof, r))
+        out.append(_short_fno(prof, sym, ctx.fno))
+        out.append(_relative_volume(ctx.or_rel_volume, ctx.or_rel_volume_why))
 
     return out

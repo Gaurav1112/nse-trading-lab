@@ -114,26 +114,38 @@ CHECK_GROUPS: dict[str, str] = {
     "freshness": "data", "live_price": "data", "gap": "data",
     "size": "limits", "risk_governor": "limits", "daily_loss": "limits", "pdt": "limits", "ban_list": "limits",
     "stoploss_streak": "limits", "liquidity": "limits", "entry_window": "limits", "reward_risk": "limits",
-    # shorts: the edge gate and the volume behind the breakdown are advice; who may be shorted is the exchange's rule
-    "short_edge": "odds", "relative_volume": "odds", "short_eligibility": "limits",
+    # shorts: a non-HOSTILE day is market advice; the edge gate and the volume behind the breakdown are odds; F&O
+    # membership is "safety" (circuit-lock and auction risk): never overridable, like broken data
+    "short_regime": "market", "short_edge": "odds", "relative_volume": "odds", "short_fno": "safety",
 }
-GROUPS = ("market", "odds", "data", "limits")
+GROUPS = ("market", "odds", "data", "safety", "limits")
+# Checks that are "safety" only on a short (a long's F&O ban is a WARN about derivatives, a limit).
+SHORT_SAFETY = frozenset({"ban_list"})
 ADVICE_GROUPS = frozenset({"market", "odds"})
 
 
-def group_of(name: str) -> str:
-    """The group of a check name; an unknown name is treated as a limit (red, never advice)."""
+def group_of(name: str, side: Side = Side.LONG) -> str:
+    """The group of a check name for a plan of ``side``; an unknown name is treated as a limit (red, never advice).
+    On a short, ban_list is "safety"."""
+    if side is Side.SHORT and name in SHORT_SAFETY:
+        return "safety"
     return CHECK_GROUPS.get(name, "limits")
 
 
 def block_groups(v: DeskVerdict) -> dict[str, list[models.Check]]:
     """The verdict's BLOCK and WARN checks by group, in check order; PASS checks are left out. Keys are always
-    "market", "odds", "data", "limits" in that order."""
+    "market", "odds", "data", "safety", "limits" in that order."""
     out: dict[str, list[models.Check]] = {g: [] for g in GROUPS}
     for c in v.checks:
         if c.status is not Status.PASS:
-            out[group_of(c.name)].append(c)
+            out[group_of(c.name, v.plan.side)].append(c)
     return out
+
+
+def safety_blocked(v: DeskVerdict) -> tuple[str, ...]:
+    """The reasons of the verdict's "safety" BLOCKs: non-empty means the trade can't be taken at all (a short on a
+    non-F&O or banned stock, or with either list unverified) — no override, anywhere."""
+    return tuple(c.reason for c in block_groups(v)["safety"] if c.status is Status.BLOCK)
 
 
 def data_broken(v: DeskVerdict) -> tuple[str, ...]:

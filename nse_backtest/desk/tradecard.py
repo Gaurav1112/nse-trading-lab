@@ -7,7 +7,7 @@ from .costs import side_cost
 from .markets import MarketProfile
 from .models import Action, DeskVerdict, Limits, Mode, Side, Sizing, Status
 from .sizing import loss_at_stop, worst_entry
-from .verdict import market_day, regime_override_note, ticket_lines
+from .verdict import market_day, regime_override_note, safety_blocked, ticket_lines
 
 GAP_NOTE = "A gap through the stop can lose more than this."
 DAILY_LOSS_NOTE = ("The daily-loss line compares this trade alone with the daily loss limit; losses already taken "
@@ -140,7 +140,7 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
     breaches = _breaches(limits, risk_pct, deployed_pct, risk_pct) if is_override else ()
     sizing = base if n == base.qty else replace(base, qty=n, risk_amount=max_loss, notional=notional,
                                                 costs=cost, note=f"{n} shares (your quantity)")
-    shown = taken or override_confirmed
+    shown = taken or (override_confirmed and not safety_blocked(v))  # a safety BLOCK has no override ticket
     return TradeCard(
         **common, sizing=sizing, cost=cost, max_loss=max_loss, max_loss_at_trigger=max_loss_at_trigger,
         fill_note=_fill_note(v, profile, n),
@@ -151,4 +151,5 @@ def build_card(v: DeskVerdict, profile: MarketProfile, limits: Limits, *, qty: i
         ticket=(ticket_lines(plan, sizing, profile, current_price=v.current_price,
                              day=market_day(v.created_at, profile)) if shown else ()),
         ticket_header=((regime_override_note(v, profile, notional=notional)
-                        or f"YOUR OVERRIDE — the desk said {v.action.value}") if shown and not taken else ""))
+                        or f"YOUR OVERRIDE{' (SHORT)' if short else ''} — the desk said {v.action.value}")
+                       if shown and not taken else ""))

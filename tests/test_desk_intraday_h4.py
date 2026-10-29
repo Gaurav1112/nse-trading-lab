@@ -2,6 +2,7 @@
 from dataclasses import replace
 
 import pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from nse_backtest.desk.markets import NSE, universe
@@ -128,3 +129,45 @@ def test_h5a_stale_short_recheck_keeps_the_side(monkeypatch, tmp_path):
     next(b for b in at.tabs[4].button if b.label == "Open card").click().run()
     next(b for b in at.tabs[4].button if b.label == "Re-check").click().run()
     assert asked and asked[0].get("side") is Side.SHORT
+
+
+
+# ---- H5a fix round 1: safety-blocked shorts have no override anywhere; off-HOSTILE shorts do ----
+@pytest.mark.parametrize("check", [
+    Check("short_fno", Status.BLOCK, "ABC is not an F&O stock: intraday shorts are F&O stocks only"),
+    Check("short_fno", Status.BLOCK, "could not verify F&O eligibility"),
+    Check("ban_list", Status.BLOCK, "ABC is in the F&O ban — no intraday shorts"),
+    Check("ban_list", Status.BLOCK, "F&O ban list is stale (last fetched 2026-10-28) — no intraday shorts without today's list"),
+])
+def test_h5a_fix_safety_blocked_short_card_has_no_override(monkeypatch, tmp_path, check):
+    v = replace(_short(monkeypatch, tmp_path), action=Action.SKIP, headline="SKIP ABC SHORT — blocked",
+                checks=(check,))
+    at, seen = _tab(monkeypatch, tmp_path, [v])
+    next(b for b in at.tabs[4].button if b.label == "Open card").click().run()
+    assert not at.exception
+    assert f"This short can't be taken: {check.reason}" in _texts(at.tabs[4].error)
+    assert not any(c.label.startswith("I choose this anyway") for c in at.tabs[4].checkbox)
+    assert seen["override"] == [] and not at.tabs[4].code
+
+
+def test_h5a_fix_off_hostile_short_is_overridable_with_the_market_banner(monkeypatch, tmp_path):
+    v = replace(_short(monkeypatch, tmp_path), action=Action.SKIP, headline="SKIP ABC SHORT — blocked",
+                checks=(Check("short_regime", Status.BLOCK, "ORB shorts are for HOSTILE days only (regime MIXED)"),))
+    at, seen = _tab(monkeypatch, tmp_path, [v])
+    next(b for b in at.tabs[4].button if b.label == "Open card").click().run()
+    assert "Market says sit out" in _texts(at.tabs[4].warning)
+    next(c for c in at.tabs[4].checkbox if c.label == "I choose this anyway").check().run()
+    assert not at.exception and len(seen["override"]) == 1
+    assert "YOUR OVERRIDE (SHORT) — the desk said SKIP" in _texts(at.tabs[4].warning)
+
+
+def test_h5a_fix_stale_short_headline_keeps_short(monkeypatch, tmp_path):
+    v = _short(monkeypatch, tmp_path, minutes_old=20)
+    at, _ = _tab(monkeypatch, tmp_path, [v])
+    assert list(at.tabs[4].dataframe[0].value["Headline"]) == ["WAIT ABC SHORT (stale — re-check)"]
+
+
+def test_h5a_fix_short_odds_caption(monkeypatch, tmp_path):
+    v = _short(monkeypatch, tmp_path)
+    at, _ = _tab(monkeypatch, tmp_path, [v])
+    assert "Odds unavailable — short odds model arrives in the next update" in _texts(at.tabs[4].info)

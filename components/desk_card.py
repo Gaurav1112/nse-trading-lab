@@ -22,7 +22,7 @@ from nse_backtest.desk import calendars as cal
 from nse_backtest.desk.models import Action, DeskVerdict, Mode, Status
 from nse_backtest.desk.textsafe import md_escape, safe_url, shown
 from nse_backtest.desk.tradecard import DAILY_LOSS_NOTE, build_card
-from nse_backtest.desk.verdict import block_groups, data_broken, is_quick
+from nse_backtest.desk.verdict import block_groups, data_broken, is_quick, safety_blocked
 
 NOT_A_FORECAST = charts.NOT_A_FORECAST
 ACTION_COLOR = {"TAKE": "#00C46A", "WAIT": "#FFB800", "SKIP": "#FF3355"}
@@ -210,13 +210,16 @@ def _reasons(v: DeskVerdict, flips=()) -> None:
     advice = [c for c in g["market"] if c.status is not Status.BLOCK] + g["odds"]
     if advice:
         st.warning("**Advice** — the market and the desk's odds on this setup:\n\n" + _bullets(advice))
+    safety = [c for c in g["safety"] if c.status is Status.BLOCK]
+    if safety:
+        st.error("\n\n".join(f"This short can't be taken: {c.reason}" for c in safety))
     problems = [c for c in g["data"] + g["limits"] if c.status is Status.BLOCK]
     if problems:
         st.error(f"**Real problems** — the desk says {v.action.value}:\n\n" + _bullets(problems))
-    cautions = [c for c in g["data"] + g["limits"] if c.status is not Status.BLOCK]
+    cautions = [c for c in g["data"] + g["safety"] + g["limits"] if c.status is not Status.BLOCK]
     if cautions:
         st.warning("**Check before entering:**\n\n" + _bullets(cautions))
-    if not (market or advice or problems or cautions):
+    if not (market or advice or safety or problems or cautions):
         st.error(f"The desk says {v.action.value}:\n\n- {v.headline}")
 
 
@@ -348,6 +351,10 @@ def _ticket(v: DeskVerdict, card, profile, limits, qty, wkey: str, key: str = ""
     if broken:  # broken inputs are not an opinion to override: no ticket, no override box, only a Re-check
         _recheck(v, profile, limits, key, wkey,
                  f"Data is broken ({'; '.join(broken)}) — re-check before choosing", broken=True)
+        return
+    unsafe = safety_blocked(v)
+    if unsafe:  # the exchange's rules, not the desk's opinion: no ticket, no override box
+        st.error("\n\n".join(f"This short can't be taken: {r}" for r in unsafe))
         return
     if v.action is Action.TAKE:
         if card.ticket:
