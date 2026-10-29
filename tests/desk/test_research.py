@@ -39,8 +39,28 @@ def test_run_skill_garbage():
     assert run_skill(FAKE, ["garbage"]) == Unavailable("bad output")
 
 
-def test_run_skill_exit1_with_json_is_accepted():
-    assert run_skill(FAKE, ["empty1"]) == {"items": []}
+def test_run_skill_exit1_with_json_needs_ok_codes():
+    assert isinstance(run_skill(FAKE, ["empty1"]), Unavailable)
+    assert run_skill(FAKE, ["empty1"], ok_codes=(0, 1)) == {"items": []}
+
+
+def test_run_skill_env_override_is_filtered(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["env"] = kw["env"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(research.subprocess, "run", fake_run)
+    run_skill(FAKE, [], env={"SEC_USER_AGENT": "A b@c.d", "LD_PRELOAD": "x", "PYTHONPATH": "y"})
+    assert set(seen["env"]) <= {"PATH", "HOME", "SEC_USER_AGENT"}
+    assert seen["env"]["SEC_USER_AGENT"] == "A b@c.d"
+
+
+def test_scrub_keeps_urls_strips_paths():
+    assert research._scrub("HTTP 404 for https://data.sec.gov/api/x/CIK1.json") == \
+        "HTTP 404 for https://data.sec.gov/api/x/CIK1.json"
+    assert research._scrub("no file /var/tmp/abc/yahoo-ACME.xml") == "no file yahoo-ACME.xml"
 
 
 def test_run_skill_missing_script():
@@ -167,21 +187,30 @@ def test_nse_research_missing_and_invalid():
     assert any("dividend" in n.lower() for n in out.notes)
 
 
-def test_isolation_no_decision_module_imports_research():
-    names = "checks verdict service plan sizing timemachine daily intraday scoreboard scoreboard_io " \
-            "tradecard projections charts fills".split()
-    for n in names:
-        tree = ast.parse((DESK / f"{n}.py").read_text())
+ALLOW_RESEARCH_IMPORTERS: set[str] = set()  # the page lives in pages/, so none for now
+
+
+def test_isolation_no_desk_module_imports_research():
+    scanned = 0
+    for path in sorted(DESK.glob("*.py")):
+        if path.stem in ALLOW_RESEARCH_IMPORTERS | {"research"}:
+            continue
+        scanned += 1
+        tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 mods = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom):
                 mods = [(node.module or "")] + [f"{node.module}.{a.name}" for a in node.names]
-                if node.level:
-                    mods += [a.name for a in node.names]
+                mods += [a.name for a in node.names]
             else:
+                if isinstance(node, ast.Constant) and node.value in ("research", "nse_backtest.desk.research"):
+                    assert False, (path.name, "string reference to research")
                 continue
-            assert not any(m.split(".")[-1] == "research" for m in mods), (n, mods)
+            assert not any(m.split(".")[-1] == "research" for m in mods), (path.name, mods)
+        src = path.read_text()
+        assert not ("importlib" in src and "research" in src), (path.name, "importlib + research")
+    assert scanned >= 20
 
 
 def test_research_imports_only_markets_from_desk():
@@ -196,3 +225,43 @@ def test_research_imports_only_markets_from_desk():
                     mod == "nse_backtest.desk" and all(a.name == "markets" for a in node.names))
         elif isinstance(node, ast.Import):
             assert not any(a.name.startswith("nse_backtest.desk") for a in node.names)
+
+
+def _offline_runner(tmp_path, facts=None):
+    def runner(script, args, **kw):
+        if script.name == "news.py":
+            return run_skill(script, [*args, "--offline", str(tmp_path)], **kw)
+        return facts if facts is not None else Unavailable("no facts")
+    return runner
+
+
+def test_real_news_offline_failure_is_unavailable(monkeypatch, tmp_path):
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    out = us_research("ACME", runner=_offline_runner(tmp_path))
+    assert isinstance(out, Unavailable)
+    assert out.reason.startswith("headlines for ACME:") and str(tmp_path) not in out.reason
+
+
+def test_real_news_offline_failure_with_facts_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("SEC_USER_AGENT", "Test Person test@example.org")
+
+    def runner(script, args, **kw):
+        if script.name == "news.py":
+            return run_skill(script, [*args, "--offline", str(tmp_path)], **kw)
+        return FACTS
+    out = us_research("ACME", runner=runner)
+    assert isinstance(out, Research)
+    assert [i.kind for i in out.items] == ["earnings"]
+    assert any(n.startswith("headlines unavailable: headlines for ACME:") for n in out.notes)
+
+
+def test_news_called_with_exit_1_allowed(monkeypatch):
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    seen = {}
+
+    def runner(script, args, **kw):
+        seen[script.name] = kw
+        return {"items": [], "notes": []}
+    out = us_research("ACME", runner=runner)
+    assert seen["news.py"]["ok_codes"] == (0, 1)
+    assert isinstance(out, Research) and out.items == ()

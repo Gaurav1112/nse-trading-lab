@@ -38,7 +38,7 @@ _US_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")  # same rule as news.py validate_t
 _SKILLS = Path(__file__).resolve().parents[2] / ".claude" / "skills"
 NEWS_PY = _SKILLS / "trader-news" / "news.py"
 FACTS_PY = _SKILLS / "trader-analyst" / "facts.py"
-_PATH_RE = re.compile(r"(?<![\w.])(?:[A-Za-z]:)?[\\/][^\s'\"]*")
+_PATH_RE = re.compile(r"(?<![\w.:/])(?:[A-Za-z]:)?[\\/][^\s'\"]*")
 
 
 @dataclass(frozen=True)
@@ -67,13 +67,16 @@ def _scrub(text: str) -> str:
     return _PATH_RE.sub(lambda m: re.split(r"[\\/]", m.group(0).rstrip("/\\"))[-1] or "", text)[:200]
 
 
+_ENV_KEYS = ("PATH", "HOME", "SEC_USER_AGENT")
+
+
 def run_skill(script: Path, args: list[str], *, timeout: float = DEFAULT_TIMEOUT,
-              env: dict | None = None) -> dict | Unavailable:
+              env: dict | None = None, ok_codes: tuple[int, ...] = (0,)) -> dict | Unavailable:
     """Run one vendored script isolated; return its parsed JSON (a list is wrapped as {"results": ...})."""
     script = Path(script)
-    child_env = {k: os.environ[k] for k in ("PATH", "HOME", "SEC_USER_AGENT") if k in os.environ}
+    child_env = {k: os.environ[k] for k in _ENV_KEYS if k in os.environ}
     if env:
-        child_env.update(env)
+        child_env.update({k: v for k, v in env.items() if k in _ENV_KEYS})
     try:
         with tempfile.TemporaryDirectory() as cwd:
             proc = subprocess.run([sys.executable, "-I", str(script), *args], cwd=cwd, env=child_env,
@@ -86,8 +89,8 @@ def run_skill(script: Path, args: list[str], *, timeout: float = DEFAULT_TIMEOUT
         data = json.loads(proc.stdout)
     except ValueError:
         data = None
-    # news.py exits 1 when nothing is new but still prints its JSON.
-    if proc.returncode in (0, 1) and isinstance(data, (dict, list)):
+    # ok_codes lets news.py's "exit 1, nothing new" through; callers must still check its notes.
+    if proc.returncode in ok_codes and isinstance(data, (dict, list)):
         return data if isinstance(data, dict) else {"results": data}
     if proc.returncode != 0:
         lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
@@ -103,20 +106,29 @@ def _sec_ua() -> str | None:
     return (os.environ.get("SEC_USER_AGENT") or "").strip() or None
 
 
-def us_research(symbol: str, *, runner=run_skill) -> Research | Unavailable:
+def us_research(symbol: str, *, runner=run_skill, news_args: tuple[str, ...] = ()) -> Research | Unavailable:
     if not isinstance(symbol, str) or not _US_RE.fullmatch(symbol):
         return Unavailable("invalid US symbol")
     has_ua = _sec_ua() is not None
     notes: list[str] = []
     items: list[ResearchItem] = []
 
+    headline_failed = False
     nargs = ["--tickers", symbol, "--json", "--dry-run", "--hours", "168", "--no-moves"]
     if not has_ua:
         nargs.append("--no-sec")
-    news = runner(NEWS_PY, nargs)
+    news = runner(NEWS_PY, [*nargs, *news_args], ok_codes=(0, 1))
+    if not isinstance(news, Unavailable) and not news.get("items"):
+        # news.py also exits 1 when every fetch failed; the failure is only in its notes.
+        prefix = f"headlines for {symbol}:"
+        failed = next((str(n) for n in news.get("notes") or [] if str(n).startswith(prefix)), None)
+        if failed:
+            news = Unavailable(_scrub(failed))
+            headline_failed = True
     if isinstance(news, Unavailable):
         news_err: str | None = news.reason
-        notes.append(f"news unavailable: {news.reason}")
+        notes.append(f"headlines unavailable: {news.reason}" if headline_failed
+                     else f"news unavailable: {news.reason}")
     else:
         news_err = None
         for it in news.get("items") or []:
