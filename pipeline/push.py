@@ -2,9 +2,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pywebpush import webpush, WebPushException
 
 log = logging.getLogger(__name__)
+
+try:  # pywebpush is optional: only needed when a push is actually sent
+    from pywebpush import webpush, WebPushException
+except ImportError:
+    webpush = None
+
+    class WebPushException(Exception):  # placeholder so the except clause stays valid
+        pass
 
 
 def send_push(payload: dict, subscriptions: list[dict]) -> list[str]:
@@ -20,6 +27,10 @@ def send_push(payload: dict, subscriptions: list[dict]) -> list[str]:
                 priv = f.read()
     if priv is None:
         log.error("No VAPID private key configured — push disabled")
+        return [s["endpoint"] for s in subscriptions]
+
+    if webpush is None:
+        log.error("pywebpush is not installed — pip install pywebpush; push disabled")
         return [s["endpoint"] for s in subscriptions]
 
     failed: list[str] = []

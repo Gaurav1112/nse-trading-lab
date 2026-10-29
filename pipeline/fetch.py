@@ -3,14 +3,23 @@ import os
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from fyers_apiv3 import fyersModel
+from typing import TYPE_CHECKING
 import yfinance as yf
+
+if TYPE_CHECKING:  # fyers_apiv3 is optional; imported lazily in _fyers_client()
+    from fyers_apiv3 import fyersModel
 
 _log = logging.getLogger(__name__)
 
 
 class FyersAuthError(RuntimeError):
     """Raised when Fyers API rejects credentials (401/403/invalid token)."""
+
+
+class FyersUnavailableError(RuntimeError):
+    """Raised when the Fyers source cannot be used at all: the optional
+    fyers_apiv3 package is not installed, or credentials are not configured.
+    Callers fall back to another source exactly as on FyersAuthError."""
 
 
 @dataclass(frozen=True)
@@ -22,8 +31,16 @@ class LTPQuote:
 
 
 def _fyers_client() -> fyersModel.FyersModel:
-    app_id = os.environ["FYERS_APP_ID"]
-    token = os.environ["FYERS_ACCESS_TOKEN"]
+    try:
+        from fyers_apiv3 import fyersModel
+    except ImportError as e:
+        raise FyersUnavailableError(
+            "fyers_apiv3 is not installed — pip install fyers-apiv3 to use the Fyers source"
+        ) from e
+    app_id = os.environ.get("FYERS_APP_ID")
+    token = os.environ.get("FYERS_ACCESS_TOKEN")
+    if not app_id or not token:
+        raise FyersUnavailableError("FYERS_APP_ID / FYERS_ACCESS_TOKEN are not set")
     return fyersModel.FyersModel(client_id=app_id, token=token, is_async=False)
 
 
@@ -39,7 +56,8 @@ def _from_fyers_symbol(fs: str) -> str:
 def fetch_fyers_ltp(symbols: list[str]) -> dict[str, LTPQuote]:
     """Fetch last-traded price for a batch of NSE symbols via Fyers.
 
-    Raises FyersAuthError on credential failure so caller can fall back to yfinance.
+    Raises FyersAuthError on credential failure and FyersUnavailableError when the
+    package or credentials are missing, so the caller can fall back to yfinance.
     Returns partial dict on partial success (never raises for missing symbols).
     """
     client = _fyers_client()
@@ -100,6 +118,6 @@ def fetch_ltp_with_fallback(symbols: list[str]) -> tuple[dict[str, LTPQuote], st
             merged = {**fy, **yf_fill}
             return merged, "mixed" if fy else "yfinance"
         return fy, "fyers"
-    except FyersAuthError as e:
-        _log.warning("Fyers auth failed, falling back to yfinance: %s", e)
+    except (FyersAuthError, FyersUnavailableError) as e:
+        _log.warning("Fyers unavailable, falling back to yfinance: %s", e)
         return fetch_yfinance_ltp(symbols), "yfinance"
