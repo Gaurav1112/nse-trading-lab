@@ -103,21 +103,31 @@ def fetch_yfinance_ltp(symbols: list[str]) -> dict[str, LTPQuote]:
     return out
 
 
-def fetch_ltp_with_fallback(symbols: list[str]) -> tuple[dict[str, LTPQuote], str]:
-    """Primary: Fyers. Fallback: yfinance. Returns (quotes, source_label).
+def fetch_ltp_with_fallback_detail(
+    symbols: list[str],
+) -> tuple[dict[str, LTPQuote], str, str | None]:
+    """Primary: Fyers. Fallback: yfinance. Returns (quotes, source_label, fallback_reason).
 
     source_label: "fyers" | "yfinance" | "mixed" (used by trust badge).
+    fallback_reason is None only for "fyers"; otherwise it says why yfinance was used, so the
+    caller can mark the run degraded instead of reporting a silent fallback as healthy.
     """
     try:
         fy = fetch_fyers_ltp(symbols)
-        if fy and len(fy) >= len(symbols) * 0.9:
-            return fy, "fyers"
-        missing = [s for s in symbols if s not in fy]
-        if missing:
-            yf_fill = fetch_yfinance_ltp(missing)
-            merged = {**fy, **yf_fill}
-            return merged, "mixed" if fy else "yfinance"
-        return fy, "fyers"
     except (FyersAuthError, FyersUnavailableError) as e:
         _log.warning("Fyers unavailable, falling back to yfinance: %s", e)
-        return fetch_yfinance_ltp(symbols), "yfinance"
+        return fetch_yfinance_ltp(symbols), "yfinance", str(e)
+    if fy and len(fy) >= len(symbols) * 0.9:
+        return fy, "fyers", None
+    missing = [s for s in symbols if s not in fy]
+    if missing:
+        yf_fill = fetch_yfinance_ltp(missing)
+        merged = {**fy, **yf_fill}
+        return merged, "mixed" if fy else "yfinance", f"Fyers returned {len(fy)} of {len(symbols)} quotes"
+    return fy, "fyers", None
+
+
+def fetch_ltp_with_fallback(symbols: list[str]) -> tuple[dict[str, LTPQuote], str]:
+    """(quotes, source_label) — see fetch_ltp_with_fallback_detail for the fallback reason."""
+    quotes, source, _ = fetch_ltp_with_fallback_detail(symbols)
+    return quotes, source

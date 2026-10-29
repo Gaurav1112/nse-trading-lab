@@ -149,3 +149,16 @@ def test_s2_fix1_regime_stale_counts_todays_finished_session():
     # session still open: only the 28th has finished, one lag allowed
     assert session._regime_stale(_regime_ending("2026-10-27"), NSE,
                                  now=datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo(NSE.tz))) is None
+
+
+def test_r1b_regime_future_dated_last_bar_warns():
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2026-10-22"), NSE, now=now) == \
+        "Regime index data has a future-dated last bar (2026-10-22)"
+    assert session._regime_stale(_regime_ending("2026-10-21"), NSE, now=now) is None  # today is fine
+
+
+def test_r1b_regime_stale_uncovered_year_names_missing_calendar():
+    now = datetime(2027, 1, 7, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2027-01-01"), NSE, now=now) == \
+        "Regime index data is stale (last bar 2027-01-01) (holiday calendar not available for 2027)"

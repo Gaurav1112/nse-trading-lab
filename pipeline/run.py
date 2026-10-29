@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from pipeline.fetch import fetch_ltp_with_fallback
+from pipeline import fetch as quote_fetch
 from pipeline.gates import is_market_hours, staleness_gate
 from pipeline.compute import compute_signal_batch
 from pipeline.persist import persist_batch, write_health
@@ -30,8 +30,11 @@ def main() -> int:
 
     try:
         log.info("Fetching LTPs for %d symbols…", len(NIFTY50_SYMBOLS))
-        ltps, source = fetch_ltp_with_fallback(NIFTY50_SYMBOLS)
+        ltps, source, fallback_reason = quote_fetch.fetch_ltp_with_fallback_detail(NIFTY50_SYMBOLS)
         log.info("Got %d LTPs from source=%s", len(ltps), source)
+        if source != "fyers":  # data is still usable, but the run is not healthy
+            errors.append(f"quotes fell back to yfinance: {fallback_reason or source}")
+            log.warning("Quotes fell back to yfinance: %s", fallback_reason)
 
         fresh, stale = staleness_gate(ltps, max_age_min=20, now=now)
         if stale:
@@ -49,7 +52,7 @@ def main() -> int:
             subs_path = signals_path / "state" / "push_subscriptions.json"
             if subs_path.exists():
                 subs = json.loads(subs_path.read_text())
-                from pipeline.push import send_push
+                from pipeline.push import PushDisabled, send_push
                 for sig in batch.swing_signals:
                     payload = {
                         "title": f"{sig.mode} · {sig.action} {sig.symbol}",
@@ -57,7 +60,11 @@ def main() -> int:
                         "tag": sig.signal_id,
                         "data": {"url": f"https://kite.zerodha.com/chart/web/ciq/NSE/{sig.symbol}/day"},
                     }
-                    failed = send_push(payload, subs)
+                    try:
+                        failed = send_push(payload, subs)
+                    except PushDisabled as e:  # config problem: keep every subscription
+                        errors.append(f"push disabled: {e}")
+                        break
                     if failed:
                         errors.append(f"push_failed: {len(failed)} endpoints")
         write_health(health_path, "healthy" if not errors else "degraded", errors, now)

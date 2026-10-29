@@ -56,3 +56,29 @@ def test_fetch_ltp_with_fallback_uses_yfinance_on_fyers_auth_fail():
             result, source = fetch_ltp_with_fallback(["RELIANCE"])
     assert source == "yfinance"
     assert result["RELIANCE"].source == "yfinance"
+
+
+def test_fallback_detail_reports_reason():
+    from pipeline.fetch import fetch_ltp_with_fallback_detail
+    yf_quote = {"RELIANCE": LTPQuote("RELIANCE", 2451.00, datetime.now(timezone.utc), "yfinance")}
+    with patch("pipeline.fetch.fetch_fyers_ltp", side_effect=FyersAuthError("bad token")):
+        with patch("pipeline.fetch.fetch_yfinance_ltp", return_value=yf_quote):
+            _, source, reason = fetch_ltp_with_fallback_detail(["RELIANCE"])
+    assert (source, reason) == ("yfinance", "bad token")
+
+
+def test_fallback_detail_partial_fyers_reports_count():
+    from pipeline.fetch import fetch_ltp_with_fallback_detail
+    now = datetime.now(timezone.utc)
+    fy = {"A": LTPQuote("A", 1.0, now, "fyers")}
+    with patch("pipeline.fetch.fetch_fyers_ltp", return_value=fy):
+        with patch("pipeline.fetch.fetch_yfinance_ltp", return_value={"B": LTPQuote("B", 2.0, now, "yfinance")}):
+            _, source, reason = fetch_ltp_with_fallback_detail(["A", "B"])
+    assert source == "mixed" and reason == "Fyers returned 1 of 2 quotes"
+
+
+def test_fallback_detail_fyers_has_no_reason():
+    from pipeline.fetch import fetch_ltp_with_fallback_detail
+    fy = {"A": LTPQuote("A", 1.0, datetime.now(timezone.utc), "fyers")}
+    with patch("pipeline.fetch.fetch_fyers_ltp", return_value=fy):
+        assert fetch_ltp_with_fallback_detail(["A"])[1:] == ("fyers", None)

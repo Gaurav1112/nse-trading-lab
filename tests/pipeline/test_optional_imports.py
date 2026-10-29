@@ -76,7 +76,17 @@ def test_push_imports_without_pywebpush(no_pywebpush):
     assert hasattr(no_pywebpush, "send_push")
 
 
-def test_push_without_pywebpush_reports_all_failed(no_pywebpush, monkeypatch):
+def test_push_without_pywebpush_is_disabled_not_failed(no_pywebpush, monkeypatch):
+    """A missing package must never look like dead endpoints: callers prune failed ones."""
     monkeypatch.setenv("VAPID_PRIVATE_KEY_PEM", "fictional-key")
     subs = [{"endpoint": "https://push.example.invalid/a", "keys": {"p256dh": "x", "auth": "y"}}]
-    assert no_pywebpush.send_push({"title": "T"}, subs) == ["https://push.example.invalid/a"]
+    with pytest.raises(no_pywebpush.PushDisabled, match="pywebpush not installed"):
+        no_pywebpush.send_push({"title": "T"}, subs)
+
+
+def test_push_without_vapid_key_is_disabled_not_failed(monkeypatch):
+    monkeypatch.delenv("VAPID_PRIVATE_KEY_PEM", raising=False)
+    monkeypatch.delenv("VAPID_PRIVATE_KEY_PATH", raising=False)
+    subs = [{"endpoint": "https://push.example.invalid/a", "keys": {"p256dh": "x", "auth": "y"}}]
+    with pytest.raises(pipeline.push.PushDisabled, match="no VAPID private key"):
+        pipeline.push.send_push({"title": "T"}, subs)
