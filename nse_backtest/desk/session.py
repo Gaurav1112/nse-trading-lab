@@ -193,14 +193,22 @@ def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: 
 
 
 def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLVE,
-                 on_warning: Warn = None) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
+                 on_warning: Warn = None, on_progress=None
+                 ) -> tuple[list[DeskVerdict], list[tuple[str, str]]]:
     """Opening-range scan over 15m frames; (verdicts, failures) with load failures included. Every TAKE is
-    logged to the audit log, so the scoreboard scores it."""
+    logged to the audit log, so the scoreboard scores it. ``on_progress(done, total, symbol)`` is called after
+    each symbol is loaded (a failing callback never stops the scan)."""
     if regime is _RESOLVE:
         regime = resolve_regime(profile, on_warning)
     ctx = context_for(profile, limits, regime=regime)
     frames15, load_failures, per_symbol, quotes = {}, [], {}, {}
-    for s in symbols:
+    symbols = list(symbols)
+    for n, s in enumerate(symbols, 1):
+        if on_progress is not None:
+            try:
+                on_progress(n, len(symbols), s)
+            except Exception:  # noqa: BLE001 - progress display only
+                on_progress = None
         try:
             frames15[s] = loaders.load_intraday(profile, s)
         except Exception as e:  # noqa: BLE001

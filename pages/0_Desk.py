@@ -393,15 +393,19 @@ with tab_pos:
 
 with tab_intra:
     uni = universe(profile)
-    picked = st.multiselect("Symbols", uni, default=uni[:15], key=f"desk_intra_syms_{market}")
+    picked = st.multiselect("Symbols", uni, default=uni, key=f"desk_intra_syms_{market}")
     scan_key = SCAN_KEY
     if st.button("Scan", key="desk_scan"):
         if not picked:
             st.error("Pick at least one symbol.")
         else:
-            with st.spinner("Scanning 15-minute bars..."):
-                state = _attempt("Intraday scan failed", session.run_intraday, profile, limits, picked,
-                                 regime=regime_name)
+            bar = st.progress(0.0, text=f"Scanning 15-minute bars (0 of {len(picked)})...")
+
+            def _progress(done, total, sym):
+                bar.progress(min(1.0, (done - 1) / max(total, 1)), text=f"Scanning {sym} ({done} of {total})...")
+            state = _attempt("Intraday scan failed", session.run_intraday, profile, limits, picked,
+                             regime=regime_name, on_progress=_progress)
+            bar.empty()
             if "ok" in state:
                 state["at"] = _now_hhmm(profile)
             st.session_state[scan_key] = state  # a failure REPLACES any earlier success
@@ -427,13 +431,20 @@ with tab_intra:
                 "MC R": _r(sv.odds.mc_expectancy_r if sv.odds is not None else None)} for _, sv, _ in rows]),
                 hide_index=True, width="stretch")
             for i, (cur, shown_v, stale) in enumerate(rows):
-                if cur.action is Action.SKIP:
-                    continue
+                ok = f"desk_intra_open_{cur.input_hash[:12]}"
                 with st.expander(f"{cur.action.value} — {cur.plan.symbol}", expanded=cur.action is Action.TAKE):
-                    render_verdict(shown_v, profile, f"intra_{i}", at=istate["at"], show_ticket=stale is None)
-                    if stale is not None:  # never a stale ticket or headline: re-check first
-                        desk_card.recheck_prompt(cur, profile, limits, "intra", f"intra_{i}_{cur.input_hash[:12]}",
-                                                 stale)
+                    if st.button("Close card" if st.session_state.get(ok) else "Open card", key=f"{ok}_btn"):
+                        st.session_state[ok] = not st.session_state.get(ok)
+                        st.rerun()
+                    if st.session_state.get(ok):  # every gate (stale, data-broken, override) lives in the card
+                        _render_card(cur, profile, limits, "intra")
+                    elif cur.action is Action.SKIP:
+                        st.caption(shown(cur.headline))
+                    else:
+                        render_verdict(shown_v, profile, f"intra_{i}", at=istate["at"], show_ticket=stale is None)
+                        if stale is not None:  # never a stale ticket or headline: re-check first
+                            desk_card.recheck_prompt(cur, profile, limits, "intra",
+                                                     f"intra_{i}_{cur.input_hash[:12]}", stale)
         if failures:
             with st.expander(f"Not scanned ({len(failures)})"):
                 for s, why in failures:
@@ -618,7 +629,7 @@ def _load_candidates(have_plan: bool, have_scan: bool) -> None:
                 state["at"] = _now_hhmm(profile)
             st.session_state[PLAN_KEY] = state
         if refresh or not have_scan:
-            syms = st.session_state.get(f"desk_intra_syms_{market}") or universe(profile)[:15]
+            syms = st.session_state.get(f"desk_intra_syms_{market}") or universe(profile)
             state = _attempt("Intraday scan failed", session.run_intraday, profile, limits, syms, regime=regime_name)
             if "ok" in state:
                 state["at"] = _now_hhmm(profile)

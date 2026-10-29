@@ -333,7 +333,7 @@ def cmd_positions(a, profile) -> int:
 def cmd_intraday(a, profile) -> int:
     limits, warn = _limits(profile, a.json)
     syms = ([s.strip().upper() for s in a.symbols.split(",") if s.strip()]
-            if a.symbols else universe(profile)[:15])
+            if a.symbols else universe(profile))
     verdicts, failures = session.run_intraday(profile, limits, syms, on_warning=_stderr_warn)
     if a.json:
         _emit_json({"verdicts": verdicts, "failures": failures})
@@ -505,7 +505,7 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=h)
         common(p)
         if name == "intraday":
-            p.add_argument("--symbols", help="comma separated; default first 15 of the universe")
+            p.add_argument("--symbols", help="comma separated; default the whole universe")
         if name == "plan":
             p.add_argument("--all", action="store_true",
                            help="also rank every other candidate the desk checked, with the money and a check hint")
