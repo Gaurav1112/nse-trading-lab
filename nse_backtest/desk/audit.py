@@ -9,8 +9,16 @@ from .models import DeskVerdict
 
 
 def data_dir() -> Path:
+    """The user's data directory, created owner-only (0o700); an existing one owned by the user is
+    tightened to 0o700 (best effort)."""
     d = Path(os.environ.get("NSE_LAB_DATA_DIR") or (Path.home() / ".nse-trading-lab"))
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        st = d.stat()
+        if st.st_uid == os.getuid() and (st.st_mode & 0o777) != 0o700:
+            os.chmod(d, 0o700)
+    except (OSError, AttributeError):  # AttributeError: no getuid on this platform
+        pass
     return d
 
 
@@ -27,6 +35,11 @@ def append_verdict(v: DeskVerdict, path: Path | None = None) -> Path:
         "input_hash": v.input_hash,
     }
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # the mode above applies only to a new file
+    except BaseException:
+        os.close(fd)
+        raise
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, default=str) + "\n")
     return path

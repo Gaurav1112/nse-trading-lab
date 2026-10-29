@@ -487,3 +487,54 @@ def test_a10_pdt_unknowable_without_entry_dates(tmp_path):
     assert ctx.day_trades_5d is None
     _journal(tmp_path, [])
     assert loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW).day_trades_5d == 0
+
+
+# ------------------------------------------------------------------ final fix wave B1, B3, B4
+BAD_SYM = "../../v7/x?a=1"
+
+
+def test_b3_symbol_validated_before_any_yfinance_call(monkeypatch, real_live_quote):
+    import yfinance
+    def never(*a, **k):
+        raise AssertionError("yfinance must not be called for an invalid symbol")
+    monkeypatch.setattr(yfinance, "download", never)
+    monkeypatch.setattr(yfinance, "Ticker", never)
+    with pytest.raises(ValueError):
+        loaders.load_intraday(NSE, BAD_SYM)
+    assert loaders.next_earnings(NSE, BAD_SYM) == (None, False)
+    assert real_live_quote(NSE, BAD_SYM) is None
+
+
+def test_b3_index_symbol_with_caret_is_allowed(monkeypatch):
+    import yfinance
+    seen = []
+    monkeypatch.setattr(yfinance, "download", lambda sym, **k: seen.append(sym) or _intraday_raw())
+    loaders.load_intraday(US, "^GSPC")
+    assert seen == ["^GSPC"]
+
+
+def test_b4_audit_file_and_data_dir_are_owner_only(tmp_path, monkeypatch):
+    import os, stat
+    from nse_backtest.desk import audit
+    from nse_backtest.desk.verdict import decide
+    from tests.desk.test_verdict_service import P, S, OK, NOW
+    d = tmp_path / "fresh"
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(d))
+    assert stat.S_IMODE(os.stat(audit.data_dir()).st_mode) == 0o700
+    path = d / "a.jsonl"
+    path.write_text("")
+    os.chmod(path, 0o644)  # pre-existing loose file
+    audit.append_verdict(decide(P, S, None, OK, NSE, 100.0, NOW), path)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    os.chmod(d, 0o755)
+    audit.data_dir()
+    assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_b1_vendored_skills_do_not_point_at_a_broker():
+    root = Path(__file__).resolve().parents[2] / ".claude/skills"
+    for name in ("trader-news", "trader-analyst"):
+        text = (root / name / "SKILL.md").read_text()
+        assert "/trader-broker" not in text
+        assert "This repo never places orders; there is no broker skill." in text
+    assert "N8" in (root / "VENDORED.md").read_text()

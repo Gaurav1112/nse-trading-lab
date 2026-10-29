@@ -16,6 +16,9 @@
   error, and `urllib.parse.quote`s it in URLs. Local change; reapply it if you re-vendor.
 - N7: `trader-analyst/facts.py` `--cik` was only zero-filled before going into SEC URLs. **Fixed here**: `main()`
   now requires `re.fullmatch(r"\d{1,10}", args.cik)` and exits 2 otherwise. Local change; reapply it if you re-vendor.
+- N8: both `SKILL.md` files said "Nothing places an order except `/trader-broker` ...", pointing at a skill
+  that is not vendored. **Changed here** to "This repo never places orders; there is no broker skill."
+  Local change; reapply it if you re-vendor.
 - N3: feeds are parsed with `xml.etree.ElementTree`. Acceptable here (trusted hosts, no DTD
   resolution); noted for completeness.
 - N4: `trader-broker` has a chat "yes" confirmation gate that can be spoofed. **Not vendored.**

@@ -19,7 +19,7 @@ Run from the repo root with `python3.13 -m nse_backtest.desk <command>`:
     plan --market NSE                               # today's plan: regime, TAKE, WATCH
     positions --market US
     intraday --market NSE
-    settings --market NSE --capital 200000 --risk-pct 1
+    settings --market NSE --capital 750000 --risk-pct 1
 
 Rules for Claude:
 - Report the verdict line first, then every BLOCK and WARN in plain words, then the ticket.

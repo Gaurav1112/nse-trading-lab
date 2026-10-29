@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import urllib.request
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -43,16 +45,31 @@ def parse_fno_ban(text: str) -> frozenset[str]:
     return frozenset(out)
 
 
+_MAX_BYTES = 1_000_000
+_ALLOWED_HOST = "nsearchives.nseindia.com"
+
+
 def _default_fetcher(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return resp.read().decode("utf-8")
+        final = urlparse(resp.geturl())
+        if final.scheme != "https" or final.hostname != _ALLOWED_HOST:
+            raise ValueError(f"ban list fetch ended off NSE ({final.scheme}://{final.hostname})")
+        return resp.read(_MAX_BYTES).decode("utf-8")
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def fetch_fno_ban(cache_dir: Path, today: date,

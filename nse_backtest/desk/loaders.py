@@ -78,6 +78,8 @@ def _yf_frame(df) -> pd.DataFrame:
 
 
 def load_intraday(profile: MarketProfile, symbol: str) -> pd.DataFrame:
+    from nse_backtest.data import _validate_symbol
+    _validate_symbol(symbol)  # ValueError before any network call
     import yfinance
     df = yfinance.download(profile.yf_symbol(symbol), period="60d", interval="15m",
                            progress=False, auto_adjust=False)
@@ -160,6 +162,12 @@ def _to_date(x) -> date | None:
 
 def next_earnings(profile: MarketProfile, symbol: str) -> tuple[date | None, bool]:
     """(next earnings date, checked). (None, False) means unknown, which the desk WARNs on."""
+    from nse_backtest.data import _validate_symbol
+    try:
+        _validate_symbol(symbol)
+    except ValueError as e:
+        log.warning("earnings lookup: invalid symbol %r: %s", symbol, e)
+        return None, False
     try:
         import yfinance
         cal = yfinance.Ticker(profile.yf_symbol(symbol)).calendar

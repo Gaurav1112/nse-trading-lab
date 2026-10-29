@@ -100,5 +100,4 @@ ticker has no news, say so rather than padding the brief.
 ## Safety
 
 Education and tooling, not financial advice. This skill only reads and
-reports. Nothing places an order except `/trader-broker`, after
-`/trader-risk` passes and the user types an explicit yes for that order.
+reports. This repo never places orders; there is no broker skill.

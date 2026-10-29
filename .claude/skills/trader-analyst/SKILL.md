@@ -119,5 +119,4 @@ so the summary read that 10-Q directly.
 ## Safety
 
 Education and tooling, not financial advice. This skill only reads filings.
-Nothing places an order except `/trader-broker`, after `/trader-risk` passes
-and the user types an explicit yes for that order.
+This repo never places orders; there is no broker skill.

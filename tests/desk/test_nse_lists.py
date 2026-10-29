@@ -61,3 +61,58 @@ def test_cache_write_failure_still_ok(tmp_path):
     f.write_text("x")
     b = fetch_fno_ban(f, date(2026, 10, 29), fetcher=lambda u: SAMPLE)
     assert b.status == "ok" and "ABCLTD" in b.symbols and "cache" in b.detail.lower()
+
+
+# ---- Final fix wave B2: bounded read, https + NSE host only, mkstemp cache writes ----
+class _Resp:
+    def __init__(self, body: bytes, url: str):
+        self.body, self.url, self.asked = body, url, None
+
+    def read(self, n=-1):
+        self.asked = n
+        return self.body if n is None or n < 0 else self.body[:n]
+
+    def geturl(self):
+        return self.url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_urlopen(monkeypatch, resp):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10: resp)
+
+
+def test_b2_default_fetcher_bounds_the_read(monkeypatch):
+    from nse_backtest.desk import nse_lists
+    r = _Resp(SAMPLE.encode(), "https://nsearchives.nseindia.com/content/fo/fo_secban.csv")
+    _patch_urlopen(monkeypatch, r)
+    assert nse_lists._default_fetcher(nse_lists.FNO_BAN_URL) == SAMPLE and r.asked == 1_000_000
+
+
+@pytest.mark.parametrize("final", ["http://nsearchives.nseindia.com/content/fo/fo_secban.csv",
+                                   "https://evil.example.com/fo_secban.csv",
+                                   "https://nsearchives.nseindia.com.evil.example/x"])
+def test_b2_redirect_off_nse_https_is_rejected_and_falls_back_to_cache(monkeypatch, tmp_path, final):
+    from nse_backtest.desk import nse_lists
+    fetch_fno_ban(tmp_path, date(2026, 10, 29), fetcher=lambda u: SAMPLE)  # seed the cache
+    _patch_urlopen(monkeypatch, _Resp(SAMPLE.encode(), final))
+    with pytest.raises(ValueError):
+        nse_lists._default_fetcher(nse_lists.FNO_BAN_URL)
+    b = fetch_fno_ban(tmp_path, date(2026, 10, 29))
+    assert b.status == "cached" and "ABCLTD" in b.symbols
+
+
+def test_b2_cache_write_uses_unique_temp_and_leaves_none(tmp_path, monkeypatch):
+    import tempfile
+    from nse_backtest.desk import nse_lists
+    made = []
+    real = tempfile.mkstemp
+    monkeypatch.setattr(nse_lists.tempfile, "mkstemp", lambda **k: made.append(k) or real(**k))
+    fetch_fno_ban(tmp_path, date(2026, 10, 29), fetcher=lambda u: SAMPLE)
+    assert len(made) == 2 and all(k["dir"] == tmp_path for k in made)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fo_secban.csv", "fo_secban.date"]
