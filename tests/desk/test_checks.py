@@ -380,3 +380,36 @@ def test_slightly_future_bar_reads_current_and_stale_unknown_asof():
     assert c.status is Status.PASS and "Last bar is current" in c.reason
     c = _c("ban_list", ban=BanList(frozenset(), "stale", None, ""))
     assert "last fetch date unknown" in c.reason and "None" not in c.reason
+
+
+def _by(cs):
+    return {c.name: c for c in cs}
+
+
+def test_unreadable_journal_warns_loss_streak_pdt():
+    lim = Limits(capital=100_000, pdt_guard=True)
+    cs = _by(run_checks(plan(Mode.INTRADAY, market="US", last_bar="2026-10-29T09:55:00"), SIZE, ODDS,
+                        ctx(profile=US, limits=lim, now=datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+                            journal_readable=False, day_trades_5d=0)))
+    assert cs["daily_loss"].status is Status.WARN and "daily loss limit not verified" in cs["daily_loss"].reason
+    assert cs["stoploss_streak"].status is Status.WARN and "stop-out streak not verified" in cs["stoploss_streak"].reason
+    assert cs["pdt"].status is Status.WARN and "day-trade count not verified" in cs["pdt"].reason
+    assert all("Could not read the trade journal" in cs[n].reason for n in ("daily_loss", "stoploss_streak", "pdt"))
+
+
+def test_unreadable_journal_still_blocks_pdt_and_unconfigured_loss():
+    lim = Limits(capital=100_000, pdt_guard=True)
+    us_now = datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+    cs = _by(run_checks(plan(Mode.INTRADAY, market="US", last_bar="2026-10-29T09:55:00"), SIZE, ODDS,
+                        ctx(profile=US, limits=lim, now=us_now, journal_readable=False, day_trades_5d=3)))
+    assert cs["pdt"].status is Status.BLOCK
+    cs = _by(run_checks(plan(), SIZE, ODDS, ctx(limits=Limits(capital=0), journal_readable=False)))
+    assert cs["daily_loss"].status is Status.BLOCK
+
+
+def test_governor_not_evaluated_surfaces_reasons():
+    cs = _by(run_checks(plan(), SIZE, ODDS, ctx(governor_can_trade=None, governor_reasons=("a broke", "b broke"))))
+    assert cs["risk_governor"].status is Status.WARN
+    assert cs["risk_governor"].reason == "Risk governor not evaluated: a broke; b broke"
+    cs = _by(run_checks(plan(), SIZE, ODDS, ctx(governor_can_trade=None)))
+    assert cs["risk_governor"].reason == "Risk governor not evaluated: portfolio limits could not be checked"

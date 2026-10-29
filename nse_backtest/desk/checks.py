@@ -28,6 +28,7 @@ class CheckContext:
     turnover_20d: float | None = None
     today_gap_pct: float | None = None
     day_trades_5d: int = 0
+    journal_readable: bool = True
 
 
 def _entry(e: dict) -> tuple[str, date, float | None] | None:
@@ -151,7 +152,10 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
 
     # 4 risk_governor
     if ctx.governor_can_trade is None:
-        out.append(_ck("risk_governor", W, "Risk governor not evaluated: portfolio limits could not be checked"))
+        if ctx.governor_reasons:
+            out.append(_ck("risk_governor", W, "Risk governor not evaluated: " + "; ".join(ctx.governor_reasons)))
+        else:
+            out.append(_ck("risk_governor", W, "Risk governor not evaluated: portfolio limits could not be checked"))
     elif ctx.governor_can_trade is not True:
         why = "; ".join(ctx.governor_reasons) or "no reason given"
         out.append(_ck("risk_governor", B, f"Risk governor says no new trades: {why}"))
@@ -165,6 +169,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
         out.append(_ck("daily_loss", B, "Daily loss limit is not configured"))
     elif lost >= cap:
         out.append(_ck("daily_loss", B, f"Daily loss limit hit: lost {prof.money(lost)} today against a limit of {prof.money(cap)}"))
+    elif not ctx.journal_readable:
+        out.append(_ck("daily_loss", W, "Could not read the trade journal — daily loss limit not verified"))
     elif (bad := unreadable_today(ctx.journal, prof.code, now.date())) > 0:
         out.append(_ck("daily_loss", W, f"Could not read today's P&L for {bad} journal row(s) — daily loss limit not verified"))
     else:
@@ -299,7 +305,9 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
             out.append(_ck("setup_history", P, f"Setup earned {exp:+.2f}R over {n:.0f} past samples"))
 
     # 13 stoploss_streak
-    if stoploss_streak(ctx.journal, prof.code):
+    if not ctx.journal_readable:
+        out.append(_ck("stoploss_streak", W, "Could not read the trade journal — stop-out streak not verified"))
+    elif stoploss_streak(ctx.journal, prof.code):
         out.append(_ck("stoploss_streak", W, "3 stop-outs in a row — size halved"))
     else:
         out.append(_ck("stoploss_streak", P, f"No run of 3 straight losses in the {prof.code} journal"))
@@ -328,6 +336,8 @@ def run_checks(plan: TradePlan, sizing: Sizing, odds: Odds | None, ctx: CheckCon
     # 16 pdt
     if prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and ctx.day_trades_5d >= 3:
         out.append(_ck("pdt", B, f"Pattern day trader guard: {ctx.day_trades_5d} day trades in the last 5 days (limit 3)"))
+    elif prof.code == "US" and mode is Mode.INTRADAY and lim.pdt_guard and not ctx.journal_readable:
+        out.append(_ck("pdt", W, "Could not read the trade journal — day-trade count not verified"))
     else:
         out.append(_ck("pdt", P, "Pattern day trader guard does not apply or is within limits"))
 

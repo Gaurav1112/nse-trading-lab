@@ -294,11 +294,27 @@ def test_cli_settings_fallback_warning(tmp_path, capsys, monkeypatch):
     assert loaders.load_limits_with_status(NSE)[1] is False
 
 
-def test_cli_plan_passes_regime_and_earnings_lookup(capsys, monkeypatch):
+def test_cli_plan_passes_regime_and_earnings_lookup(offline_desk, capsys, monkeypatch):
     seen = _record_assess(monkeypatch)
     monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 2, raising=False)
+    calls = []
+    real = cli.daily_plan
+    monkeypatch.setattr(cli, "daily_plan", lambda *a, **k: calls.append(k) or real(*a, **k))
     assert cli.main(["plan", "--market", "US"]) == 0
     assert seen and seen[0] in ("TRENDING", "MIXED", "HOSTILE")
+    assert calls and callable(calls[0].get("earnings_lookup"))
+
+
+def test_cli_settings_corrupt_warns_and_backs_up(tmp_path, capsys):
+    p = tmp_path / "desk_settings.json"
+    p.write_text("garbage")
+    assert cli.main(["settings", "--market", "US"]) == 0
+    assert capsys.readouterr().out.startswith("WARNING: settings file unreadable — using default capital ")
+    assert not list(tmp_path.glob("desk_settings.json.corrupt-*"))  # read-only: nothing to back up
+    assert cli.main(["settings", "--market", "US", "--capital", "2500"]) == 0
+    backups = list(tmp_path.glob("desk_settings.json.corrupt-*"))
+    assert len(backups) == 1 and backups[0].read_text() == "garbage"
+    assert loaders.load_limits(US).capital == 2500
 
 
 def test_plan_watch_rows_list_check_names():
@@ -323,3 +339,11 @@ def test_vendored_facts_rejects_non_digit_cik(capsys):
     for bad in ("../x", "12a", "12345678901", ""):
         assert m.main(["--cik", bad]) == 2
     assert "digits" in capsys.readouterr().err
+
+
+def test_check_trade_does_not_halve_on_unreadable_journal(tmp_path):
+    from nse_backtest.desk.checks import stoploss_streak
+    (tmp_path / "trade_journal.json").write_text('{"a": 1}')
+    ctx = loaders.build_context(NSE, Limits(capital=5000))
+    assert ctx.journal == () and ctx.journal_readable is False
+    assert stoploss_streak(ctx.journal, "NSE") is False  # service halves only on this

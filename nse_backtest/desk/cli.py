@@ -241,7 +241,7 @@ def cmd_intraday(a, profile) -> int:
 
 
 def cmd_settings(a, profile) -> int:
-    cur = loaders.load_limits(profile)
+    cur, warn = _limits(profile, a.json)
     changes = {}
     if a.capital is not None:
         changes["capital"] = a.capital
@@ -259,7 +259,7 @@ def cmd_settings(a, profile) -> int:
     if a.json:
         _emit_json({"market": profile.code, "limits": cur})
         return 0
-    lines = [f"Settings {profile.code}" + (" (saved)" if changes else ""),
+    lines = warn + [f"Settings {profile.code}" + (" (saved)" if changes else ""),
              f"  capital {profile.money(cur.capital)}",
              f"  risk per trade {cur.risk_per_trade_pct:g}%",
              f"  max position {cur.max_position_pct:g}%",

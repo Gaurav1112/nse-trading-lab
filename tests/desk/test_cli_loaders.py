@@ -12,13 +12,8 @@ def series(n=400):
 
 
 @pytest.fixture(autouse=True)
-def isolated(tmp_path, monkeypatch):
-    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
-    monkeypatch.setattr(loaders, "load_regime", lambda p: series())
-    monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
-    monkeypatch.setattr(loaders.nse_lists, "fetch_fno_ban",
-                        lambda d, t, fetcher=None: loaders.nse_lists.BanList(frozenset(), "ok", None, ""))
+def isolated(offline_desk):
+    pass
 
 
 def test_limits_roundtrip_per_market(tmp_path):
@@ -48,3 +43,10 @@ def test_cli_settings(capsys):
     assert cli.main(["settings", "--market", "US", "--capital", "2500", "--pdt-guard", "on"]) == 0
     l = loaders.load_limits(US)
     assert l.capital == 2500 and l.pdt_guard is True
+
+
+def test_cli_check_corrupt_journal_never_passes_daily_loss(tmp_path, capsys):
+    (tmp_path / "trade_journal.json").write_text('{"a": 1}')
+    assert cli.main(["check", "ABC"]) == 0
+    out = capsys.readouterr().out
+    assert "PASS daily_loss" not in out and "WARN daily_loss" in out

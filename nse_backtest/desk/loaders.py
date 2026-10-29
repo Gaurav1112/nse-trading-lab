@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import tempfile
 from dataclasses import fields, replace
 from datetime import date, datetime, timedelta
@@ -208,9 +209,18 @@ def load_limits(profile: MarketProfile) -> Limits:
     return load_limits_with_status(profile)[0]
 
 
+def _backup_corrupt_settings() -> None:
+    """Copy an unusable settings file aside before it is overwritten, so nothing is lost."""
+    path = _settings_path()
+    if path.exists():
+        shutil.copy2(path, path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d%H%M%S}"))
+
+
 def save_limits(profile: MarketProfile, limits: Limits) -> None:
     validate_limits(limits)
-    settings = _read_settings()
+    settings, ok = _read_settings_status()
+    if not ok:
+        _backup_corrupt_settings()
     settings[profile.code] = {f.name: getattr(limits, f.name) for f in fields(Limits)}
     path = _settings_path()
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
@@ -235,12 +245,20 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
     now = now or datetime.now(ZoneInfo(profile.tz))
     can_trade: bool | None
     reasons: tuple[str, ...] = ()
+    journal_readable = True
     try:
         positions = _for_market(load_positions(), profile)
+    except UserDataError as e:
+        log.warning("%s", e)
+        positions = None
+    try:
         journal = _for_market(load_journal(), profile)
     except UserDataError as e:
         log.warning("%s", e)
-        positions, journal = [], []
+        journal = None
+        journal_readable = False
+    if positions is None or journal is None:
+        positions, journal = [], journal or []
         can_trade = None
         reasons = ("Could not read positions.json/trade_journal.json — risk governor not evaluated",)
     else:
@@ -261,4 +279,4 @@ def build_context(profile: MarketProfile, limits: Limits, *, now: datetime | Non
         turnover, gap = market_stats(symbol_df)
     return CheckContext(profile=profile, limits=limits, now=now, journal=tuple(journal),
                         governor_can_trade=can_trade, governor_reasons=reasons, ban=ban, regime=regime,
-                        turnover_20d=turnover, today_gap_pct=gap)
+                        turnover_20d=turnover, today_gap_pct=gap, journal_readable=journal_readable)
