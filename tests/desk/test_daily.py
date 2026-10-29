@@ -112,3 +112,91 @@ def test_daily_plan_others_defaults_to_empty_for_positional_callers():
 def test_overflow_helper_splits_by_rank():
     kept, rest = daily._overflow([3, 1, 2], 2, key=lambda x: -x)
     assert kept == [3, 2] and rest == [1]
+
+
+# ---------------------------------------------------------------- H6: the desk sat out (market regime)
+
+def _rows(path):
+    return [json.loads(x) for x in path.read_text().splitlines() if x.startswith("{")] if path.exists() else []
+
+
+def _sat_outs(path):
+    return sorted(r["symbol"] for r in _rows(path) if r["action"] == "SAT_OUT")
+
+
+def test_hostile_plan_logs_one_sat_out_per_regime_only_blocked_full_check(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    dp = _plan(audit_path=path, regime="HOSTILE")
+    assert dp.take == ()
+    # A, B, C, F pass every check but the regime; D is also blocked by reward_risk; FAR and D are quick (pass 1)
+    assert _sat_outs(path) == ["A", "B", "C", "F"]
+    rows = _rows(path)
+    for r in (r for r in rows if r["action"] == "SAT_OUT"):
+        assert r["blocks"] == ["regime"] and r["mode"] == "swing"
+        skip = next(x for x in rows if x["action"] == "SKIP" and x["symbol"] == r["symbol"])
+        assert {**skip, "action": "SAT_OUT"} == r  # the full check's own row, nothing changed but the action
+
+
+def test_a_second_plan_run_in_the_same_session_does_not_log_sat_out_again(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _plan(audit_path=path, regime="HOSTILE")
+    _plan(audit_path=path, regime="HOSTILE")
+    assert _sat_outs(path) == ["A", "B", "C", "F"]
+    assert sum(r["action"] == "SKIP" for r in _rows(path)) == 8  # the verdicts themselves are still audited
+
+
+def test_sat_out_dedupe_is_per_market_and_session(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    earlier = {"action": "SAT_OUT", "market": "NSE", "symbol": "A", "created_at": "2026-10-28T10:00:00+05:30"}
+    other_market = {"action": "SAT_OUT", "market": "US", "symbol": "B", "created_at": "2026-10-29T00:30:00-04:00"}
+    same = {"action": "SAT_OUT", "market": "NSE", "symbol": "C", "created_at": "2026-10-29T09:20:00+05:30"}
+    path.write_text("".join(json.dumps(r) + "\n" for r in (earlier, other_market, same)))
+    _plan(audit_path=path, regime="HOSTILE")
+    # A was sat out in an earlier session and B on another market: both logged again; C already this session
+    assert _sat_outs(path) == ["A", "A", "B", "B", "C", "F"]
+
+
+def test_no_sat_out_without_an_audit_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("NSE_LAB_DATA_DIR", str(tmp_path))
+    _plan(regime="HOSTILE")
+    assert _sat_outs(tmp_path / "desk_audit.jsonl") == []  # the verdicts go to the default log; no SAT_OUT
+
+
+def test_no_sat_out_in_a_trending_market(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _plan(audit_path=path)
+    assert _sat_outs(path) == [] and any(r["action"] == "TAKE" for r in _rows(path))
+
+
+def test_an_unreadable_audit_log_never_logs_a_duplicate_sat_out(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _plan(audit_path=path, regime="HOSTILE")
+    with path.open("a") as f:
+        f.write("not json\n")  # one bad line: the rest is still read, so the dedupe still holds
+    _plan(audit_path=path, regime="HOSTILE")
+    assert _sat_outs(path) == ["A", "B", "C", "F"]
+
+
+def test_sat_out_failure_never_stops_the_plan(tmp_path, monkeypatch):
+    from nse_backtest.desk import audit
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(audit, "append_sat_out", boom)
+    dp = _plan(audit_path=tmp_path / "audit.jsonl", regime="HOSTILE")
+    assert {v.plan.symbol for v in dp.watch} == {"A", "B", "C", "F"}
+
+
+# ---------------------------------------------------------------- H6: holding up
+
+def test_plan_carries_the_holding_up_list():
+    dp = _plan(regime="HOSTILE")
+    syms = [s for s, _ in dp.holding_up]
+    # ranked by 60-day return minus the index's (which steps 1.004 like A)
+    assert syms == ["D", "A", "C", "B", "F"]  # FAR closed 20% under its high: below its own 50-EMA
+    assert dp.holding_up_note is None
+
+
+def test_plan_holding_up_fails_closed_without_the_index():
+    dp = daily_plan(NSE, _frames(), None, Limits(capital=100_000), ctx(), replays=300, regime="HOSTILE")
+    assert dp.holding_up == () and dp.holding_up_note and "index" in dp.holding_up_note

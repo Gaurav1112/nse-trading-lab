@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -153,6 +153,29 @@ def data_broken(v: DeskVerdict) -> tuple[str, ...]:
     """The reasons of the verdict's "data" BLOCKs: non-empty means the inputs are broken and the verdict must be
     re-checked before anyone chooses it."""
     return tuple(c.reason for c in block_groups(v)["data"] if c.status is Status.BLOCK)
+
+
+def sat_out_refusal(v: DeskVerdict, profile: MarketProfile) -> str | None:
+    """Why the verdict is not a "desk sat out" (None when it is): a full-checked swing long whose ONLY BLOCK is the
+    market regime (read from block_groups, never from text), and which the desk would have taken without that
+    block (decide re-run with the regime check passed: the same price rules a TAKE meets)."""
+    if v.plan.mode is not Mode.SWING:
+        return "only swing verdicts are logged as sat out"
+    if v.plan.side is not Side.LONG:
+        return "only long verdicts are logged as sat out"
+    if is_quick(v):
+        return "a quick (first-pass) verdict is never logged: run a full check"
+    blocks = {g: [c.name for c in cs if c.status is Status.BLOCK] for g, cs in block_groups(v).items()}
+    if blocks.pop("market") != ["regime"] or any(blocks.values()):
+        return "the market regime is not the only BLOCK"
+    try:
+        now = datetime.fromisoformat(v.created_at)
+    except (TypeError, ValueError):
+        return "the verdict's time is unreadable"
+    passed = [replace(c, status=Status.PASS) if c.name == "regime" else c for c in v.checks]
+    if decide(v.plan, v.sizing, v.odds, passed, profile, v.current_price, now).action is not Action.TAKE:
+        return "it would not have been a TAKE without the regime block"
+    return None
 
 
 _KNOWN_REGIMES = ("TRENDING", "MIXED", "HOSTILE")

@@ -249,6 +249,7 @@ def cmd_plan(a, profile) -> int:
     lines += ["", "WATCH:"] + ([_format_row(v, why=True) for v in plan.watch] or ["  none"])
     for v in plan.take:
         lines += [""] + format_verdict(v, profile)
+    lines += [""] + _holding_up_lines(plan, profile)
     if plan.unavailable:
         lines += ["", "No data: " + ", ".join(plan.unavailable)]
     if a.all:
@@ -264,6 +265,17 @@ def cmd_plan(a, profile) -> int:
         _finish(lines)
         return 1
     return _finish(lines)
+
+
+def _holding_up_lines(plan, profile) -> list[str]:
+    """The "holding up" watchlist: never a trade (no action, no money)."""
+    lines = [f"HOLDING UP — ready for when the regime turns (not a trade; above their own 50-EMA, 60-day return vs "
+             f"the {profile.regime_index}):"]
+    held = tuple(getattr(plan, "holding_up", ()) or ())
+    note = getattr(plan, "holding_up_note", None)
+    if note:
+        return lines + [f"  {note}"]
+    return lines + ([f"  {s:<12} {rs:+.1f} pts" for s, rs in held] or ["  none above their 50-EMA today"])
 
 
 def _plan_failed(plan) -> str | None:
@@ -422,8 +434,13 @@ def _mode_label(mode, side) -> str:
     return f"{mode.value} short" if getattr(side, "value", side) == "short" else mode.value
 
 
+_NONE_YET = {"desk": "  No desk picks logged yet.", "override": "  No overrides logged yet.",
+             "sat_out": "  No sat-out trades logged yet (the desk logs one when only the market regime blocks a TAKE)."}
+
+
 def format_scoreboard(res, market_label: str) -> list[str]:
-    """Text scoreboard: disclaimer first; a "Desk picks" and a "Your overrides" section (never pooled), each with
+    """Text scoreboard: disclaimer first; "Desk picks", "Your overrides" and "Desk sat out (market regime)" sections
+    (never pooled), each with
     per (market, mode) the verdict line first, then the numbers."""
     from .markets import get_profile as _gp
     from .scoreboard import RECORD_LABELS
@@ -443,7 +460,7 @@ def format_scoreboard(res, market_label: str) -> list[str]:
         stats = [s for s in res.stats if s.record == record]
         lines += ["", label]
         if not stats:
-            lines.append(f"  No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+            lines.append(_NONE_YET.get(record, f"  No {record} trades logged yet."))
         for s in stats:
             win = "n/a" if s.win_pct is None else f"{s.win_pct:.1f}%"
             ci = "n/a" if s.ci_low is None else f"{_num_r(s.ci_low)} to {_num_r(s.ci_high)}"

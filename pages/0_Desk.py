@@ -578,6 +578,11 @@ def _render_record(stats, outcomes=()) -> None:
             _render_projected_vs_real(outcomes, s)
 
 
+NONE_YET = {"desk": "No desk picks logged yet.", "override": "No overrides logged yet.",
+            "sat_out": "No sat-out trades logged yet — the desk logs one when only the market regime blocks a TAKE "
+                       "in Today's Plan."}
+
+
 def _render_scoreboard(res, profile, warnings=()) -> None:
     for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
         st.warning(shown(w))
@@ -594,7 +599,7 @@ def _render_scoreboard(res, profile, warnings=()) -> None:
             st.subheader(label)
             stats = [s for s in res.stats if s.record == record]
             if not stats:
-                st.caption(f"No {'overrides' if record == 'override' else 'desk picks'} logged yet.")
+                st.caption(NONE_YET.get(record, f"No {record} trades logged yet."))
             _render_record(stats, res.outcomes)
     if res.outcomes:
         st.dataframe(pd.DataFrame([{
@@ -732,6 +737,26 @@ def _render_skipped(sym: str, why: str) -> None:
         _render_choice(cst["ok"])
 
 
+HOLDING_UP_TITLE = "Holding up — ready for when the regime turns (not a trade)"
+
+
+def _render_holding_up(plan_now) -> None:
+    """Stocks above their own 50-EMA with the best 60-day return vs the index: a watchlist, never a trade (no action,
+    no money, nothing to choose)."""
+    st.subheader(HOLDING_UP_TITLE)
+    st.caption(f"Above their own 50-EMA, ranked by 60-day return minus the {profile.regime_index}'s (up to 10). "
+               "Ready for when the regime turns — not a trade: nothing here is checked, sized or logged.")
+    held = tuple(getattr(plan_now, "holding_up", ()) or ())
+    note = getattr(plan_now, "holding_up_note", None)
+    if note:
+        st.warning(shown(note))
+    elif not held:
+        st.caption("No stock is holding up above its 50-EMA today.")
+    if held:
+        st.dataframe(pd.DataFrame([{"Symbol": s, "vs index (60d)": f"{rs:+.1f} pts"} for s, rs in held]),
+                     hide_index=True, width="stretch")
+
+
 def _render_choice(v: DeskVerdict) -> None:
     _render_card(v, profile, limits, "choose")
     with st.expander("Odds and checks behind the verdict"):
@@ -789,4 +814,9 @@ with tab_choose:
                         _render_skipped(*skipped[i - len(verdicts)])
                 except Exception as e:  # noqa: BLE001 - never a blank tab
                     st.error(f"Could not show the trade card: {type(e).__name__}: {shown(e)}")
+        if have_plan:
+            try:
+                _render_holding_up(pstate["ok"])
+            except Exception as e:  # noqa: BLE001 - never a blank tab
+                st.error(f"Could not show the holding-up list: {type(e).__name__}: {shown(e)}")
     st.caption(DISCLAIMER)

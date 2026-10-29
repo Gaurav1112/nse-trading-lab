@@ -301,6 +301,7 @@ def run_daily_plan(profile, limits: Limits, symbols: Iterable[str], on_warning: 
             _warn(on_warning, f"regime index unavailable for flip conditions: {e}")
     ctx = context_for(profile, limits, regime=regime)
     return daily_plan(profile, frames, regime_df, limits, ctx,
+                      audit_path=data_dir() / scoreboard_io.AUDIT_FILE,  # its regime sat-outs are scored too
                       earnings_lookup=lambda s: loaders.next_earnings(profile, s),
                       quote_lookup=lambda s: quote_for(profile, s, on_warning),
                       regime=regime, tape=tape)

@@ -1035,3 +1035,44 @@ def test_h3_quick_verdict_gate_comes_before_the_broken_data_gate(monkeypatch, tm
     labels = [b.label for b in at.button]
     assert "Full check" in labels and "Re-check" not in labels
     assert not any(c.label.startswith("I choose this anyway") for c in at.checkbox)
+
+
+# ---------------------------------------------------------------- H6: holding up
+
+HOLDING_UP_TITLE = "Holding up — ready for when the regime turns (not a trade)"
+
+
+def _holding_up_page(monkeypatch, tmp_path, **plan_kw):
+    from nse_backtest.desk import session
+    from nse_backtest.desk.daily import DailyPlan
+    _patch_ok(monkeypatch, tmp_path)
+    take, wait, skip, _ = _cands()
+    monkeypatch.setattr(session, "run_daily_plan",
+                        lambda *a, **k: DailyPlan("NSE", "HOSTILE", "", (), (take,), (wait, skip), (), (), **plan_kw))
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([], []))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    assert not at.exception
+    return _load(at)
+
+
+def test_h6_choose_tab_shows_the_holding_up_list_as_not_a_trade(monkeypatch, tmp_path):
+    at = _holding_up_page(monkeypatch, tmp_path, holding_up=(("HUP", 4.25), ("HLD", -0.5)))
+    assert any(e.value == HOLDING_UP_TITLE for e in at.tabs[0].subheader)
+    df = next(d.value for d in at.tabs[0].dataframe if "vs index (60d)" in d.value.columns)
+    assert list(df["Symbol"]) == ["HUP", "HLD"] and list(df["vs index (60d)"]) == ["+4.2 pts", "-0.5 pts"]
+    assert "Desk says" not in df.columns  # no action, no money: it is not a trade
+    assert not any(o.startswith(("TAKE HUP", "WAIT HUP", "SKIP HUP")) for o in at.selectbox(key="desk_choose_pick").options)
+    cap = _texts(at.tabs[0].caption)
+    assert "Above their own 50-EMA" in cap and "not a trade" in cap
+
+
+def test_h6_choose_tab_holding_up_shows_why_it_is_empty(monkeypatch, tmp_path):
+    at = _holding_up_page(monkeypatch, tmp_path, holding_up_note="Regime index data unavailable")
+    assert any(e.value == HOLDING_UP_TITLE for e in at.tabs[0].subheader)
+    assert "Regime index data unavailable" in _texts(at.tabs[0].warning)
+
+
+def test_h6_choose_tab_holding_up_empty_without_a_reason(monkeypatch, tmp_path):
+    at = _holding_up_page(monkeypatch, tmp_path)
+    assert any(e.value == HOLDING_UP_TITLE for e in at.tabs[0].subheader)
+    assert "No stock is holding up" in _texts(at.tabs[0].caption)

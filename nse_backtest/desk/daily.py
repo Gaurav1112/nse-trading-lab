@@ -4,17 +4,19 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 
 from nse_backtest import tape_monitor
 
+from . import audit, strength
 from .calendars import is_trading_day
 from .checks import CheckContext
 from .models import Action, DeskVerdict, LiveQuote, Limits, Mode
 from .service import check_trade
+from .verdict import sat_out_refusal
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,10 @@ class DailyPlan:
     # Every other computed verdict (TAKEs beyond top_take, watch overflow, blocked and far symbols), numbers kept.
     # First-pass ones are quick (verdict.is_quick) and never audited.
     others: tuple[DeskVerdict, ...] = ()
+    # "Holding up": (symbol, 60-day return minus the index's, in % points), best first — ready for when the regime
+    # turns, never a trade. Empty with a reason in holding_up_note when the index can't anchor it.
+    holding_up: tuple[tuple[str, float], ...] = ()
+    holding_up_note: str | None = None
 
 def turnover_20d(df) -> float | None:
     """Median Close*Volume over the last 20 bars; None when it cannot be computed. Never raises."""
@@ -236,6 +242,55 @@ def _second_pass(profile, frames, p1: _Pass1, candidates: list[DeskVerdict], lim
     return takes, watch, others, skipped
 
 
+def _sat_out_sessions(path: Path) -> set[tuple[str, str, date]] | None:
+    """(market, symbol, fill session) of every SAT_OUT already in the audit log; None when the log can't be read
+    (then nothing is logged: a duplicate is worse than a gap)."""
+    from .scoreboard_io import AuditReadError, fill_session_of, read_audit  # scoreboard_io is heavier; load late
+    try:
+        rows, _ = read_audit(path)
+    except AuditReadError:
+        return None
+    out: set[tuple[str, str, date]] = set()
+    for _, r in rows:
+        if r.get("action") != "SAT_OUT":
+            continue
+        try:
+            out.add((str(r["market"]), str(r["symbol"]),
+                     fill_session_of(str(r["market"]), datetime.fromisoformat(str(r["created_at"])))))
+        except Exception:  # noqa: BLE001 - an unreadable row is the scoreboard's reject, not ours
+            continue
+    return out
+
+
+def _log_sat_outs(profile, verdicts: list[DeskVerdict], audit_path: Path) -> None:
+    """One SAT_OUT row per symbol per session for every full-checked verdict the regime alone kept out (the rows the
+    scoreboard's "Desk sat out (market regime)" record replays). Never stops the plan."""
+    todo = [v for v in verdicts if sat_out_refusal(v, profile) is None]
+    if not todo:
+        return
+    from .scoreboard_io import fill_session_of
+    seen = _sat_out_sessions(audit_path)
+    if seen is None:
+        return
+    for v in todo:
+        try:
+            key = (v.plan.market, v.plan.symbol, fill_session_of(v.plan.market, datetime.fromisoformat(v.created_at)))
+            if key in seen:
+                continue
+            audit.append_sat_out(v, audit_path)
+            seen.add(key)
+        except Exception:  # noqa: BLE001 - the sat-out record is a measurement; the plan itself must still come back
+            continue
+
+
+def _holding_up(frames, regime_df) -> tuple[tuple[tuple[str, float], ...], str | None]:
+    try:
+        why = strength.index_problem(regime_df)
+        return (() if why else tuple(strength.holding_up(frames, regime_df))), why
+    except Exception as e:  # noqa: BLE001 - a watchlist failure never stops the plan
+        return (), f"Holding-up list unavailable: {_err(e)}"
+
+
 def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limits, ctx_base: CheckContext,
                *, top_take: int = 3, top_watch: int = 5, replays: int = 3000,
                audit_path: Path | None = None,
@@ -266,7 +321,10 @@ def daily_plan(profile, frames: dict[str, pd.DataFrame], regime_df, limits: Limi
                                   earnings_lookup, quote_lookup)
     final_take, take_over = _overflow(t2, top_take, _neg_exp)
     final_watch, watch_over = _overflow(w2, top_watch, _closeness)
+    if audit_path is not None:  # only a plan that writes its own audit log measures sitting out
+        _log_sat_outs(profile, w2 + o2, audit_path)
     others = [*take_over, *watch_over, *o2, *takes_rest, *watch_rest, *p1.others]
+    held, held_note = _holding_up(frames, regime_df)
     return DailyPlan(profile.code, regime, regime_text, flip_conditions(regime_df, profile),
                      tuple(final_take), tuple(final_watch), tuple(p1.skipped + s2),
-                     tuple(p1.unavailable), tuple(others))
+                     tuple(p1.unavailable), tuple(others), held, held_note)

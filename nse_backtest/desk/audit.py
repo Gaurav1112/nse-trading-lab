@@ -84,3 +84,14 @@ def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime |
     at = at.isoformat()
     return _append({**_row(v), "created_at": at, "verdict_created_at": v.created_at, "action": "OVERRIDE",
                     "desk_action": v.action.value, "chosen_by": "owner"}, path)
+
+
+def append_sat_out(v: DeskVerdict, path: Path | None = None) -> Path:
+    """The desk sat out a trade because of the market regime alone: the verdict's own row with action SAT_OUT (every
+    other field unchanged, so the scoreboard replays it exactly like a desk TAKE, in its own record). Raises
+    ValueError unless the only BLOCK is the regime and the desk would otherwise have taken it (swing long, full
+    check)."""
+    from .verdict import sat_out_refusal  # verdict imports this module's neighbours; keep the import local
+    if (why := sat_out_refusal(v, get_profile(v.plan.market))):
+        raise ValueError(f"not a sat-out: {why}")
+    return _append({**_row(v), "action": "SAT_OUT"}, path)

@@ -306,6 +306,10 @@ def test_cli_plan_passes_regime_and_earnings_lookup(offline_desk, capsys, monkey
     assert cli.main(["plan", "--market", "US"]) == 0
     assert seen and seen[0] in ("TRENDING", "MIXED", "HOSTILE")
     assert calls and callable(calls[0].get("earnings_lookup"))
+    from nse_backtest.desk.audit import data_dir
+    assert calls[0]["audit_path"] == data_dir() / "desk_audit.jsonl"  # H6: so the plan's regime sat-outs are logged
+    out = capsys.readouterr().out
+    assert "HOLDING UP — ready for when the regime turns (not a trade" in out
 
 
 def test_cli_settings_corrupt_warns_and_backs_up(tmp_path, capsys):

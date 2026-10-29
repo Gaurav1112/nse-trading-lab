@@ -1,8 +1,9 @@
 """Desk scoreboard core (pure: no network, no file I/O).
 
-Replays every logged TAKE verdict (record "desk") and every owner override of a WAIT/SKIP (record "override")
+Replays every logged TAKE verdict (record "desk"), every owner override of a WAIT/SKIP (record "override") and every
+swing TAKE the desk sat out only because of the market regime (record "sat_out", replayed exactly like a TAKE)
 against what prices actually did, using conservative fill and exit rules, then summarises per (record, market,
-mode, side): the two records are never pooled, nor shorts with longs. It is a paper record as if every ticket were taken exactly as printed,
+mode, side): the records are never pooled, nor shorts with longs. It is a paper record as if every ticket were taken exactly as printed,
 not the user's real P&L. Where intrabar order is unknown the worse outcome is chosen.
 
 A replay starts at max(created_at, quote_as_of): the ticket can't be typed before the quote it was
@@ -60,8 +61,11 @@ MIN_TRADES = 30
 MIN_PRED_COVERAGE = 0.8
 MAX_UNAVAILABLE_SHARE = 0.10  # more unreplayable trades than this (of resolved + unavailable) -> Inconclusive
 DEFAULT_MAX_HOLD = {Mode.SWING: 15, Mode.INTRADAY: 26}
-RECORD_OF_ACTION = {"TAKE": "desk", "OVERRIDE": "override"}  # audit action -> scoreboard record
-RECORD_LABELS = {"desk": "Desk picks", "override": "Your overrides"}
+# audit action -> scoreboard record. SAT_OUT: a swing TAKE the desk would have made but for the market regime (H6),
+# replayed exactly like a desk TAKE so the owner sees what sitting out saved or cost.
+RECORD_OF_ACTION = {"TAKE": "desk", "OVERRIDE": "override", "SAT_OUT": "sat_out"}
+RECORD_LABELS = {"desk": "Desk picks", "override": "Your overrides", "sat_out": "Desk sat out (market regime)"}
+_KEY_SUFFIX = {"desk": "", "override": "|override", "sat_out": "|sat_out"}  # one cache slot per record
 
 
 @dataclass(frozen=True)
@@ -82,7 +86,8 @@ class Candidate:
     last_bar: str | None = None     # the plan's last bar (ISO); None in rows logged before it was recorded
     last_close: float | None = None  # the plan's last daily Close; None in rows logged before R1
     entry_limit: float | None = None  # intraday: the buy stop-limit's limit price (None: computed from the tick)
-    record: str = "desk"        # "desk" (a logged TAKE) or "override" (the owner chose a WAIT/SKIP anyway)
+    record: str = "desk"        # "desk" (a logged TAKE), "override" (the owner chose a WAIT/SKIP anyway) or
+    #                             "sat_out" (a TAKE but for the market regime)
     current_price: float | None = None  # the price the verdict was decided at; None in rows logged before it
     quote_live: bool | None = None  # current_price was a live quote; False: the last close; None: unknown (old row)
     quote_as_of: datetime | None = None  # the quote's own time (tz-aware); None without one (old rows: untrusted)
@@ -132,7 +137,7 @@ class ScoreStats:
     unavailable: int
     verdict: str
     pred_coverage: float | None = None   # share of resolved trades carrying an MC prediction
-    record: str = "desk"                 # which record these stats are for: "desk" or "override", never both
+    record: str = "desk"                 # which record these stats are for: "desk", "override" or "sat_out", never pooled
     side: Side = Side.LONG               # longs and shorts are never pooled either
 
 
@@ -161,6 +166,8 @@ def _parse_row(row: dict) -> Candidate:
         raise ValueError(f"not a scored action {row.get('action')!r}")
     if record == "override" and row.get("desk_action") not in ("WAIT", "SKIP"):
         raise ValueError(f"override of a TAKE verdict (desk_action {row.get('desk_action')!r})")
+    if record == "sat_out":
+        _check_sat_out_row(row)
     try:
         side = Side(row.get("side", "long"))
     except ValueError:
@@ -222,11 +229,22 @@ def _parse_row(row: dict) -> Candidate:
                  else fills.limit_or_default(raw, entry, stop, profile.tick))
     return Candidate(created, profile.code, str(row["symbol"]), mode, entry, stop, t1, hold, float(cps), qty,
                      _opt(row, "mc_expectancy_r"), _opt(row, "history_expectancy_r"),
-                     f"{row['input_hash']}|{created.isoformat()}" + ("|override" if record == "override" else ""),
+                     f"{row['input_hash']}|{created.isoformat()}" + _KEY_SUFFIX[record],
                      str(last_bar) if last_bar not in (None, "") else None,
                      last_close if last_close is not None and last_close > 0 else None, limit, record,
                      cp if (cp := _opt(row, "current_price")) is not None and cp > 0 else None,
                      _quote_live(row), _quote_as_of(row), side)
+
+
+def _check_sat_out_row(row: dict) -> None:
+    """A SAT_OUT row is a long swing verdict whose only BLOCK was the market regime, or ValueError: anything else
+    was never a TAKE the regime alone kept out, so it is not scored as one."""
+    if row.get("side", "long") != "long":
+        raise ValueError("sat-out of a short: only long swing trades are logged as sat out")
+    if row.get("mode") != Mode.SWING.value:
+        raise ValueError(f"sat-out in {row.get('mode')!r} mode: only swing trades are logged as sat out")
+    if row.get("blocks") != ["regime"]:
+        raise ValueError(f"sat-out whose only BLOCK is not the regime (blocks {row.get('blocks')!r})")
 
 
 def _check_short_row(row: dict, profile, mode: Mode, entry: float, stop: float, t1: float) -> None:
@@ -281,7 +299,7 @@ def default_session_of(market: str, created_at: datetime) -> date:
 def load_candidates(rows: Iterable[dict], *, session_of: Callable[[str, datetime], date] | None = None
                     ) -> tuple[list[Candidate], list[tuple[dict, str]]]:
     """TAKE rows (record "desk") and OVERRIDE rows (record "override") only; others are silently not candidates.
-    Malformed TAKE/OVERRIDE rows come back with a reason. Deduped by (record, market, symbol, mode, side, session
+    Malformed TAKE/OVERRIDE/SAT_OUT rows come back with a reason. Deduped by (record, market, symbol, mode, side, session
     the order belongs to), keeping the earliest, so a desk pick and an override never share a slot; the session
     defaults to the market-local date of created_at, or is session_of(market, created_at) when given."""
     session_of = session_of or default_session_of
