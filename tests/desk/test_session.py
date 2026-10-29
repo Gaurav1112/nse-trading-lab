@@ -2,6 +2,7 @@ from nse_backtest.desk import loaders, session
 from nse_backtest.desk.markets import NSE
 from nse_backtest.desk.models import DeskVerdict, Limits, Mode
 from tests.desk.test_cli_loaders import series
+from tests.desk.test_loaders_many import via_load_daily
 
 
 def test_resolve_regime_none_when_load_fails(monkeypatch):
@@ -24,6 +25,7 @@ def test_load_frames_marks_failures_as_none(monkeypatch):
             raise ValueError("nope")
         return series()
     monkeypatch.setattr(loaders, "load_daily", load)
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     warns = []
     out = session.load_frames(NSE, ["OK", "BAD"], warns.append)
     assert out["OK"] is not None and out["BAD"] is None and "BAD" in warns[0]
@@ -117,3 +119,46 @@ def test_a7_run_daily_plan_accepts_header_regime(offline_desk, monkeypatch):
     monkeypatch.setattr(loaders, "load_regime", lambda p: (_ for _ in ()).throw(AssertionError("no reload")))
     dp = session.run_daily_plan(NSE, Limits(capital=100_000), ["AAA"], regime="HOSTILE", tape=None)
     assert dp.regime == "HOSTILE" and dp.take == ()
+
+
+# ---- S2: regime staleness counts trading sessions ----
+def _regime_ending(last: str):
+    df = series()
+    df.index = pd.bdate_range(end=last, periods=len(df))
+    return df
+
+
+def test_s2_regime_stale_allows_one_missed_session():
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2026-10-16"), NSE, now=now) is None
+    assert session._regime_stale(_regime_ending("2026-10-15"), NSE, now=now) == \
+        "Regime index data is stale (last bar 2026-10-15)"
+
+
+def test_s2_regime_stale_uncovered_year_keeps_3_day_rule():
+    now = datetime(2027, 1, 7, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2027-01-04"), NSE, now=now) is None
+    assert session._regime_stale(_regime_ending("2027-01-01"), NSE, now=now) is not None
+
+
+def test_s2_fix1_regime_stale_counts_todays_finished_session():
+    now = datetime(2026, 10, 29, 16, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2026-10-27"), NSE, now=now) == \
+        "Regime index data is stale (last bar 2026-10-27)"
+    assert session._regime_stale(_regime_ending("2026-10-28"), NSE, now=now) is None
+    # session still open: only the 28th has finished, one lag allowed
+    assert session._regime_stale(_regime_ending("2026-10-27"), NSE,
+                                 now=datetime(2026, 10, 29, 11, 0, tzinfo=ZoneInfo(NSE.tz))) is None
+
+
+def test_r1b_regime_future_dated_last_bar_warns():
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2026-10-22"), NSE, now=now) == \
+        "Regime index data has a future-dated last bar (2026-10-22)"
+    assert session._regime_stale(_regime_ending("2026-10-21"), NSE, now=now) is None  # today is fine
+
+
+def test_r1b_regime_stale_uncovered_year_names_missing_calendar():
+    now = datetime(2027, 1, 7, 10, 0, tzinfo=ZoneInfo(NSE.tz))
+    assert session._regime_stale(_regime_ending("2027-01-01"), NSE, now=now) == \
+        "Regime index data is stale (last bar 2027-01-01) (holiday calendar not available for 2027)"

@@ -7,17 +7,22 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nse_backtest import tape_monitor
 
+from . import calendars as cal
 from . import loaders
+from . import scoreboard_io
+from .audit import data_dir
 from .daily import DailyPlan, daily_plan, today_gap_pct, turnover_20d
 from .intraday import orb_scan
 from .models import DeskVerdict, Limits, Mode
+from .scoreboard_io import ScoreboardResult  # noqa: F401 - re-exported for the CLI and page
 from .service import check_trade
 
 Warn = Callable[[str], None] | None
@@ -37,16 +42,42 @@ def limits_with_status(profile) -> tuple[Limits, bool]:
 _REGIME_MAX_AGE_DAYS = 3
 
 
-def _regime_stale(regime_df, profile) -> str | None:
-    """Warning text when the regime index's last bar is too old for market-today, else None."""
+_REGIME_MAX_MISSED_SESSIONS = 2  # the index may lag one session behind the stocks
+
+
+def _regime_stale(regime_df, profile, now: datetime | None = None) -> str | None:
+    """Warning text when the regime index's last bar is too old for market-today, else None.
+
+    Covered years: stale once 2 or more finished trading sessions are missing after the last bar (sessions
+    strictly between the last bar and today, plus today's once it has closed).
+    Years without a holiday calendar keep the 3-calendar-day rule and say so in the message.
+    A last bar after market-today is reported as future-dated, never passed silently.
+    """
     try:
         last = pd.Timestamp(regime_df.index[-1]).date()
     except Exception:  # noqa: BLE001 - unreadable dates: treat as stale
         return "Regime index data is stale (last bar unknown)"
-    today = datetime.now(ZoneInfo(profile.tz)).date()
-    if (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS):
-        return f"Regime index data is stale (last bar {last})"
-    return None
+    tz = ZoneInfo(profile.tz)
+    if now is not None and now.tzinfo is not None:
+        now = now.astimezone(tz)
+    today = (now or datetime.now(tz)).date()
+    if last > today:
+        return f"Regime index data has a future-dated last bar ({last})"
+    if last == today:
+        return None
+    sfx = ""
+    year = cal.first_uncovered_year(profile, last, today)
+    if year is not None:
+        stale = (today - last) > timedelta(days=_REGIME_MAX_AGE_DAYS)
+        sfx = f" (holiday calendar not available for {year})"
+    else:
+        missed = cal.trading_days_between(profile, last, today)
+        if now is None:
+            now = datetime.now(tz)
+        if cal.is_trading_day(profile, today) and now.time() >= cal.session_close_for(profile, today):
+            missed += 1  # today's session has finished too (last < today here)
+        stale = missed >= _REGIME_MAX_MISSED_SESSIONS
+    return f"Regime index data is stale (last bar {last}){sfx}" if stale else None
 
 
 def assess(regime_df, on_warning: Warn = None, profile=None):
@@ -100,12 +131,17 @@ def context_for(profile, limits: Limits, symbol_df=None, regime: str | None = No
 
 def load_frames(profile, symbols: Iterable[str], on_warning: Warn = None) -> dict:
     """Daily frames per symbol; a failed load maps to None (reported as unavailable, never dropped)."""
+    symbols = list(symbols)
+    try:
+        frames, errors = loaders.load_daily_many(profile, symbols)
+    except Exception as e:  # noqa: BLE001 - the batch never raises per symbol; this is a last guard
+        frames, errors = {}, {s: str(e) for s in symbols}
     out: dict = {}
     for sym in symbols:
-        try:
-            out[sym] = loaders.load_daily(profile, sym)
-        except Exception as e:  # noqa: BLE001
-            _warn(on_warning, f"no data for {sym}: {e}")
+        if sym in frames:
+            out[sym] = frames[sym]
+        else:
+            _warn(on_warning, f"no data for {sym}: {errors.get(sym, 'unavailable')}")
             out[sym] = None
     return out
 
@@ -123,7 +159,7 @@ def run_check(profile, symbol: str, mode: Mode, limits: Limits, *, entry=None, s
     ctx = context_for(profile, limits, daily, regime)
     nxt, checked = loaders.next_earnings(profile, sym)
     quote = quote_for(profile, sym, on_warning)
-    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now))
+    ctx = replace(ctx, next_earnings=nxt, earnings_checked=checked, today_gap_pct=today_gap_pct(daily, quote, ctx.now, profile))
     return check_trade(df, sym, profile, mode, limits, ctx, entry=entry, stop=stop, target=target, quote=quote)
 
 
@@ -165,8 +201,23 @@ def run_intraday(profile, limits: Limits, symbols: Iterable[str], regime=_RESOLV
         try:  # daily bars give the liquidity (turnover) and gap checks something to read
             daily = loaders.load_daily(profile, s)
             per_symbol[s] = replace(ctx, turnover_20d=turnover_20d(daily),
-                                    today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now))
+                                    today_gap_pct=today_gap_pct(daily, quotes[s], ctx.now, profile))
         except Exception as e:  # noqa: BLE001 - liquidity then stays unknown, which the desk WARNs on
             _warn(on_warning, f"no daily data for {s}: {e}")
     verdicts, failures = orb_scan(profile, frames15, limits, ctx, ctx_by_symbol=per_symbol, quotes=quotes)
     return verdicts, load_failures + list(failures)
+
+
+def run_scoreboard(market: str | None = None, *, now: datetime | None = None, audit_path: Path | None = None,
+                   cache_path: Path | None = None, on_warning: Warn = None,
+                   load_daily=None, load_intraday=None) -> ScoreboardResult:
+    """Paper record of every logged TAKE (market None or "ALL" = all markets; unknown market -> ValueError).
+    Bars come from loaders.load_daily / loaders.load_intraday unless fakes are passed; resolved final
+    outcomes are cached in desk_scoreboard.json so they are never refetched."""
+    return scoreboard_io.build_scoreboard(
+        market, now=now or datetime.now(timezone.utc),
+        audit_path=Path(audit_path) if audit_path is not None else data_dir() / scoreboard_io.AUDIT_FILE,
+        cache_path=Path(cache_path) if cache_path is not None else data_dir() / scoreboard_io.CACHE_FILE,
+        on_warning=on_warning,
+        load_daily=load_daily if load_daily is not None else loaders.load_daily,
+        load_intraday=load_intraday if load_intraday is not None else loaders.load_intraday)

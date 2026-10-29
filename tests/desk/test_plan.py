@@ -145,3 +145,13 @@ def test_a4_bars_out_of_time_order_raise(bad):
     df = pd.concat([df, df.iloc[[-1]]]) if bad == "dup" else df.iloc[::-1]
     with pytest.raises(ValueError, match="time order"):
         build_plan(df, "X", Mode.SWING, NSE)
+
+
+def test_s2_intraday_hold_uses_early_close_flat_by():
+    from nse_backtest.desk.markets import US
+    idx = pd.date_range("2026-11-27 09:30", periods=4, freq="15min")
+    df = pd.DataFrame({"Open": 100.0, "High": [102, 103, 103, 103], "Low": [99, 100, 100, 100],
+                       "Close": 101.0, "Volume": 1e5}, index=idx)
+    p = build_plan(df, "X", Mode.INTRADAY, US)
+    # last bar 10:15 -> flat by 12:45 (13:00 early close - 15 min) = 10 bars of 15 min
+    assert p.max_hold_bars == 10

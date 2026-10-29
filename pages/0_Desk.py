@@ -18,6 +18,7 @@ import streamlit as st
 
 from components import theme
 from nse_backtest.desk import loaders, session
+from nse_backtest.desk.scoreboard_io import SCOREBOARD_COVERAGE, SCOREBOARD_DISCLAIMER
 from nse_backtest.desk.daily import flip_conditions
 from nse_backtest.desk.markets import get_profile, universe
 from nse_backtest.desk.models import Action, DeskVerdict, Mode
@@ -231,7 +232,8 @@ st.markdown("**What would change it**")
 st.markdown("\n".join(f"- {c}" for c in flips) if flips else "- Regime is already TRENDING")
 regime_name = tape.regime if tape else None
 
-tab_plan, tab_check, tab_pos, tab_intra = st.tabs(["Today's Plan", "Check a Trade", "My Positions", "Intraday"])
+tab_plan, tab_check, tab_pos, tab_intra, tab_score = st.tabs(
+    ["Today's Plan", "Check a Trade", "My Positions", "Intraday", "Scoreboard"])
 
 
 # ---------------------------------------------------------------- Today's Plan
@@ -399,4 +401,86 @@ with tab_intra:
             with st.expander(f"Not scanned ({len(failures)})"):
                 for s, why in failures:
                     st.write(f"{s}: {why}")
+    st.caption(DISCLAIMER)
+
+
+# ---------------------------------------------------------------- Scoreboard
+
+def _score_banner(s) -> None:
+    text = f"**{s.market} {s.mode.value}** — {s.verdict}"
+    if s.verdict.startswith(("Losing", "Worse")):
+        st.error(text)
+    elif s.verdict.startswith("Matching"):
+        st.success(text)
+    else:
+        st.info(text)
+
+
+def _render_scoreboard(res, profile, warnings=()) -> None:
+    for s in res.stats:
+        _score_banner(s)
+    for w in warnings:  # bar-load failures, cache problems: the trades they hit show as data_unavailable
+        st.warning(w)
+    if res.rejects:
+        k = len(res.rejects)
+        st.warning(f"{k} audit line{'s' if k != 1 else ''} could not be read")
+    if getattr(res, "note", None):
+        st.info(res.note)
+    if not res.outcomes:
+        st.info(f"No TAKE verdicts logged yet for {profile.code} — build a plan or check a trade to start a record.")
+    if res.stats:
+        st.dataframe(pd.DataFrame([{
+            "Mode": s.mode.value, "Trades": s.n, "Win %": None if s.win_pct is None else round(s.win_pct, 1),
+            "Mean realised": _r(s.mean_r), "Predicted MC": _r(s.mean_pred_mc_r),
+            "Predicted history": _r(s.mean_pred_hist_r),
+            "95% CI": "n/a" if s.ci_low is None else f"{_r(s.ci_low)} to {_r(s.ci_high)}",
+            "Max drawdown": "n/a" if s.max_dd_r is None else f"{s.max_dd_r:.2f}R",
+            "Not filled": s.not_filled, "Open": s.open, "Unavailable": s.unavailable,
+            "Prediction coverage": _pct(s.pred_coverage)} for s in res.stats]), hide_index=True, width="stretch")
+        for s in res.stats:
+            if s.cumulative_r:
+                st.markdown(f"**Cumulative R — {s.mode.value}**")
+                st.line_chart(pd.DataFrame({"cumulative R": list(s.cumulative_r)}))
+    if res.outcomes:
+        st.dataframe(pd.DataFrame([{
+            "Date": o.candidate.created_at.astimezone(ZoneInfo(profile.tz)).date().isoformat(),
+            "Symbol": o.candidate.symbol, "Mode": o.candidate.mode.value, "Status": o.status.value,
+            "Fill": "" if o.fill_price is None else profile.money(o.fill_price),
+            "Exit": "" if o.exit_price is None else profile.money(o.exit_price),
+            "Realised R": _r(o.realised_r) if o.realised_r is not None else (
+                f"({_r(o.mtm_r)} open)" if o.mtm_r is not None else ""),
+            "Predicted MC R": _r(o.candidate.mc_expectancy_r), "Note": o.note} for o in res.outcomes]),
+            hide_index=True, width="stretch")
+    with st.expander(f"Rejected audit lines ({len(res.rejects)})" + (" · cache note" if res.cache_note else "")):
+        for ln, why in res.rejects:
+            st.write(f"line {ln}: {why}")
+        if res.cache_note:
+            st.warning(res.cache_note)
+        if not res.rejects and not res.cache_note:
+            st.caption("None.")
+
+
+with tab_score:
+    st.caption(f"{SCOREBOARD_DISCLAIMER} {SCOREBOARD_COVERAGE}")
+    score_key = ("scoreboard", market)
+    if st.button("Load scoreboard", key="desk_load_scoreboard"):
+        score_warnings: list[str] = []
+        with st.spinner("Replaying logged TAKEs — resolved trades come from the cache..."):
+            sstate = _attempt("Could not build the scoreboard", session.run_scoreboard, market,
+                              on_warning=score_warnings.append)
+        if "ok" in sstate:
+            sstate["at"] = _now_hhmm(profile)
+            sstate["warnings"] = list(score_warnings)
+        st.session_state[score_key] = sstate  # a failure REPLACES any earlier success
+    sstate = st.session_state.get(score_key)
+    if sstate is None:
+        st.info("Press the button to load the scoreboard (it may fetch price data).")
+    elif "error" in sstate:
+        st.error(sstate["error"])
+    else:
+        st.caption(f"Loaded at {sstate['at']} (market time)")
+        try:
+            _render_scoreboard(sstate["ok"], profile, sstate.get("warnings", ()))
+        except Exception as e:  # noqa: BLE001 - never a blank tab
+            st.error(f"Could not show the scoreboard: {type(e).__name__}: {e}")
     st.caption(DISCLAIMER)

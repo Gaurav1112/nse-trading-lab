@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from nse_backtest.desk.calendars import flat_by_for
 from nse_backtest.desk.markets import MarketProfile
 from nse_backtest.desk.models import Mode, TradePlan
 
@@ -86,7 +87,7 @@ def build_plan(df: pd.DataFrame, symbol: str, mode: Mode, profile: MarketProfile
         else:
             s, basis = (float(orb["High"]) + float(orb["Low"])) / 2, "opening-range mid"
         r_mult2, r1 = 3.0, 1.5  # T1 at 1.5R so an auto plan meets the default min_rr
-        flat_dt = datetime.combine(last_ts.date(), profile.flat_by)
+        flat_dt = datetime.combine(last_ts.date(), flat_by_for(profile, last_ts.date()))
         hold = max(1, int((flat_dt - last_ts.to_pydatetime().replace(tzinfo=None)) / _BAR))
     r = e - s
     t1 = target if target is not None else e + r1 * r

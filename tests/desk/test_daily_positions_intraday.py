@@ -192,3 +192,18 @@ def test_lr_today_gap_pct_requires_quote_dated_market_today():
     # US: quote at 15:59 ET 10-28 is stale at 8:45 IST 10-29 evaluated in ET-aware now
     usq = LiveQuote(price=101.0, day_open=101.0, as_of=datetime(2026, 10, 28, 15, 59, tzinfo=ET))
     assert today_gap_pct(df, usq, datetime(2026, 10, 29, 8, 0, tzinfo=ET)) is None
+
+
+def test_s2_today_gap_pct_none_on_market_holiday():
+    import pandas as pd
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from nse_backtest.desk.daily import today_gap_pct
+    from nse_backtest.desk.markets import NSE
+    from nse_backtest.desk.models import LiveQuote
+    IST = ZoneInfo("Asia/Kolkata")
+    df = pd.DataFrame({"Close": [100.0, 101.0]}, index=pd.to_datetime(["2026-10-16", "2026-10-19"]))
+    q = LiveQuote(price=102.0, day_open=102.02, as_of=datetime(2026, 10, 20, 9, 20, tzinfo=IST))
+    now = datetime(2026, 10, 20, 10, 0, tzinfo=IST)
+    assert today_gap_pct(df, q, now) is not None  # without a profile: quote dated today
+    assert today_gap_pct(df, q, now, profile=NSE) is None  # Dussehra: no session, no gap

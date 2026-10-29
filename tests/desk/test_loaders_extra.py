@@ -13,6 +13,7 @@ from nse_backtest.desk import cli, loaders, session
 from nse_backtest.desk.markets import NSE, US
 from nse_backtest.desk.models import Limits
 from tests.desk.test_cli_loaders import series
+from tests.desk.test_loaders_many import via_load_daily
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +157,7 @@ def test_load_intraday(monkeypatch):
 
 def test_cli_plan_positions_intraday_settings_text(capsys, monkeypatch, tmp_path):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: (_ for _ in ()).throw(ValueError(f"no intraday data for {s}")))
@@ -179,6 +181,7 @@ def test_cli_plan_positions_intraday_settings_text(capsys, monkeypatch, tmp_path
 
 def test_cli_plan_runs(capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     monkeypatch.setattr(cli, "PLAN_UNIVERSE_LIMIT", 3, raising=False)
@@ -267,6 +270,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
     from nse_backtest.desk.checks import CheckContext
     seen = {}
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "load_intraday", lambda p, s: series())
     def fake_scan(profile, frames, limits, ctx, *, replays=3000, ctx_by_symbol=None, quotes=None):
@@ -283,6 +287,7 @@ def test_cli_intraday_prints_full_take_block(capsys, monkeypatch):
 
 def test_cli_settings_fallback_warning(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(loaders, "load_daily", lambda p, s, years=4: series())
+    monkeypatch.setattr(loaders, "load_daily_many", via_load_daily)  # S4: load_frames batches
     monkeypatch.setattr(loaders, "load_regime", lambda p: series())
     monkeypatch.setattr(loaders, "next_earnings", lambda p, s: (None, True))
     (tmp_path / "desk_settings.json").write_text("garbage")
@@ -399,7 +404,8 @@ def test_a4_load_daily_dedupes_duplicated_last_row(monkeypatch):
     _patch_fetch(monkeypatch, f)
     now = datetime(2026, 10, 29, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz))
     out = loaders.load_daily(NSE, "INFY", now=now)
-    assert not out.index.has_duplicates and len(out) == 30 and out["Close"].iloc[-1] == 555.0
+    # S2: the weekday-only fixture holds two NSE holidays (2026-10-02, 2026-10-20); load_daily drops them
+    assert not out.index.has_duplicates and len(out) == 28 and out["Close"].iloc[-1] == 555.0
 
 
 def test_a5_load_daily_end_includes_today_and_drops_partial_bar(monkeypatch):
@@ -574,3 +580,67 @@ def test_lr_load_daily_us_after_close_uses_market_tz(monkeypatch):
     calls = _recording_fetch(monkeypatch, _daily_to("2026-10-29"))
     loaders.load_daily(US, "AAPL", now=datetime(2026, 10, 29, 16, 30, tzinfo=et))
     assert calls == [True, False]
+
+
+# ---- S2: exchange calendars in load_daily and the PDT window ----
+def test_s2_load_daily_keeps_todays_bar_after_early_close(monkeypatch):
+    et = loaders.ZoneInfo(US.tz)
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-11-27"))
+    out = loaders.load_daily(US, "AAPL", now=datetime(2026, 11, 27, 13, 30, tzinfo=et))
+    assert out.index[-1].date() == date(2026, 11, 27)  # early close 13:00: bar is complete
+    assert calls == [True, False]  # just after the (early) close: re-fetched once, uncached
+    calls = _recording_fetch(monkeypatch, _daily_to("2026-11-27"))
+    out = loaders.load_daily(US, "AAPL", now=datetime(2026, 11, 27, 12, 30, tzinfo=et))
+    assert out.index[-1].date() < date(2026, 11, 27)  # session still open: partial bar dropped
+    assert calls == [True]
+
+
+def test_s2_pdt_window_is_last_5_trading_days(tmp_path):
+    rows = [  # US Thanksgiving 2026-11-26 is not a trading day, so the window reaches back to Fri 11-20
+        {"market": "US", "symbol": "A", "entry_date": "2026-11-20", "closed_date": "2026-11-20", "pnl": 1},
+        {"market": "US", "symbol": "B", "entry_date": "2026-11-19", "closed_date": "2026-11-19", "pnl": 1},
+    ]
+    _journal(tmp_path, rows)
+    now = datetime(2026, 11, 27, 11, 0, tzinfo=loaders.ZoneInfo(US.tz))
+    assert loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=now).day_trades_5d == 1
+
+
+def test_s2_fix1_load_daily_drops_bars_on_non_trading_days_in_covered_years(monkeypatch):
+    f = _daily_to("2026-11-06")
+    muhurat = f.iloc[[-1]].copy()
+    muhurat.index = pd.DatetimeIndex([pd.Timestamp("2026-11-08")])
+    _patch_fetch(monkeypatch, pd.concat([f, muhurat]))
+    out = loaders.load_daily(NSE, "INFY", now=datetime(2026, 11, 9, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz)))
+    assert date(2026, 11, 8) not in set(out.index.date) and out.index[-1].date() == date(2026, 11, 6)
+    assert date(2026, 10, 20) not in set(out.index.date)  # Dussehra row from a weekday-only fixture
+    _patch_fetch(monkeypatch, _daily_to("2027-01-26"))  # NSE 2027 uncovered: Republic Day 2027 row is kept
+    out = loaders.load_daily(NSE, "INFY", now=datetime(2027, 1, 27, 10, 0, tzinfo=loaders.ZoneInfo(NSE.tz)))
+    assert out.index[-1].date() == date(2027, 1, 26)
+
+
+def test_s2_fix1_pdt_walk_failure_is_unknown_not_a_crash(tmp_path, monkeypatch):
+    def broken(profile, d):
+        raise RuntimeError("calendar data is broken")
+    monkeypatch.setattr(loaders.cal, "previous_trading_day", broken)
+    _journal(tmp_path, [])
+    ctx = loaders.build_context(US, Limits(capital=5000, pdt_guard=True), now=US_NOW)
+    assert ctx.day_trades_5d is None
+
+
+# ---- review round R1: load_daily passes `adjusted` through (the scoreboard asks for unadjusted bars)
+def test_r1_load_daily_adjusted_passthrough(monkeypatch):
+    import nse_backtest.data as data
+    seen = []
+
+    def fake(sym, start, end=None, exchange="NS", use_cache=True, adjusted=True):
+        seen.append(adjusted)
+        return _daily_to("2026-10-28")
+    monkeypatch.setattr(data, "fetch_nse", fake)
+    tz = loaders.ZoneInfo(NSE.tz)
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 11, 0, tzinfo=tz), adjusted=False)
+    assert seen == [True, False]
+    seen.clear()
+    monkeypatch.setattr(data, "fetch_nse", lambda *a, adjusted=True, **k: seen.append(adjusted) or _daily_to("2026-10-29"))
+    loaders.load_daily(NSE, "INFY", now=datetime(2026, 10, 29, 15, 45, tzinfo=tz), adjusted=False)
+    assert seen == [False, False]  # the after-close uncached refetch stays unadjusted

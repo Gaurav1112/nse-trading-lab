@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Gate: `python3.13 -m pytest -q --ignore=tests/pipeline` must be green after every task (pipeline tests need `fyers_apiv3`, not installed locally).
+- Gate: the FULL suite `python3.13 -m pytest -o addopts="" -p no:cacheprovider` (no `--ignore`) must be green after every task. Pipeline modules import `fyers_apiv3` / `pywebpush` lazily, so tests/pipeline runs without them installed.
 - No new runtime dependencies. No GPL/AGPL code copied or imported. Code ported from day-trader-skill (MIT) carries a docstring line `Adapted from github.com/Jakeschincariol/day-trader-skill (MIT).`
 - Deterministic: every random draw uses `np.random.default_rng(seed)`; default seed 19.
 - No order placement anywhere. No LLM call anywhere.

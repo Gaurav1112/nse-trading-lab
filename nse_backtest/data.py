@@ -66,9 +66,10 @@ def _validate_exchange(exchange: str) -> str:
     return e
 
 
-def _cache_path(symbol: str, exchange: str, start: str, end: str) -> str:
+def _cache_path(symbol: str, exchange: str, start: str, end: str, adjusted: bool = True) -> str:
+    """Cache file for one download. Adjusted bars keep the historical key; unadjusted ones get their own."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    raw = f"{symbol}|{exchange}|{start}|{end}"
+    raw = f"{symbol}|{exchange}|{start}|{end}" + ("" if adjusted else "|unadjusted")
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     safe_sym = re.sub(r"[^A-Z0-9]", "_", symbol)[:20]
     fname = f"{safe_sym}_{digest}.parquet"
@@ -121,20 +122,22 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
-                 retries: int = 3) -> pd.DataFrame:
+def _yf_retry(call, label: str, timeout: float = 30.0, retries: int = 3,
+              rate_limit_backoff: float = 60.0) -> pd.DataFrame:
+    """Run one ``yf.download`` call under ``_YF_LOCK`` with the shared retry/backoff policy.
+
+    Empty responses (rate-limit / bad symbol) are retried; the last one is returned for the
+    caller to handle. Exceptions are retried and re-raised as RuntimeError after ``retries``.
+    """
     last_err: Optional[Exception] = None
     for attempt in range(retries):
         try:
             t0 = time.time()
             with _YF_LOCK:
-                df = yf.download(
-                    ticker, start=start, end=end, progress=False,
-                    auto_adjust=True, threads=False,
-                )
+                df = call()
             if time.time() - t0 > timeout:
                 log.warning("yf.download for %s exceeded soft timeout %.1fs",
-                            ticker, timeout)
+                            label, timeout)
             # yfinance returns empty DataFrame on rate-limit / bad symbol rather
             # than raising. Treat empty as retriable so transient rate-limits
             # don't poison the result.
@@ -142,35 +145,33 @@ def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
                 if attempt < retries - 1:
                     # yfinance 429 rate-limit bans last 60-300s; use at least 60s
                     # backoff after the first retry so re-attempts aren't wasted.
-                    backoff = 60 if attempt >= 1 else 1.5
+                    backoff = rate_limit_backoff if attempt >= 1 else 1.5
                     log.warning("yf.download attempt %d/%d for %s returned empty — retrying in %.1fs",
-                                attempt + 1, retries, ticker, backoff)
+                                attempt + 1, retries, label, backoff)
                     time.sleep(backoff)
                     continue
                 return df  # final attempt: return empty for caller to handle
             return df
         except Exception as e:
             last_err = e
-            backoff = 60 if attempt >= 1 else 1.5
+            backoff = rate_limit_backoff if attempt >= 1 else 1.5
             log.warning("yf.download attempt %d/%d for %s failed: %s — retrying in %.1fs",
-                        attempt + 1, retries, ticker, e, backoff)
+                        attempt + 1, retries, label, e, backoff)
             time.sleep(backoff)
-    raise RuntimeError(f"yfinance failed after {retries} attempts for {ticker}: {last_err}")
+    raise RuntimeError(f"yfinance failed after {retries} attempts for {label}: {last_err}")
 
 
-def fetch_nse(
-    symbol: str,
-    start: str = "2015-01-01",
-    end: Optional[str] = None,
-    exchange: str = "NS",
-    use_cache: bool = True,
-) -> pd.DataFrame:
-    """Fetch historical OHLCV for an Indian stock.  Symbols are validated."""
-    symbol = _validate_symbol(symbol)
-    exchange = _validate_exchange(exchange)
+def _yf_download(ticker: str, start: str, end: str, timeout: float = 30.0,
+                 retries: int = 3, adjusted: bool = True) -> pd.DataFrame:
+    # backoff policy (1.5s, then 60s for yfinance 429 bans) lives in _yf_retry
+    return _yf_retry(
+        lambda: yf.download(ticker, start=start, end=end, progress=False,
+                            auto_adjust=adjusted, threads=False),
+        ticker, timeout=timeout, retries=retries, rate_limit_backoff=60,
+    )
 
-    if end is None:
-        end = datetime.now().strftime("%Y-%m-%d")
+
+def _check_dates(start: str, end: str) -> None:
     try:
         pd.Timestamp(start)
         pd.Timestamp(end)
@@ -179,35 +180,41 @@ def fetch_nse(
     if pd.Timestamp(start) >= pd.Timestamp(end):
         raise ValueError(f"start ({start}) must be before end ({end})")
 
-    cache_file = _cache_path(symbol, exchange, start, end)
+
+def _cache_max_age(end: str) -> float:
     # If end is today (intraday data still updating), shorten cache freshness so
     # we re-fetch hourly rather than serve a 4h-old snapshot during market hours.
     today_str = datetime.now().strftime("%Y-%m-%d")
-    cache_max_age = 1.0 if end >= today_str else 4.0
-    if use_cache and _cache_is_fresh(cache_file, max_age_hours=cache_max_age):
+    return 1.0 if end >= today_str else 4.0
+
+
+def _read_fresh_cache(cache_file: str, max_age_hours: float) -> Optional[pd.DataFrame]:
+    """The cached frame when the file is fresh, readable and complete; otherwise None."""
+    if not _cache_is_fresh(cache_file, max_age_hours=max_age_hours):
+        return None
+    try:
+        # Cap the cache read at 100MB to defend against a poisoned/oversized cache
+        # file (DoS by exhausting memory). A daily-bar 30-year history of one
+        # symbol is well under 1MB; 100MB is generous headroom.
         try:
-            # Cap the cache read at 100MB to defend against a poisoned/oversized cache
-            # file (DoS by exhausting memory). A daily-bar 30-year history of one
-            # symbol is well under 1MB; 100MB is generous headroom.
-            try:
-                fsize = os.path.getsize(cache_file)
-            except OSError:
-                fsize = 0
-            if fsize > 100 * 1024 * 1024:
-                log.warning("Cache %s is %d bytes (>100MB) — refusing to load, re-fetching",
-                            cache_file, fsize)
-            else:
-                df = pd.read_parquet(cache_file)
-                if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
-                    log.debug("Cache hit %s (%d rows)", symbol, len(df))
-                    return df
-        except Exception as e:
-            log.warning("Corrupt cache %s: %s — re-fetching", cache_file, e)
+            fsize = os.path.getsize(cache_file)
+        except OSError:
+            fsize = 0
+        if fsize > 100 * 1024 * 1024:
+            log.warning("Cache %s is %d bytes (>100MB) — refusing to load, re-fetching",
+                        cache_file, fsize)
+        else:
+            df = pd.read_parquet(cache_file)
+            if len(df) > 0 and all(c in df.columns for c in _REQUIRED_COLS):
+                log.debug("Cache hit %s (%d rows)", cache_file, len(df))
+                return df
+    except Exception as e:
+        log.warning("Corrupt cache %s: %s — re-fetching", cache_file, e)
+    return None
 
-    ticker = f"{symbol}.{exchange}" if exchange else symbol
-    log.info("Fetching %s from %s to %s", ticker, start, end)
-    df = _yf_download(ticker, start, end)
 
+def _clean_download(df: Optional[pd.DataFrame], ticker: str, start: str, end: str) -> pd.DataFrame:
+    """Everything fetch_nse does to a raw yfinance frame. Raises ValueError when unusable."""
     if df is None or df.empty:
         raise ValueError(
             f"No data found for {ticker}. Check the symbol or exchange "
@@ -227,6 +234,8 @@ def fetch_nse(
     df = df.sort_index()
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+    if df.empty:
+        raise ValueError(f"No usable bars for {ticker} after cleaning")
 
     expected = max(1, len(pd.bdate_range(start, end)))
     if len(df) < 0.5 * expected:
@@ -235,14 +244,199 @@ def fetch_nse(
 
     log.info("Loaded %d rows for %s (%s → %s)",
              len(df), ticker, df.index[0].date(), df.index[-1].date())
+    return df
+
+
+def _write_cache(df: pd.DataFrame, cache_file: str, symbol: str) -> None:
+    try:
+        _atomic_write_parquet(df, cache_file)
+    except Exception as e:
+        log.warning("Cache write failed for %s: %s", symbol, e)
+
+
+def fetch_nse(
+    symbol: str,
+    start: str = "2015-01-01",
+    end: Optional[str] = None,
+    exchange: str = "NS",
+    use_cache: bool = True,
+    adjusted: bool = True,
+) -> pd.DataFrame:
+    """Fetch historical OHLCV for an Indian stock.  Symbols are validated.
+
+    ``adjusted=False`` asks yfinance for unadjusted bars (``auto_adjust=False``: no dividend adjustment;
+    yfinance still applies split adjustment) and caches them under their own key."""
+    symbol = _validate_symbol(symbol)
+    exchange = _validate_exchange(exchange)
+
+    if end is None:
+        end = datetime.now().strftime("%Y-%m-%d")
+    _check_dates(start, end)
+
+    cache_file = _cache_path(symbol, exchange, start, end, adjusted)
+    if use_cache:
+        cached = _read_fresh_cache(cache_file, _cache_max_age(end))
+        if cached is not None:
+            return cached
+
+    ticker = f"{symbol}.{exchange}" if exchange else symbol
+    log.info("Fetching %s from %s to %s", ticker, start, end)
+    df = _clean_download(_yf_download(ticker, start, end, adjusted=adjusted), ticker, start, end)
 
     if use_cache:
-        try:
-            _atomic_write_parquet(df, cache_file)
-        except Exception as e:
-            log.warning("Cache write failed for %s: %s", symbol, e)
+        _write_cache(df, cache_file, symbol)
 
     return df
+
+
+def _ticker_frame(data: pd.DataFrame, ticker: str, n_tickers: int) -> Optional[pd.DataFrame]:
+    """One ticker's raw frame from a group_by='ticker' multi download; None if absent.
+
+    The ticker is matched on the ticker level only (level 0 for group_by='ticker'), exactly: a ticker such as
+    LOW must never match the 'Low' price field of another level."""
+    if not isinstance(data.columns, pd.MultiIndex):
+        # yfinance may drop the ticker level for a single ticker
+        return data.copy() if n_tickers == 1 else None
+    if ticker not in set(map(str, data.columns.get_level_values(0))):
+        return None
+    sub = data.xs(ticker, axis=1, level=0).copy()
+    # the batch frame's index is the union of all tickers' dates: rows that are NaN in every
+    # column are padding from other tickers, not bars of this one (a single download has none)
+    sub = sub.dropna(how="all")
+    if sub.empty:
+        return sub
+    # a single-ticker yf.download sorts the price columns; the group_by='ticker' slice keeps history order
+    sub = sub.sort_index(axis=1)
+    # the padding turns an int64 Volume into float64; restore it when every value is integral
+    vol = sub.get("Volume")
+    if isinstance(vol, pd.Series) and pd.api.types.is_float_dtype(vol):
+        finite = vol.notna().all() and bool(((vol % 1) == 0).all())
+        if finite:
+            sub["Volume"] = vol.astype("int64")
+    return sub
+
+
+def fetch_many_daily(
+    symbols,
+    start: str,
+    end: Optional[str] = None,
+    exchange: str = "NS",
+    use_cache: bool = True,
+    refetch_if=None,
+    adjusted: bool = True,
+) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """Daily OHLCV for many symbols with ONE yfinance call for the uncached ones.
+
+    Returns ``(frames, errors)`` keyed by each symbol exactly as given. Every frame equals what
+    ``fetch_nse`` returns for that symbol (same cache files, same download parameters, same
+    cleaning). A failure for one symbol is an ``errors`` entry and never affects the others.
+    ``refetch_if(symbol, cached_df)`` -> True sends a symbol with a fresh cache to the download
+    anyway (served neither from nor, in the fallback, re-read from the cache). If the batch call
+    fails (exception or entirely empty) the uncached symbols are fetched one by one with
+    ``fetch_nse`` instead, so the result is never worse than the per-symbol path.
+    """
+    frames: dict[str, pd.DataFrame] = {}
+    errors: dict[str, str] = {}
+    symbols = list(symbols)
+    if not symbols:
+        return frames, errors
+    try:
+        exchange = _validate_exchange(exchange)
+        if end is None:
+            end = datetime.now().strftime("%Y-%m-%d")
+        _check_dates(start, end)
+    except ValueError as e:
+        return {}, {raw: str(e) for raw in symbols}
+
+    by_symbol: dict[str, list[str]] = {}  # validated symbol -> raw spellings, in input order
+    for raw in symbols:
+        try:
+            sym = _validate_symbol(raw)
+        except ValueError as e:
+            errors[raw] = str(e)
+            continue
+        by_symbol.setdefault(sym, []).append(raw)
+
+    got: dict[str, pd.DataFrame] = {}
+    bad: dict[str, str] = {}
+    pending: list[str] = []
+    forced: set[str] = set()
+    max_age = _cache_max_age(end)
+    for sym in by_symbol:
+        cached = _read_fresh_cache(_cache_path(sym, exchange, start, end, adjusted), max_age) if use_cache else None
+        if cached is not None and refetch_if is not None:
+            try:
+                refetch = bool(refetch_if(sym, cached))
+            except Exception as e:  # noqa: BLE001 - an unusable cache file affects only its own symbol
+                log.warning("Cache for %s unusable (%s) — downloading instead", sym, e)
+                refetch = True
+            if refetch:
+                forced.add(sym)
+                cached = None
+        if cached is None:
+            pending.append(sym)
+        else:
+            got[sym] = cached
+
+    if pending:
+        ticker_of = {sym: (f"{sym}.{exchange}" if exchange else sym) for sym in pending}
+        tickers = [ticker_of[s] for s in pending]
+        label = f"{len(tickers)} tickers" if len(tickers) > 1 else tickers[0]
+        log.info("Fetching %s from %s to %s in one call", label, start, end)
+        try:
+            data = _yf_retry(
+                lambda: yf.download(tickers=tickers, start=start, end=end, group_by="ticker",
+                                    auto_adjust=adjusted, threads=False, progress=False),
+                label, rate_limit_backoff=60,
+            )
+            if data is None or data.empty:
+                raise ValueError("empty response")
+            if not isinstance(data.columns, pd.MultiIndex) and len(tickers) > 1:
+                raise ValueError("response has no ticker level")
+        except Exception as e:  # noqa: BLE001 - fall back to the per-symbol path
+            log.warning("Batch download of %s failed (%s) — fetching one by one", label, e)
+            retry = list(pending)
+        else:
+            # yfinance stores a ticker whose request failed as an empty frame (all-NaN after padding), so a
+            # partly failed batch is not empty and _yf_retry never retried it: retry such tickers one by one
+            retry = []
+            for sym in pending:
+                ticker = ticker_of[sym]
+                raw_df = _ticker_frame(data, ticker, len(tickers))
+                if raw_df is None or raw_df.empty:
+                    retry.append(sym)
+                    continue
+                cols = set(map(str, _flatten_columns(raw_df.copy()).columns))
+                if not cols.issuperset(_REQUIRED_COLS):  # not a price frame (odd layout): ask for it alone
+                    retry.append(sym)
+                    continue
+                try:
+                    df = _clean_download(raw_df, ticker, start, end)
+                except Exception as e:  # noqa: BLE001 - real bars that clean to nothing: same as fetch_nse
+                    bad[sym] = f"{sym}: {e}"
+                    continue
+                if use_cache:
+                    _write_cache(df, _cache_path(sym, exchange, start, end, adjusted), sym)
+                got[sym] = df
+            if retry:
+                log.warning("No bars for %s in the batch download — retrying one by one", ", ".join(retry))
+        batch_failed = len(retry) == len(pending) and not got.keys() & set(pending)
+        for sym in retry:
+            try:
+                got[sym] = fetch_nse(sym, start, end, exchange, use_cache=use_cache and sym not in forced,
+                                     adjusted=adjusted)
+            except Exception as e2:  # noqa: BLE001
+                where = "the batch download failed" if batch_failed else (
+                    f"no bars for {ticker_of[sym]} in the batch download")
+                bad[sym] = f"{sym}: {where}; per-symbol retry failed: {e2}"
+
+    for sym, raws in by_symbol.items():
+        for raw in raws:
+            if sym in got:
+                frames[raw] = got[sym].copy() if len(raws) > 1 else got[sym]
+            else:
+                errors[raw] = bad.get(sym, f"{sym}: no data")
+    return frames, errors
 
 
 def fetch_multiple(
