@@ -1,0 +1,69 @@
+import json
+from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import numpy as np, pandas as pd, pytest
+from nse_backtest.desk.verdict import decide, ticket_lines
+from nse_backtest.desk.service import check_trade
+from nse_backtest.desk.checks import CheckContext
+from nse_backtest.desk.models import Action, Check, Limits, Mode, Sizing, Status, TradePlan
+from nse_backtest.desk.markets import NSE, US
+from nse_backtest.desk.nse_lists import BanList
+
+NOW = datetime(2026, 10, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+P = TradePlan("ABC", "NSE", Mode.SWING, 100, 98, 103, 106, 2, 15, 100, "2026-10-28T00:00:00", "user")
+S = Sizing(250, "position cap", 640.0, 25_000.0, 140.0, False, "250 shares")
+OK = (Check("regime", Status.PASS, ""),)
+
+
+def test_take_ticket_nse_swing():
+    v = decide(P, S, None, OK, NSE, 100.0, NOW)
+    assert v.action is Action.TAKE and v.ticket == ("BUY 250 ABC CNC LIMIT 100.00", "GTT OCO ABC: stop-loss 98.00 / target 103.00")
+    assert v.headline == "TAKE ABC — BUY 250 @ ₹100.00, max loss ₹640.00" and len(v.input_hash) == 64
+
+
+def test_block_means_skip():
+    v = decide(P, S, None, OK + (Check("regime", Status.BLOCK, "x"), Check("gap", Status.WARN, "y")), NSE, 100.0, NOW)
+    assert v.action is Action.SKIP and v.ticket == () and v.headline == "SKIP ABC — blocked by: regime"
+
+
+def test_wait_below_trigger_and_after_runaway():
+    below = decide(P, S, None, OK, NSE, 99.0, NOW)
+    assert below.action is Action.WAIT and below.trigger == 100 and below.ticket[0] == "IF TRIGGERED:"
+    assert decide(P, S, None, OK, NSE, 101.5, NOW).action is Action.WAIT
+
+
+def test_us_and_intraday_tickets():
+    us = ticket_lines(replace(P, market="US"), S, US)
+    assert us == ("BUY 250 ABC LIMIT 100.00 — bracket: stop-loss 98.00, take-profit 103.00, GTC",)
+    mis = ticket_lines(replace(P, mode=Mode.INTRADAY), S, NSE)
+    assert mis[0].startswith("BUY 250 ABC MIS LIMIT") and mis[-1] == "Square off by 15:15 IST"
+
+
+def test_hash_is_stable_and_input_sensitive():
+    a = decide(P, S, None, OK, NSE, 100.0, NOW).input_hash
+    assert a == decide(P, S, None, OK, NSE, 100.0, NOW).input_hash
+    assert a != decide(replace(P, stop=97), S, None, OK, NSE, 100.0, NOW).input_hash
+
+
+def rising(n=400):
+    idx = pd.bdate_range(end="2026-10-28", periods=n)
+    close = 100 * 1.004 ** np.arange(1, n + 1); prev = close / 1.004
+    return pd.DataFrame({"Open": prev, "High": prev * 1.012, "Low": prev * 0.995, "Close": close, "Volume": 5e6}, index=idx)
+
+
+def test_check_trade_end_to_end_writes_audit(tmp_path):
+    c = CheckContext(profile=NSE, limits=Limits(capital=100_000), now=NOW, regime="TRENDING", governor_can_trade=True,
+                     ban=BanList(frozenset(), "ok", None, ""), earnings_checked=True, turnover_20d=1e10, today_gap_pct=0.1)
+    path = tmp_path / "audit.jsonl"
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), c, replays=1000, audit_path=path)
+    assert v.action in (Action.TAKE, Action.WAIT, Action.SKIP) and v.odds is not None
+    assert len(v.checks) == 16
+    line = json.loads(path.read_text().strip().splitlines()[-1])
+    assert line["symbol"] == "ABC" and line["input_hash"] == v.input_hash
+
+
+def test_check_trade_hostile_is_skip(tmp_path):
+    c = CheckContext(profile=NSE, limits=Limits(capital=100_000), now=NOW, regime="HOSTILE")
+    v = check_trade(rising(), "ABC", NSE, Mode.SWING, Limits(capital=100_000), c, replays=500, robustness=False, audit_path=tmp_path / "a.jsonl")
+    assert v.action is Action.SKIP and "regime" in v.headline
