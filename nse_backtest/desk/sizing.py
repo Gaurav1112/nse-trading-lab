@@ -23,6 +23,8 @@ def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
         raise ValueError("capital must be a positive finite number")
     if not (math.isfinite(plan.entry) and math.isfinite(plan.stop)):
         raise ValueError("entry and stop must be finite")
+    if not plan.stop > 0:
+        raise ValueError("stop must be positive")
     R = plan.risk_per_share
     if not R > 0:
         raise ValueError("risk per share must be positive (stop below entry)")
@@ -53,10 +55,18 @@ def size_position(plan: TradePlan, limits: Limits, profile: MarketProfile, *,
     qty = max(0, qty)
 
     if qty < 1:
-        cost_1 = cost(1)
-        note = (f"Stop too wide for your max loss: 1 share risks {profile.money(R + cost_1)} "
-                f"but your limit is {profile.money(budget)}")
-        return Sizing(0, _ORDER[0] if qty_risk < 1 else binding_limit, 0.0, 0.0, 0.0, halve, note)
+        if qty_risk < 1:
+            cost_1 = cost(1)
+            note = (f"Stop too wide for your max loss: 1 share risks {profile.money(R + cost_1)} "
+                    f"but your limit is {profile.money(budget)}")
+            return Sizing(0, _ORDER[0], 0.0, 0.0, 0.0, halve, note)
+        if binding_limit == "position cap":
+            limit_amount = limits.capital * limits.max_position_pct / 100
+        else:
+            limit_amount = limits.capital * (1 - limits.cash_buffer_pct / 100)
+        note = (f"Price too high for your {binding_limit}: 1 share costs {profile.money(plan.entry)} "
+                f"but that limit allows {profile.money(limit_amount)}")
+        return Sizing(0, binding_limit, 0.0, 0.0, 0.0, halve, note)
 
     costs = cost(qty)
     note = f"{qty} shares, limited by {binding_limit}"

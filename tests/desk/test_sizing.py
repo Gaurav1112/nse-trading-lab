@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from nse_backtest.desk.sizing import size_position
 from nse_backtest.desk.models import Limits, Mode, TradePlan
@@ -51,8 +53,16 @@ def test_tie_reports_earlier_limit():
     assert s.qty == 500 and s.binding_limit == "position cap"
 
 
+def test_price_cap_refusal_names_the_real_limit():
+    s = size_position(plan(entry=5000, stop=4990), Limits(capital=10_000), NSE)
+    assert s.qty == 0 and s.binding_limit == "position cap"
+    assert "Price too high" in s.note
+    assert "Stop too wide" not in s.note
+
+
 @pytest.mark.parametrize("kw", [
     dict(limits=Limits(capital=0)), dict(limits=Limits(capital=-5)),
+    dict(limits=Limits(capital=float("inf"))), dict(limits=Limits(capital=float("nan"))),
 ])
 def test_bad_capital_raises(kw):
     with pytest.raises(ValueError):
@@ -63,3 +73,40 @@ def test_bad_capital_raises(kw):
 def test_bad_prices_raise(entry, stop):
     with pytest.raises(ValueError):
         size_position(plan(entry=entry, stop=stop), Limits(capital=100_000), NSE)
+
+
+@pytest.mark.parametrize("entry,stop", [(100, 0), (100, -5), (1, -1)])
+def test_nonpositive_stop_raises(entry, stop):
+    with pytest.raises(ValueError):
+        size_position(plan(entry=entry, stop=stop), Limits(capital=100_000), NSE)
+
+
+def _linear_risk_qty(profile, mode, entry, stop, budget, spread=0.00075):
+    # The brief's linear rule, transcribed literally.
+    R = entry - stop
+    q = math.floor(budget / R)
+    while q > 0 and q * R + round_trip_cost(profile, mode, entry, stop, q, spread) > budget:
+        q -= 1
+    return q
+
+
+_GRID = [
+    (profile, mode, entry, d, capital)
+    for profile, mode in [(NSE, Mode.SWING), (NSE, Mode.INTRADAY), (US, Mode.SWING)]
+    for entry in [37.5, 100, 2450]
+    for d in [0.3, 2, 40]
+    for capital in [5_000, 100_000, 2_500_000]
+    if entry - d > 0
+]
+
+
+@pytest.mark.parametrize("profile,mode,entry,d,capital", _GRID)
+def test_binary_search_equals_linear_rule(profile, mode, entry, d, capital):
+    stop = entry - d
+    budget = capital * 1.0 / 100  # risk_per_trade_pct default
+    expected_risk = _linear_risk_qty(profile, mode, entry, stop, budget)
+    # With 100% position cap and 0% cash buffer, only the risk limit can differ from the cap.
+    expected = min(expected_risk, math.floor(capital / entry))
+    s = size_position(plan(entry=entry, stop=stop, mode=mode, market=profile.code),
+                      Limits(capital=capital, max_position_pct=100, cash_buffer_pct=0), profile)
+    assert s.qty == expected
