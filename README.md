@@ -58,12 +58,14 @@ The Trade Desk turns a stock you are looking at into one sized decision: **TAKE*
 for **NSE** (₹, IST) and **US** (US$, ET) stocks. Each market keeps its own settings, journal rows and
 money formatting; amounts are never mixed across markets.
 
-Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Today's Plan, Check a Trade,
-My Positions, Intraday, Scoreboard), or from the terminal:
+Open it with `streamlit run ui.py` (or `./start.sh`) and pick the **Desk** page (tabs: Choose a Trade, Today's Plan,
+Check a Trade, My Positions, Intraday, Scoreboard), or from the terminal:
 
 ```bash
 python3.13 -m nse_backtest.desk check RELIANCE            # one stock, swing
 python3.13 -m nse_backtest.desk check AAPL --market US --mode intraday
+python3.13 -m nse_backtest.desk check RELIANCE --qty 20     # the money for your own quantity
+python3.13 -m nse_backtest.desk check RELIANCE --choose     # take a WAIT/SKIP anyway (logged as your override)
 python3.13 -m nse_backtest.desk plan                      # today's TAKE / WATCH lists
 python3.13 -m nse_backtest.desk positions                 # HOLD / TIGHTEN_STOP / EXIT
 python3.13 -m nse_backtest.desk scoreboard                # paper record of logged TAKEs (all markets)
@@ -77,6 +79,69 @@ python3.13 -m nse_backtest.desk scoreboard --market US --json
   than 1% past it (intraday: above the stop-limit's limit, so the order would not fill). The ticket is
   shown as "IF TRIGGERED".
 - **SKIP**: at least one check BLOCKs (named in the headline), or there is no usable current price.
+
+### Choose a Trade
+
+The first tab lists every candidate the desk has seen today: the Today's Plan TAKE and WATCH lists and the
+Intraday-tab scan (build them on their own tabs, or press the load button on this tab). A table shows, per
+candidate, the desk's verdict, entry, stop, targets, quantity, max loss, profit at T1 and the win odds. Pick one
+to open its trade card:
+
+- **Money** (at the desk's size, or at a quantity you type in): max loss, profit at T1, profit at T2,
+  reward:risk, expected value, and the share of capital deployed and at risk.
+  - Max loss = quantity × (entry − stop) + round-trip costs. A gap through the stop can lose more, and the
+    card says so.
+  - Profit at T1 (T2) = quantity × (target − entry) − round-trip costs with the exit at that target.
+  - Expected value = Monte Carlo expectancy in R × quantity × (entry − stop). It is blank when there are no odds.
+  - If the desk sized 0 shares (for example the stop is too wide for your risk limit) there is no total to
+    show, so the card gives the per-share loss and profit at T1 and T2 and asks for a quantity.
+- **Breaches**: a quantity you type in that goes past your risk-per-trade, position-size or daily-loss limit is
+  listed in red. The desk still shows the numbers; the decision is yours.
+- **The override gate**: for a WAIT or SKIP the ticket stays hidden until you tick "I choose this anyway". The
+  ticket is then headed "YOUR OVERRIDE — the desk said SKIP" and the choice is logged once per verdict (one
+  row, with the quantity at the first tick; changing the quantity afterwards adds no rows). The CLI does the
+  same with `check --choose`. A WAIT also shows the desk's own conditional ticket ("IF TRIGGERED") without
+  needing an override.
+- **Outcome money**: the Monte Carlo replays turned into money (5th to 95th percentile, median, P(target),
+  P(stop), P(time exit)) and a histogram marking the stop and targets.
+- **Price chart**: recent candles with entry, stop and targets, plus a band built from the stock's own past
+  moves over the trade's hold (intraday: the bars left until flat-by).
+- **Account projection**: the same trade repeated for 10, 20 or 50 trades (20 by default), each
+  drawn from the Monte Carlo replays (else the setup history), at a fixed money risk and no compounding:
+  the 5th, 50th and 95th percentile of the account and the share of runs with a 10% drawdown or a loss.
+- Every projection is a range of the stock's past behaviour, **not a forecast**.
+
+Check a Trade from the terminal prints the same Money block:
+`python3.13 -m nse_backtest.desk check RELIANCE --qty 20` uses your quantity instead of the desk's size
+(breaches are listed), and `--choose` prints and logs the override ticket for a WAIT or SKIP.
+
+### Tickets
+
+Swing: `BUY n SYMBOL CNC LIMIT {entry}` with a GTT OCO for the stop and T1 (US: a LIMIT with a GTC bracket).
+Intraday entries are **stop-limit orders**, so a spike through the entry cannot fill you far above your plan:
+
+- NSE: `BUY n SYMBOL MIS SL trigger {entry} limit {entry_limit}`; US: `BUY n SYMBOL STOP-LIMIT stop {entry}
+  limit {entry_limit}`.
+- The limit is the entry plus the smaller of 0.25R and 0.5% of the entry, rounded up to the tick
+  (R = entry − stop).
+- A line says "Cancel the entry if not filled by HH:MM" (the market's last entry time); the stop and target
+  orders and the flat-by time follow.
+- The Time Machine odds, the Scoreboard and the live check all use the same fill rule and entry window
+  (`nse_backtest/desk/fills.py`). A WAIT shows the desk's own ticket as "IF TRIGGERED".
+
+### Research panel
+
+Under each card, "Load news & earnings" fetches context. It is **display only and never a vote**: it cannot
+change a verdict, a size or a check.
+
+- **US**: recent headlines and 8-K filings from the vendored `trader-news` skill and the latest earnings
+  change from `trader-analyst`. Both query SEC EDGAR, which needs a contact string in the environment before you
+  start the app or the CLI: `export SEC_USER_AGENT="Your Name you@example.com"` (use your own name and email).
+  Without it the SEC part is skipped and the panel says so.
+- **NSE**: the next earnings date and recent dividends and splits, from data the desk has already loaded. There
+  is no news feed for NSE.
+- A failed fetch shows "Research unavailable" with the reason, and pressing the button retries. Results are
+  cached for 30 minutes.
 
 ### The 17 checks
 
@@ -112,7 +177,8 @@ The odds come from the stock's own bars, not from a model. A block-bootstrap Mon
 entry, stop, target and hold thousands of times (fixed seed, stop wins a bar that touches both), giving
 P(target), P(stop) and expectancy in R after costs. A setup history replays every past time the same setup
 fired on that stock. Robustness tests shuffle the trade order (drawdown, losing streaks) and jitter the
-candles to see whether the edge survives noise.
+candles to see whether the edge survives noise. For intraday setups the history and the simulation fill the
+entry with the same stop-limit rule as the ticket, inside the same entry window.
 
 ### The Scoreboard
 
@@ -215,6 +281,9 @@ client is created, so it is not needed to run them):
 ```bash
 python3.13 -m pytest -o addopts=""
 ```
+
+Dependencies are pinned to yfinance 1.x and pandas 3.x in `requirements.txt`; install from it in a fresh
+virtual environment and run the same command there before relying on a change.
 
 ## Project Structure
 

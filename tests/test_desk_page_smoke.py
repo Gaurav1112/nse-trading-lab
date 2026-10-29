@@ -33,8 +33,23 @@ def _no_live_quote(monkeypatch):
     monkeypatch.setattr(loaders, "live_quote", lambda p, s: None)
 
 
+def _last_completed_session(prof=None):
+    """The newest NSE session that has closed as of the wall clock, so the swing freshness check passes at any
+    time of day (a fixed "yesterday" goes stale once today's session closes at 15:30 IST)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from nse_backtest.desk import calendars as cal
+    from nse_backtest.desk.markets import NSE
+    prof = prof or NSE
+    now = datetime.now(ZoneInfo(prof.tz))
+    d = now.date()
+    if cal.is_trading_day(prof, d) and now.time() >= cal.session_close_for(prof, d):
+        return d
+    return cal.previous_trading_day(prof, d)
+
+
 def series(n=400):
-    idx = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=1), periods=n)
+    idx = pd.bdate_range(end=pd.Timestamp(_last_completed_session()), periods=n)
     close = 100 * 1.004 ** np.arange(1, n + 1); prev = close / 1.004
     return pd.DataFrame({"Open": prev, "High": prev * 1.012, "Low": prev * 0.995, "Close": close, "Volume": 5e6}, index=idx)
 
