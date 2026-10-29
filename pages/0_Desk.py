@@ -411,7 +411,12 @@ with tab_intra:
                 if v.action is Action.SKIP:
                     continue
                 with st.expander(f"{v.action.value} — {v.plan.symbol}", expanded=v.action is Action.TAKE):
-                    render_verdict(v, profile, f"intra_{i}", at=istate["at"])
+                    v = desk_card.current_verdict(v, "intra")  # a Re-check below replaces a stale verdict
+                    stale = desk_card.stale_reason(v, profile, desk_card.market_now(profile))
+                    render_verdict(v, profile, f"intra_{i}", at=istate["at"], show_ticket=stale is None)
+                    if stale is not None:  # never a stale ticket: re-check first
+                        desk_card.recheck_prompt(v, profile, limits, "intra", f"intra_{i}_{v.input_hash[:12]}",
+                                                 stale)
         if failures:
             with st.expander(f"Not scanned ({len(failures)})"):
                 for s, why in failures:

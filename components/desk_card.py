@@ -233,6 +233,21 @@ def _log_once(v: DeskVerdict, card) -> None:
                "apart from the desk's picks.")
 
 
+def current_verdict(v: DeskVerdict, key: str) -> DeskVerdict:
+    """``v``, or the verdict a Re-check under ``key`` replaced it with (following re-checks of re-checks)."""
+    for _ in range(8):
+        hit = st.session_state.get((RECHECK_KEY, key, v.input_hash))
+        if not (hit and "ok" in hit) or hit["ok"].input_hash == v.input_hash:
+            break
+        v = hit["ok"]
+    return v
+
+
+def recheck_prompt(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) -> None:
+    """Public form of the stale-verdict prompt (used by the Intraday tab)."""
+    _recheck(v, profile, limits, key, wkey, reason)
+
+
 def _recheck(v: DeskVerdict, profile, limits, key: str, wkey: str, reason: str) -> None:
     """The stale-verdict prompt: no ticket and no override box, only a Re-check that runs the full desk check for
     this symbol and mode and replaces the card's verdict."""
@@ -401,11 +416,7 @@ def render_card(v: DeskVerdict, profile, limits, key: str, *, today: str, header
     """One trade card. ``key`` namespaces the widgets; they are also keyed by the verdict's input hash so a new
     verdict starts from the desk's own quantity and an unticked override box. A Re-check of a stale intraday
     verdict replaces it here (session state), until the page builds a new verdict for the row."""
-    for _ in range(8):  # follow re-checks: each replaces the verdict it was made from
-        hit = st.session_state.get((RECHECK_KEY, key, v.input_hash))
-        if not (hit and "ok" in hit) or hit["ok"].input_hash == v.input_hash:
-            break
-        v = hit["ok"]
+    v = current_verdict(v, key)  # follow re-checks: each replaces the verdict it was made from
     wkey = f"{key}_{v.input_hash[:12]}"
     now = market_now(profile)
     if header:

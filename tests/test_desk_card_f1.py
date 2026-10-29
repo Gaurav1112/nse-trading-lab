@@ -238,3 +238,40 @@ def test_e2_corporate_actions_failure_still_shows_the_earnings_date(monkeypatch,
     assert "Next earnings" in text and "2026-11-12" in text
     assert "dividends/splits unavailable: HTTP 500" in text
     assert "Research unavailable" not in _texts(at.warning)
+
+
+# ---------------------------------------------------------------- round 2, I3: the Intraday tab
+
+def _intraday_tab(monkeypatch, tmp_path, v, fresh=None):
+    from nse_backtest.desk import loaders, session
+    calls = []
+    monkeypatch.setattr(session, "run_intraday", lambda *a, **k: ([v], []))
+    monkeypatch.setattr(session, "run_check", lambda p, sym, mode, limits, **k: calls.append((sym, mode.value)) or fresh)
+    monkeypatch.setattr(loaders, "load_intraday", lambda p, s: pd.DataFrame(
+        columns=["Open", "High", "Low", "Close", "Volume"], index=pd.DatetimeIndex([])))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    at.button(key="desk_scan").click().run()
+    assert not at.exception
+    return at, calls
+
+
+def test_i3_intraday_tab_hides_a_stale_ticket_and_offers_recheck(monkeypatch, tmp_path):
+    _clock(monkeypatch, T)
+    base = _intraday(_base(monkeypatch, tmp_path))
+    old, fresh = _at(base, T, 20), _at(base, T, 0)
+    at, calls = _intraday_tab(monkeypatch, tmp_path, old, fresh)
+    tab = at.tabs[4]
+    assert "BUY" not in " | ".join(c.value for c in tab.code)
+    assert "This intraday verdict is 20 min old — re-check before choosing it" in _texts(tab.warning)
+    btn = next(b for b in tab.button if b.label == "Re-check")
+    btn.click().run()
+    assert not at.exception and calls == [("ABC", "intraday")]
+    assert "BUY" in " | ".join(c.value for c in at.tabs[4].code)
+    assert "20 min old" not in _texts(at.tabs[4].warning)
+
+
+def test_i3_intraday_tab_keeps_a_fresh_ticket(monkeypatch, tmp_path):
+    _clock(monkeypatch, T)
+    at, _ = _intraday_tab(monkeypatch, tmp_path, _at(_intraday(_base(monkeypatch, tmp_path)), T, 3))
+    assert "BUY" in " | ".join(c.value for c in at.tabs[4].code)
+    assert not any(b.label == "Re-check" for b in at.tabs[4].button)
