@@ -237,7 +237,7 @@ else:
 try:
     flips = flip_conditions(regime_df, profile)
 except Exception as e:  # noqa: BLE001
-    flips = (f"Flip conditions unavailable: {e}",)
+    flips = (f"Flip conditions unavailable: {shown(e)}",)
 st.markdown("**What would change it**")
 st.markdown("\n".join(f"- {c}" for c in flips) if flips else "- Regime is already TRENDING")
 regime_name = tape.regime if tape else None

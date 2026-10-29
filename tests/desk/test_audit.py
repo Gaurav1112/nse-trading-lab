@@ -90,3 +90,18 @@ def test_scoreboard_replays_an_override_from_when_it_was_made(tmp_path):
     late = score(datetime(2026, 10, 27, 10, 40, tzinfo=ist))  # chosen after the move
     assert late.candidate.created_at == datetime(2026, 10, 27, 10, 40, tzinfo=ist)
     assert late.status is not OStatus.WON and late.realised_r is None
+
+
+def test_m5_naive_now_is_market_time_not_machine_local(tmp_path, monkeypatch):
+    import time as _time
+    from datetime import datetime
+    monkeypatch.setenv("TZ", "America/Los_Angeles")  # a machine clock far from the market's
+    _time.tzset()
+    v = _verdict(Action.SKIP)
+    (rec,) = [json.loads(x) for x in audit.append_override(v, tmp_path / "a.jsonl", now=datetime(2026, 10, 29, 10, 37))
+              .read_text().splitlines()]
+    try:
+        assert rec["created_at"] == "2026-10-29T10:37:00+05:30"
+    finally:
+        monkeypatch.undo()
+        _time.tzset()

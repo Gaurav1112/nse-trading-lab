@@ -284,3 +284,15 @@ def test_i4_card_labels_expected_value_and_account_projection(monkeypatch, tmp_p
     at, _ = _card_page(monkeypatch, tmp_path, v)
     caps = _texts(at.caption)
     assert caps.count("assumes a fill at the trigger; up to") >= 2  # under expected value and the account chart
+
+
+def test_m1_flip_conditions_failure_is_scrubbed(monkeypatch, tmp_path):
+    from pathlib import Path
+    import nse_backtest.desk.daily as daily
+    home = str(Path.home())
+    _patch_ok(monkeypatch, tmp_path)
+    monkeypatch.setattr(daily, "flip_conditions", lambda *a, **k: (_ for _ in ()).throw(
+        OSError(f"cannot read {home}/regime/[x](https://evil.test).csv")))
+    at = AppTest.from_file(str(_REPO / "pages/0_Desk.py"), default_timeout=120).run()
+    raw = " | ".join(m.value for m in at.markdown)
+    assert "Flip conditions unavailable" in raw and home not in raw and "](https://evil.test)" not in raw

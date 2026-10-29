@@ -71,6 +71,10 @@ def append_override(v: DeskVerdict, path: Path | None = None, *, now: datetime |
     if v.action is Action.TAKE:
         raise ValueError("TAKE verdicts are logged as desk picks, not overrides")
     tz = ZoneInfo(get_profile(v.plan.market).tz)
-    at = (now.astimezone(tz) if now is not None else datetime.now(tz)).isoformat()
+    if now is None:
+        at = datetime.now(tz)
+    else:  # a naive now is market time, never the machine's local zone
+        at = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
+    at = at.isoformat()
     return _append({**_row(v), "created_at": at, "verdict_created_at": v.created_at, "action": "OVERRIDE",
                     "desk_action": v.action.value, "chosen_by": "owner"}, path)
